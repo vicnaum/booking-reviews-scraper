@@ -6,3 +6,4 @@ dist/
 input/*.*
 !input/example.csv
 output/*.*
+!output/example.json
