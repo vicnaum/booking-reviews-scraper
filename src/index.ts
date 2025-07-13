@@ -468,19 +468,38 @@ async function processCsvFile(inputFileName: string): Promise<void> {
 
   console.log(`📊 Found ${urls.length} URLs to process`);
 
-  const allReviews: Review[] = [];
-  const processedHotels: string[] = [];
-  const failedHotels: string[] = [];
+  // Step 1: Extract and deduplicate hotel info
+  const hotelInfoMap = new Map<string, HotelInfo>();
+  const failedUrls: string[] = [];
 
   for (const url of urls) {
     const hotelInfo = extractHotelInfo(url);
     
     if (!hotelInfo) {
       console.log(`❌ Failed to extract hotel info from URL: ${url}`);
-      failedHotels.push(url);
+      failedUrls.push(url);
       continue;
     }
 
+    // Create unique key: hotel_name + country_code
+    const hotelKey = `${hotelInfo.hotel_name}_${hotelInfo.country_code}`;
+    
+    if (!hotelInfoMap.has(hotelKey)) {
+      hotelInfoMap.set(hotelKey, hotelInfo);
+    } else {
+      console.log(`🔄 Duplicate hotel found, skipping: ${hotelInfo.hotel_name} (${hotelInfo.country_code})`);
+    }
+  }
+
+  const uniqueHotels = Array.from(hotelInfoMap.values());
+  console.log(`📊 Found ${urls.length} URLs, deduplicated to ${uniqueHotels.length} unique hotels`);
+
+  // Step 2: Process unique hotels
+  const allReviews: Review[] = [];
+  const processedHotels: string[] = [];
+  const failedHotels: string[] = [];
+
+  for (const hotelInfo of uniqueHotels) {
     console.log(`🏨 Processing hotel: ${hotelInfo.hotel_name} (${hotelInfo.country_code})`);
     
     try {
@@ -503,12 +522,18 @@ async function processCsvFile(inputFileName: string): Promise<void> {
 
   // Summary
   console.log(`\n📋 Summary for ${inputFileName}:`);
+  console.log(`  📊 Total URLs: ${urls.length}`);
+  console.log(`  🔄 Unique hotels: ${uniqueHotels.length}`);
   console.log(`  ✅ Successfully processed: ${processedHotels.length} hotels`);
-  console.log(`  ❌ Failed: ${failedHotels.length} hotels`);
+  console.log(`  ❌ Failed to parse URLs: ${failedUrls.length}`);
+  console.log(`  ❌ Failed to scrape hotels: ${failedHotels.length}`);
   console.log(`  📊 Total reviews: ${allReviews.length}`);
   
+  if (failedUrls.length > 0) {
+    console.log(`  ⚠️  Failed URLs: ${failedUrls.join(', ')}`);
+  }
   if (failedHotels.length > 0) {
-    console.log(`  ⚠️  Failed hotels/URLs: ${failedHotels.join(', ')}`);
+    console.log(`  ⚠️  Failed hotels: ${failedHotels.join(', ')}`);
   }
 }
 
