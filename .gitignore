@@ -4,6 +4,10 @@ dist/
 *.log
 .env
 input/*.*
-!input/example.csv
+!example.csv
 output/*.*
 !output/example.json
+output-csv/
+analytics_results.csv
+docs/
+*.csv

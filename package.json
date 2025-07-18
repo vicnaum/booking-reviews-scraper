@@ -7,6 +7,9 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
+    "analytics": "tsx src/analytics.ts",
+    "analytics:12m": "tsx src/analytics.ts --12m",
+    "transform": "tsx src/transform-to-csv.ts",
     "build": "tsc",
     "lint": "eslint . --ext .ts",
     "format": "prettier --write \"src/**/*.ts\""
