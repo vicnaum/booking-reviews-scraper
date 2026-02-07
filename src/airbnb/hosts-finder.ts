@@ -214,7 +214,7 @@ function createSmartSearchStrategy(polygon: GeoPolygon): Array<{center: number[]
         
         return ranges;
     }
-    const searchArea = turf.polygon(polygon.type === 'Polygon' ? polygon.coordinates : polygon.coordinates[0]);
+    const searchArea = turf.polygon((polygon.type === 'Polygon' ? polygon.coordinates : polygon.coordinates[0]) as any);
     const areaBbox = turf.bbox(searchArea);
     
     // Start with smaller areas (5km radius) for better coverage
