@@ -1,16 +1,27 @@
+---
+name: reviewr
+description: "Scrape and analyze hotel/property reviews from Booking.com and Airbnb. Use when the user wants to: (1) Scrape reviews from a Booking.com or Airbnb URL, (2) Batch scrape reviews from CSV files, (3) Run analytics on scraped reviews, (4) Find Airbnb hosts/agencies in a location, (5) Transform review data between formats. Triggers on mentions of hotel reviews, property reviews, Booking.com, Airbnb, review scraping, or reviewr commands."
+---
+
 # reviewr — Hotel & Property Reviews CLI
+
+Source: https://github.com/vicnaum/booking-reviews-scraper
 
 ## Setup Check
 
-Before using reviewr, verify it's available:
+Before using reviewr, verify it's installed:
 
-```bash
-npx tsx src/cli.ts --version
-```
-
-If using system-wide after build:
 ```bash
 reviewr --version
+```
+
+If not installed, clone and install:
+
+```bash
+git clone https://github.com/vicnaum/booking-reviews-scraper.git
+cd booking-reviews-scraper
+pnpm install
+pnpm build && npm link
 ```
 
 ## Auth / Proxy Setup
