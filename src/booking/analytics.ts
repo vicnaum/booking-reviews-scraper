@@ -900,6 +900,68 @@ function generateCSV(fileStats: FileStats[]): string {
   return [headers.join(','), ...rows.map(row => row.join(','))].join('\n');
 }
 
+export { analyzeOutputFile, generateCSV, generateRawCSV };
+
+export interface RunAnalyticsOptions {
+  rolling12m?: boolean;
+  outputDir?: string;
+}
+
+/**
+ * Run analytics (importable wrapper for CLI)
+ */
+export async function runAnalytics(options: RunAnalyticsOptions = {}): Promise<void> {
+  const rolling12m = options.rolling12m ?? false;
+  const outputDir = options.outputDir ?? OUTPUT_DIR;
+  const outputFiles = getOutputFileNames(rolling12m);
+
+  const modeText = rolling12m ? '12-month rolling ' : '';
+  console.log(`Starting ${modeText}hotel reviews analytics...`);
+
+  if (!fs.existsSync(outputDir)) {
+    console.error(`Output directory not found: ${outputDir}`);
+    process.exit(1);
+  }
+
+  const jsonFiles = fs.readdirSync(outputDir)
+    .filter(file => file.endsWith('.json'))
+    .filter(file => !file.toLowerCase().includes('example'))
+    .filter(file => file.toLowerCase().includes('crete'))
+    .map(file => path.join(outputDir, file))
+    .sort();
+
+  if (jsonFiles.length === 0) {
+    console.log(`No JSON files found in ${outputDir} directory`);
+    return;
+  }
+
+  console.log(`Found ${jsonFiles.length} JSON files to analyze`);
+
+  const allFileStats: FileStats[] = [];
+
+  for (const filePath of jsonFiles) {
+    const fileName = path.basename(filePath);
+    console.log(`Analyzing: ${fileName}`);
+    const stats = analyzeOutputFile(filePath, rolling12m);
+    if (stats) {
+      allFileStats.push(stats);
+      console.log(`  ${stats.total_reviews} high-quality reviews from ${stats.total_hotels} hotels`);
+    }
+  }
+
+  if (allFileStats.length === 0) {
+    console.log('No valid statistics generated');
+    return;
+  }
+
+  const csvContent = generateCSV(allFileStats);
+  fs.writeFileSync(outputFiles.analytics, csvContent);
+  console.log(`Analytics saved to: ${outputFiles.analytics}`);
+
+  generateRawCSV(allFileStats, outputDir, rolling12m, outputFiles.rawData);
+  console.log(`Analytics completed!`);
+}
+
 /**
  * Main analytics function
  */
@@ -1028,8 +1090,11 @@ async function main(): Promise<void> {
   console.log(`\n🎉 ${completionText} (Based on high-quality reviews only)`);
 }
 
-// Run the analytics
-main().catch(error => {
-  console.error('❌ Fatal error:', error);
-  process.exit(1);
-}); 
+// Run the analytics (only when executed directly)
+const isDirectRun = process.argv[1]?.includes('booking/analytics') || process.argv[1]?.includes('booking\\analytics');
+if (isDirectRun) {
+  main().catch(error => {
+    console.error('❌ Fatal error:', error);
+    process.exit(1);
+  });
+} 

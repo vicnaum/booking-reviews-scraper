@@ -46,57 +46,81 @@ PROXY_PASSWORD=your_password
 
 Set `USE_PROXY=false` to disable proxy usage.
 
-## Quick Start
+## Quick Start — `reviewr` CLI
 
-### Booking.com
-
-```bash
-# Scrape reviews (input: data/booking/input/*.csv)
-pnpm start
-
-# Convert JSON output to CSV
-pnpm transform
-
-# Generate analytics
-pnpm analytics
-pnpm analytics:12m    # 12-month rolling window
-```
-
-See [docs/booking.md](docs/booking.md) for detailed documentation.
-
-### Airbnb
+The unified CLI auto-detects the platform from the URL:
 
 ```bash
-# Scrape reviews (input: data/airbnb/input/*.csv)
-pnpm airbnb
+# Scrape a single URL
+reviewr https://www.booking.com/hotel/pl/example.html
+reviewr https://www.airbnb.com/rooms/12345
 
-# Generate analytics
-pnpm analytics:airbnb
-pnpm analytics:airbnb:12m    # 12-month rolling window
+# Batch scrape from CSV files
+reviewr scrape --booking
+reviewr scrape --airbnb
 
-# Find hosts/agencies in an area
-npx tsx src/airbnb/hosts-finder.ts "City, Country"
+# Analytics
+reviewr analytics --booking
+reviewr analytics --airbnb --12m
 
-# Parse host page HTML files
-npx tsx src/airbnb/parse-host-flats.ts
+# Transform JSON to CSV (Booking only)
+reviewr transform
+
+# Find hosts/agencies in a location (Airbnb only)
+reviewr hosts "Gdansk, Poland"
+
+# Parse host HTML pages (Airbnb only)
+reviewr parse-hosts
+
+# Configure proxy
+reviewr auth http://user:pass@host:port
+reviewr auth                                # Check status
 ```
 
-See [docs/airbnb.md](docs/airbnb.md) for detailed documentation.
+### Install system-wide
+
+```bash
+pnpm build && npm link
+```
+
+### Run without installing
+
+```bash
+npx tsx src/cli.ts <command> [options]
+```
+
+### Legacy pnpm scripts (still work)
+
+```bash
+pnpm start              # Booking.com batch scrape
+pnpm airbnb             # Airbnb batch scrape
+pnpm analytics          # Booking analytics
+pnpm analytics:12m      # Booking 12-month rolling
+pnpm analytics:airbnb   # Airbnb analytics
+pnpm transform          # JSON to CSV
+```
+
+See [docs/booking.md](docs/booking.md) and [docs/airbnb.md](docs/airbnb.md) for detailed platform documentation.
 
 ## Project Structure
 
 ```
 booking-reviews-scraper/
 ├── src/
+│   ├── cli.ts                   # Unified CLI entry point (reviewr)
+│   ├── config.ts                # Proxy auth resolution & persistence
+│   ├── utils.ts                 # Platform detection, URL parsing, output helpers
 │   ├── booking/
-│   │   ├── scraper.ts          # Booking.com reviews scraper
-│   │   ├── analytics.ts        # Booking analytics and statistics
-│   │   └── transform-to-csv.ts # JSON to CSV transformer
+│   │   ├── scraper.ts           # Booking.com reviews scraper
+│   │   ├── analytics.ts         # Booking analytics and statistics
+│   │   └── transform-to-csv.ts  # JSON to CSV transformer
 │   └── airbnb/
 │       ├── scraper.ts           # Airbnb reviews scraper
 │       ├── analytics.ts         # Airbnb analytics and statistics
 │       ├── hosts-finder.ts      # Airbnb host/agency finder
 │       └── parse-host-flats.ts  # Host listing HTML parser
+├── skills/
+│   └── reviewr/SKILL.md         # AI agent skill definition
 ├── docs/
 │   ├── booking.md               # Booking.com detailed documentation
 │   └── airbnb.md                # Airbnb detailed documentation
@@ -117,7 +141,31 @@ booking-reviews-scraper/
 └── README.md             # This file
 ```
 
-## Scripts
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `reviewr <url>` | Scrape reviews from URL (auto-detects platform) |
+| `reviewr scrape [path]` | Batch scrape from CSV files |
+| `reviewr analytics [path]` | Run analytics on JSON output |
+| `reviewr transform [path]` | JSON to CSV (Booking only) |
+| `reviewr hosts <location>` | Find hosts/agencies (Airbnb only) |
+| `reviewr parse-hosts [path]` | Parse host HTML pages (Airbnb only) |
+| `reviewr auth [proxy-url]` | Configure/check proxy |
+
+## Global Flags
+
+| Flag | Description |
+|------|-------------|
+| `-p, --print` | Print to stdout instead of writing files |
+| `-f, --format <fmt>` | Output format: json, csv, both |
+| `-o, --output-dir <dir>` | Override output directory |
+| `--proxy <url>` | Use specific proxy URL |
+| `--no-proxy` | Disable proxy |
+| `--booking` | Force Booking.com platform |
+| `--airbnb` | Force Airbnb platform |
+
+## Legacy pnpm Scripts
 
 | Script | Description |
 |--------|-------------|
@@ -130,8 +178,6 @@ booking-reviews-scraper/
 | `pnpm analytics:airbnb` | Generate Airbnb analytics |
 | `pnpm analytics:airbnb:12m` | Generate Airbnb 12-month rolling analytics |
 | `pnpm build` | Build TypeScript to JavaScript |
-| `pnpm lint` | Run ESLint |
-| `pnpm format` | Format code with Prettier |
 
 ## License
 

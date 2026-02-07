@@ -1,11 +1,12 @@
-// scraper.ts
+// src/airbnb/parse-host-flats.ts
 import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import * as path from 'path';
 import * as cheerio from 'cheerio';
 import Papa from 'papaparse';
 
 // Define the structure for our extracted data
-interface ApartmentData {
+export interface ApartmentData {
   id: string | null;
   url: string | null;
   roomType: string | null;
@@ -24,7 +25,7 @@ const outputDir = path.join(__dirname, '../../data/airbnb/output-host');
  * @param htmlContent The HTML content as a string.
  * @returns An array of apartment data objects.
  */
-function parseHtmlForApartments(htmlContent: string): ApartmentData[] {
+export function parseHtmlForApartments(htmlContent: string): ApartmentData[] {
   const $ = cheerio.load(htmlContent);
   const apartments: ApartmentData[] = [];
 
@@ -82,6 +83,45 @@ function parseHtmlForApartments(htmlContent: string): ApartmentData[] {
   return apartments;
 }
 
+export interface RunParseHostsOptions {
+  inputDir?: string;
+  outputDir?: string;
+}
+
+/**
+ * Run parse-hosts (importable wrapper for CLI)
+ */
+export async function runParseHosts(options: RunParseHostsOptions = {}): Promise<void> {
+  const inDir = options.inputDir ?? path.join(__dirname, '../../data/airbnb/input-host');
+  const outDir = options.outputDir ?? path.join(__dirname, '../../data/airbnb/output-host');
+
+  await fs.mkdir(outDir, { recursive: true });
+  const files = await fs.readdir(inDir);
+
+  for (const file of files) {
+    if (path.extname(file) !== '.html') continue;
+    console.log(`Processing file: ${file}...`);
+
+    const inputPath = path.join(inDir, file);
+    const htmlContent = await fs.readFile(inputPath, 'utf-8');
+    const apartmentData = parseHtmlForApartments(htmlContent);
+
+    if (apartmentData.length > 0) {
+      const csvString = Papa.unparse(apartmentData, {
+        header: true,
+        columns: ['id', 'url', 'roomType', 'title', 'ratingScore', 'reviewCount', 'status']
+      });
+      const outputFilename = file.replace(/\.html$/, '.csv');
+      const outputPath = path.join(outDir, outputFilename);
+      await fs.writeFile(outputPath, csvString);
+      console.log(`Created ${outputPath}`);
+    } else {
+      console.log(`No apartment data found in ${file}.`);
+    }
+  }
+  console.log('\nAll files processed.');
+}
+
 /**
  * Main function to run the scraper.
  */
@@ -129,5 +169,8 @@ async function main() {
   }
 }
 
-// Run the main function
-main();
+// Run the main function (only when executed directly)
+const isDirectRun = process.argv[1]?.includes('parse-host-flats') || process.argv[1]?.includes('parse-host-flats');
+if (isDirectRun) {
+  main();
+}

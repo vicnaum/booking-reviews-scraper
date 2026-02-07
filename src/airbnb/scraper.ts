@@ -1,5 +1,5 @@
-// src/airbnb-scraper.ts
-// 
+// src/airbnb/scraper.ts
+//
 // Batch AirBnB reviews scraper with proxy support
 //
 // Proxy Configuration:
@@ -7,7 +7,8 @@
 // - Set USE_PROXY=false in .env to disable proxy
 //
 // Usage:
-//   pnpm tsx src/airbnb-scraper.ts              # Run with proxy enabled (default)
+//   pnpm airbnb                               # Run with proxy enabled (default)
+//   reviewr <airbnb-url>                      # Single URL via CLI
 
 import 'dotenv/config';
 import fetch from 'node-fetch';
@@ -20,19 +21,20 @@ const AIRBNB_API_URL = 'https://www.airbnb.com/api/v3/StaysPdpReviewsQuery/dec1c
 const INPUT_DIR = 'data/airbnb/input';
 const OUTPUT_DIR = 'data/airbnb/output';
 
-// Configuration from environment variables
-const USE_PROXY = process.env.USE_PROXY !== 'false'; // Default to true (proxy enabled)
-
-// Proxy configuration from environment variables
-const PROXY_CONFIG = {
-  host: process.env.PROXY_HOST || '',
-  port: parseInt(process.env.PROXY_PORT || '0'),
-  username: process.env.PROXY_USERNAME || '',
-  password: process.env.PROXY_PASSWORD || ''
-};
-
-// Create proxy URL for HttpsProxyAgent
-const proxyUrl = `http://${PROXY_CONFIG.username}:${PROXY_CONFIG.password}@${PROXY_CONFIG.host}:${PROXY_CONFIG.port}`;
+/**
+ * Get proxy configuration lazily from current environment variables
+ */
+function getProxyConfig() {
+  const USE_PROXY = process.env.USE_PROXY !== 'false';
+  const PROXY_CONFIG = {
+    host: process.env.PROXY_HOST || '',
+    port: parseInt(process.env.PROXY_PORT || '0'),
+    username: process.env.PROXY_USERNAME || '',
+    password: process.env.PROXY_PASSWORD || ''
+  };
+  const proxyUrl = `http://${PROXY_CONFIG.username}:${PROXY_CONFIG.password}@${PROXY_CONFIG.host}:${PROXY_CONFIG.port}`;
+  return { USE_PROXY, PROXY_CONFIG, proxyUrl };
+}
 
 // Browser headers for AirBnB requests
 const BROWSER_HEADERS = {
@@ -61,7 +63,7 @@ const API_HEADERS = {
 };
 
 // Define the structure for a single review object for type safety
-interface AirBnBReview {
+export interface AirBnBReview {
   property_id: string;
   property_title: string;
   review_id: string | null;
@@ -79,7 +81,7 @@ interface AirBnBReview {
   localized_date: string | null;
 }
 
-interface PropertyInfo {
+export interface PropertyInfo {
   id: string;
   url: string;
   room_type: string;
@@ -92,18 +94,19 @@ interface PropertyInfo {
 /**
  * Make HTTP request with retry logic and proxy support using Fetch
  */
-async function makeRequest(url: string, options: any = {}, maxRetries: number = 3): Promise<{ data: string; status: number; statusText: string }> {
+export async function makeRequest(url: string, options: any = {}, maxRetries: number = 3): Promise<{ data: string; status: number; statusText: string }> {
+  const { USE_PROXY, proxyUrl } = getProxyConfig();
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       // Create AbortController for timeout
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 seconds timeout
-      
+
       const fetchOptions: any = {
         ...options,
         signal: controller.signal
       };
-      
+
       // Add proxy if enabled
       if (USE_PROXY) {
         fetchOptions.agent = new HttpsProxyAgent(proxyUrl);
@@ -153,7 +156,7 @@ async function makeRequest(url: string, options: any = {}, maxRetries: number = 
 /**
  * Get AirBnB API key by scraping the main page
  */
-async function getApiKey(): Promise<string> {
+export async function getApiKey(): Promise<string> {
   console.log('🔑 Fetching AirBnB API key...');
   
   const response = await makeRequest(AIRBNB_BASE_URL, {
@@ -175,7 +178,7 @@ async function getApiKey(): Promise<string> {
 /**
  * Read property info from CSV file
  */
-function readPropertiesFromCsv(filePath: string): PropertyInfo[] {
+export function readPropertiesFromCsv(filePath: string): PropertyInfo[] {
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
     const lines = content.split('\n').map(line => line.trim()).filter(line => line.length > 0);
@@ -214,16 +217,16 @@ function readPropertiesFromCsv(filePath: string): PropertyInfo[] {
 /**
  * Check if output file already exists
  */
-function outputFileExists(inputFileName: string): boolean {
+function outputFileExists(inputFileName: string, outputDir: string = OUTPUT_DIR): boolean {
   const outputFileName = inputFileName.replace('.csv', '.json');
-  const outputPath = path.join(OUTPUT_DIR, outputFileName);
+  const outputPath = path.join(outputDir, outputFileName);
   return fs.existsSync(outputPath);
 }
 
 /**
  * Fetch reviews for a single property with pagination
  */
-async function fetchPropertyReviews(apiKey: string, property: PropertyInfo): Promise<AirBnBReview[]> {
+export async function fetchPropertyReviews(apiKey: string, property: PropertyInfo): Promise<AirBnBReview[]> {
   const allReviews: AirBnBReview[] = [];
   const globalId = Buffer.from(`StayListing:${property.id}`).toString('base64');
   let offset = 0;
@@ -366,14 +369,14 @@ function getNestedValue(obj: any, keyPath: string, defaultValue: any = null): an
 /**
  * Save combined reviews to JSON file
  */
-function saveToJson(reviews: AirBnBReview[], inputFileName: string): void {
+export function saveToJson(reviews: AirBnBReview[], inputFileName: string, outputDir: string = OUTPUT_DIR): void {
   // Ensure output directory exists
-  if (!fs.existsSync(OUTPUT_DIR)) {
-    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
   }
 
   const outputFileName = inputFileName.replace('.csv', '.json');
-  const outputPath = path.join(OUTPUT_DIR, outputFileName);
+  const outputPath = path.join(outputDir, outputFileName);
 
   const jsonOutput = {
     input_file: inputFileName,
@@ -391,16 +394,16 @@ function saveToJson(reviews: AirBnBReview[], inputFileName: string): void {
 /**
  * Process a single CSV file
  */
-async function processCsvFile(inputFileName: string, apiKey: string): Promise<void> {
+export async function processCsvFile(inputFileName: string, apiKey: string, inputDir: string = INPUT_DIR, outputDir: string = OUTPUT_DIR): Promise<void> {
   console.log(`\n📁 Processing: ${inputFileName}`);
 
   // Check if output already exists
-  if (outputFileExists(inputFileName)) {
+  if (outputFileExists(inputFileName, outputDir)) {
     console.log(`⏭️  Output file already exists, skipping: ${inputFileName}`);
     return;
   }
 
-  const inputPath = path.join(INPUT_DIR, inputFileName);
+  const inputPath = path.join(inputDir, inputFileName);
   const properties = readPropertiesFromCsv(inputPath);
   
   if (properties.length === 0) {
@@ -436,7 +439,7 @@ async function processCsvFile(inputFileName: string, apiKey: string): Promise<vo
 
   // Save results
   if (allReviews.length > 0) {
-    saveToJson(allReviews, inputFileName);
+    saveToJson(allReviews, inputFileName, outputDir);
   }
 
   // Summary
@@ -452,11 +455,72 @@ async function processCsvFile(inputFileName: string, apiKey: string): Promise<vo
 }
 
 /**
+ * Scrape reviews for a single Airbnb URL (convenience wrapper for CLI)
+ */
+export async function scrapeUrl(url: string): Promise<AirBnBReview[]> {
+  const match = url.match(/airbnb\.com\/rooms\/(\d+)/);
+  if (!match) {
+    throw new Error(`Could not extract room ID from URL: ${url}`);
+  }
+
+  const roomId = match[1];
+  const apiKey = await getApiKey();
+
+  // Construct a minimal PropertyInfo
+  const property: PropertyInfo = {
+    id: roomId,
+    url: url,
+    room_type: 'Unknown',
+    title: `Room ${roomId}`,
+    rating_score: '',
+    review_count: '',
+    status: 'Unknown'
+  };
+
+  return fetchPropertyReviews(apiKey, property);
+}
+
+/**
+ * Run batch scraping on a specific input directory
+ */
+export async function runBatchScrape(inputDir: string = INPUT_DIR, outputDir: string = OUTPUT_DIR): Promise<void> {
+  if (!fs.existsSync(inputDir)) {
+    console.error(`Input directory not found: ${inputDir}`);
+    process.exit(1);
+  }
+
+  const apiKey = await getApiKey();
+
+  const csvFiles = fs.readdirSync(inputDir)
+    .filter(file => file.endsWith('.csv'))
+    .sort();
+
+  if (csvFiles.length === 0) {
+    console.log(`No CSV files found in ${inputDir} directory`);
+    return;
+  }
+
+  console.log(`Found ${csvFiles.length} CSV files to process`);
+
+  for (const csvFile of csvFiles) {
+    try {
+      await processCsvFile(csvFile, apiKey, inputDir, outputDir);
+    } catch (error) {
+      console.error(`Error processing file ${csvFile}:`, error);
+    }
+  }
+
+  console.log('\nBatch processing completed!');
+}
+
+/**
  * Main function to process all CSV files in input directory
  */
 async function main(): Promise<void> {
   console.log('🚀 Starting batch AirBnB reviews scraper...');
-  
+
+  const { USE_PROXY, PROXY_CONFIG } = getProxyConfig();
+
   // Show proxy status
   if (USE_PROXY) {
     if (PROXY_CONFIG.host && PROXY_CONFIG.username) {
@@ -508,8 +572,11 @@ async function main(): Promise<void> {
   console.log('\n🎉 Batch processing completed!');
 }
 
-// --- Run the Scraper ---
-main().catch(error => {
-  console.error('❌ Fatal error:', error);
-  process.exit(1);
-}); 
+// --- Run the Scraper (only when executed directly) ---
+const isDirectRun = process.argv[1]?.includes('airbnb/scraper') || process.argv[1]?.includes('airbnb\\scraper');
+if (isDirectRun) {
+  main().catch(error => {
+    console.error('❌ Fatal error:', error);
+    process.exit(1);
+  });
+} 

@@ -90,7 +90,7 @@ function escapeCsvField(field: string): string {
   return field;
 }
 
-function transformJsonToCsv(jsonFilePath: string): { written: number; filtered: number; total: number } {
+export function transformJsonToCsv(jsonFilePath: string, outputDir: string = 'data/booking/output-csv'): { written: number; filtered: number; total: number } {
   console.log(`Processing: ${jsonFilePath}`);
   
   // Read and parse JSON
@@ -146,7 +146,6 @@ function transformJsonToCsv(jsonFilePath: string): { written: number; filtered: 
   }
   
   // Write CSV file
-  const outputDir = 'data/booking/output-csv';
   if (!fs.existsSync(outputDir)) {
     fs.mkdirSync(outputDir, { recursive: true });
   }
@@ -160,6 +159,50 @@ function transformJsonToCsv(jsonFilePath: string): { written: number; filtered: 
   console.log(`✅ Created: ${csvFilePath} (${reviewsWritten} reviews, filtered out ${filteredCount} low-quality reviews from ${totalReviews} total)`);
   
   return { written: reviewsWritten, filtered: filteredCount, total: totalReviews };
+}
+
+export { parseFullReview, escapeCsvField };
+
+export interface RunTransformOptions {
+  inputDir?: string;
+  outputDir?: string;
+}
+
+/**
+ * Run transform (importable wrapper for CLI)
+ */
+export function runTransform(options: RunTransformOptions = {}): void {
+  const inputDir = options.inputDir ?? 'data/booking/output';
+  const csvOutputDir = options.outputDir ?? 'data/booking/output-csv';
+
+  if (!fs.existsSync(inputDir)) {
+    console.error(`Output directory '${inputDir}' does not exist!`);
+    process.exit(1);
+  }
+
+  const files = fs.readdirSync(inputDir)
+    .filter(file => file.endsWith('.json') && file !== 'example.json')
+    .map(file => path.join(inputDir, file));
+
+  if (files.length === 0) {
+    console.log('No JSON files found to process');
+    return;
+  }
+
+  console.log(`Found ${files.length} JSON files to process`);
+
+  let totalWritten = 0;
+  let totalFiltered = 0;
+  let totalReviews = 0;
+
+  for (const file of files) {
+    const stats = transformJsonToCsv(file, csvOutputDir);
+    totalWritten += stats.written;
+    totalFiltered += stats.filtered;
+    totalReviews += stats.total;
+  }
+
+  console.log(`\nAll files processed! ${totalWritten} reviews written, ${totalFiltered} filtered from ${totalReviews} total`);
 }
 
 function main(): void {
@@ -206,5 +249,8 @@ function main(): void {
   console.log('📋 Low-quality reviews (titles ≤15 characters with no content) have been filtered out.');
 }
 
-// Run the script
-main(); 
+// Run the script (only when executed directly)
+const isDirectRun = process.argv[1]?.includes('transform-to-csv') || process.argv[1]?.includes('transform-to-csv');
+if (isDirectRun) {
+  main();
+} 

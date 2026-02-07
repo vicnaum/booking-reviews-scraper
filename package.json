@@ -1,11 +1,15 @@
 {
-  "name": "ts",
+  "name": "reviewr",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Unified CLI for scraping and analyzing hotel/property reviews from Booking.com and Airbnb",
+  "main": "dist/cli.js",
+  "bin": {
+    "reviewr": "./dist/cli.js"
+  },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "tsx watch src/booking/scraper.ts",
+    "dev:cli": "tsx src/cli.ts",
     "start": "tsx src/booking/scraper.ts",
     "airbnb": "tsx src/airbnb/scraper.ts",
     "analytics": "tsx src/booking/analytics.ts",
@@ -22,6 +26,7 @@
   "license": "ISC",
   "devDependencies": {
     "@types/node": "^24.0.13",
+    "@types/papaparse": "^5.5.2",
     "@typescript-eslint/eslint-plugin": "^8.36.0",
     "@typescript-eslint/parser": "^8.36.0",
     "eslint": "^9.31.0",
@@ -33,6 +38,7 @@
     "@turf/turf": "^7.2.0",
     "axios": "^1.10.0",
     "cheerio": "^1.1.0",
+    "commander": "^14.0.3",
     "dotenv": "^17.2.0",
     "http-proxy-agent": "^7.0.2",
     "https-proxy-agent": "^7.0.6",

@@ -1,5 +1,5 @@
-// src/scraper.ts
-// 
+// src/booking/scraper.ts
+//
 // Batch hotel reviews scraper with proxy support
 //
 // Proxy Configuration:
@@ -8,6 +8,7 @@
 //
 // Usage:
 //   pnpm start                              # Run with proxy enabled (default)
+//   reviewr <booking-url>                   # Single URL via CLI
 
 import 'dotenv/config';
 import fetch from 'node-fetch';
@@ -20,19 +21,20 @@ const BASE_URL = 'https://www.booking.com/reviewlist.en-gb.html';
 const INPUT_DIR = 'data/booking/input';
 const OUTPUT_DIR = 'data/booking/output';
 
-// Configuration from environment variables
-const USE_PROXY = process.env.USE_PROXY !== 'false'; // Default to true (proxy enabled)
-
-// Proxy configuration from environment variables
-const PROXY_CONFIG = {
-  host: process.env.PROXY_HOST || '',
-  port: parseInt(process.env.PROXY_PORT || '0'),
-  username: process.env.PROXY_USERNAME || '',
-  password: process.env.PROXY_PASSWORD || ''
-};
-
-// Create proxy URL for HttpsProxyAgent
-const proxyUrl = `http://${PROXY_CONFIG.username}:${PROXY_CONFIG.password}@${PROXY_CONFIG.host}:${PROXY_CONFIG.port}`;
+/**
+ * Get proxy configuration lazily from current environment variables
+ */
+function getProxyConfig() {
+  const USE_PROXY = process.env.USE_PROXY !== 'false';
+  const PROXY_CONFIG = {
+    host: process.env.PROXY_HOST || '',
+    port: parseInt(process.env.PROXY_PORT || '0'),
+    username: process.env.PROXY_USERNAME || '',
+    password: process.env.PROXY_PASSWORD || ''
+  };
+  const proxyUrl = `http://${PROXY_CONFIG.username}:${PROXY_CONFIG.password}@${PROXY_CONFIG.host}:${PROXY_CONFIG.port}`;
+  return { USE_PROXY, PROXY_CONFIG, proxyUrl };
+}
 
 // It's crucial to set a User-Agent, as many sites block requests without one.
 const BROWSER_HEADERS = {
@@ -44,7 +46,7 @@ const BROWSER_HEADERS = {
 };
 
 // Define the structure for a single review object for type safety - matching Python version fields
-interface Review {
+export interface Review {
   hotel_name: string;
   username: string | null;
   user_country: string | null;
@@ -64,7 +66,7 @@ interface Review {
   owner_resp_text: string | null;
 }
 
-interface HotelInfo {
+export interface HotelInfo {
   hotel_name: string;
   country_code: string;
   url: string;
@@ -73,22 +75,23 @@ interface HotelInfo {
 /**
  * Make HTTP request with retry logic and proxy support using Fetch
  */
-async function makeRequest(url: string, maxRetries: number = 3): Promise<{ data: string; status: number; statusText: string }> {
+export async function makeRequest(url: string, maxRetries: number = 3): Promise<{ data: string; status: number; statusText: string }> {
+  const { USE_PROXY, PROXY_CONFIG, proxyUrl } = getProxyConfig();
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       if (attempt === 1 && USE_PROXY) {
         console.log(`🔗 Using HTTP proxy: ${PROXY_CONFIG.host}:${PROXY_CONFIG.port}`);
       }
-      
+
       // Create AbortController for timeout
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 seconds timeout
-      
+
       const fetchOptions: any = {
         headers: BROWSER_HEADERS,
         signal: controller.signal
       };
-      
+
       // Add proxy if enabled
       if (USE_PROXY) {
         fetchOptions.agent = new HttpsProxyAgent(proxyUrl);
@@ -138,7 +141,7 @@ async function makeRequest(url: string, maxRetries: number = 3): Promise<{ data:
 /**
  * Extract hotel name and country code from booking.com URL
  */
-function extractHotelInfo(url: string): HotelInfo | null {
+export function extractHotelInfo(url: string): HotelInfo | null {
   try {
     // Pattern: https://www.booking.com/hotel/[COUNTRY]/[HOTEL_NAME].[LANG].html
     const regex = /https:\/\/www\.booking\.com\/hotel\/([a-z]{2})\/([^.]+)\./;
@@ -165,7 +168,7 @@ function extractHotelInfo(url: string): HotelInfo | null {
 /**
  * Read URLs from CSV file
  */
-function readUrlsFromCsv(filePath: string): string[] {
+export function readUrlsFromCsv(filePath: string): string[] {
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
     const urls = content.split('\n')
@@ -182,16 +185,16 @@ function readUrlsFromCsv(filePath: string): string[] {
 /**
  * Check if output file already exists
  */
-function outputFileExists(inputFileName: string): boolean {
+function outputFileExists(inputFileName: string, outputDir: string = OUTPUT_DIR): boolean {
   const outputFileName = inputFileName.replace('.csv', '.json');
-  const outputPath = path.join(OUTPUT_DIR, outputFileName);
+  const outputPath = path.join(outputDir, outputFileName);
   return fs.existsSync(outputPath);
 }
 
 /**
  * Scrape reviews for a single hotel
  */
-async function scrapeHotelReviews(hotelInfo: HotelInfo): Promise<Review[]> {
+export async function scrapeHotelReviews(hotelInfo: HotelInfo): Promise<Review[]> {
   console.log(`Starting scraper for hotel: ${hotelInfo.hotel_name} (${hotelInfo.country_code})...`);
 
   try {
@@ -424,14 +427,14 @@ function parseReviewsFromHtml(html: string, hotelName: string): Review[] {
 /**
  * Save combined reviews to JSON file
  */
-function saveToJson(reviews: Review[], inputFileName: string): void {
+export function saveToJson(reviews: Review[], inputFileName: string, outputDir: string = OUTPUT_DIR): void {
   // Ensure output directory exists
-  if (!fs.existsSync(OUTPUT_DIR)) {
-    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
   }
 
   const outputFileName = inputFileName.replace('.csv', '.json');
-  const outputPath = path.join(OUTPUT_DIR, outputFileName);
+  const outputPath = path.join(outputDir, outputFileName);
 
   const jsonOutput = {
     input_file: inputFileName,
@@ -449,16 +452,16 @@ function saveToJson(reviews: Review[], inputFileName: string): void {
 /**
  * Process a single CSV file
  */
-async function processCsvFile(inputFileName: string): Promise<void> {
+export async function processCsvFile(inputFileName: string, inputDir: string = INPUT_DIR, outputDir: string = OUTPUT_DIR): Promise<void> {
   console.log(`\n📁 Processing: ${inputFileName}`);
 
   // Check if output already exists
-  if (outputFileExists(inputFileName)) {
+  if (outputFileExists(inputFileName, outputDir)) {
     console.log(`⏭️  Output file already exists, skipping: ${inputFileName}`);
     return;
   }
 
-  const inputPath = path.join(INPUT_DIR, inputFileName);
+  const inputPath = path.join(inputDir, inputFileName);
   const urls = readUrlsFromCsv(inputPath);
   
   if (urls.length === 0) {
@@ -517,7 +520,7 @@ async function processCsvFile(inputFileName: string): Promise<void> {
 
   // Save results
   if (allReviews.length > 0) {
-    saveToJson(allReviews, inputFileName);
+    saveToJson(allReviews, inputFileName, outputDir);
   }
 
   // Summary
@@ -538,11 +541,55 @@ async function processCsvFile(inputFileName: string): Promise<void> {
 }
 
 /**
+ * Scrape reviews for a single Booking.com URL (convenience wrapper for CLI)
+ */
+export async function scrapeUrl(url: string): Promise<Review[]> {
+  const hotelInfo = extractHotelInfo(url);
+  if (!hotelInfo) {
+    throw new Error(`Could not extract hotel info from URL: ${url}`);
+  }
+  return scrapeHotelReviews(hotelInfo);
+}
+
+/**
+ * Run batch scraping on a specific input directory/file
+ */
+export async function runBatchScrape(inputDir: string = INPUT_DIR, outputDir: string = OUTPUT_DIR): Promise<void> {
+  if (!fs.existsSync(inputDir)) {
+    console.error(`Input directory not found: ${inputDir}`);
+    process.exit(1);
+  }
+
+  const csvFiles = fs.readdirSync(inputDir)
+    .filter(file => file.endsWith('.csv'))
+    .sort();
+
+  if (csvFiles.length === 0) {
+    console.log(`No CSV files found in ${inputDir} directory`);
+    return;
+  }
+
+  console.log(`Found ${csvFiles.length} CSV files to process`);
+
+  for (const csvFile of csvFiles) {
+    try {
+      await processCsvFile(csvFile, inputDir, outputDir);
+    } catch (error) {
+      console.error(`Error processing file ${csvFile}:`, error);
+    }
+  }
+
+  console.log('\nBatch processing completed!');
+}
+
+/**
  * Main function to process all CSV files in input directory
  */
 async function main(): Promise<void> {
   console.log('🚀 Starting batch hotel reviews scraper...');
-  
+
+  const { USE_PROXY, PROXY_CONFIG } = getProxyConfig();
+
   // Show proxy status
   if (USE_PROXY) {
     if (PROXY_CONFIG.host && PROXY_CONFIG.username) {
@@ -585,8 +632,11 @@ async function main(): Promise<void> {
   console.log('\n🎉 Batch processing completed!');
 }
 
-// --- Run the Scraper ---
-main().catch(error => {
-  console.error('❌ Fatal error:', error);
-  process.exit(1);
-});
+// --- Run the Scraper (only when executed directly) ---
+const isDirectRun = process.argv[1]?.includes('booking/scraper') || process.argv[1]?.includes('booking\\scraper');
+if (isDirectRun) {
+  main().catch(error => {
+    console.error('❌ Fatal error:', error);
+    process.exit(1);
+  });
+}

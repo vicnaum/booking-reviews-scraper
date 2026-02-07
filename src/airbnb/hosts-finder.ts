@@ -31,23 +31,28 @@ import * as turf from '@turf/turf';
 const AIRBNB_BASE_URL = 'https://www.airbnb.com';
 const NOMINATIM_BASE_URL = 'https://nominatim.openstreetmap.org';
 const OUTPUT_DIR = 'data/airbnb/output-hosts';
-const AGENCY_THRESHOLD = 5; // Min listings to be considered an agency
 
-// Debug mode - set to true to stop after finding a few listings for testing
-const DEBUG_MODE = process.env.DEBUG_MODE === 'true';
-const DEBUG_MAX_LISTINGS = 10; // Stop after finding this many listings in debug mode
-const DEBUG_MAX_AGENCIES = 3; // Stop after finding this many agencies in debug mode
-const DEBUG_LISTINGS_ONLY = process.env.DEBUG_LISTINGS_ONLY === 'true'; // Only fetch listings, skip host profiles
+/**
+ * Get proxy configuration lazily from current environment variables
+ */
+function getProxyConfig() {
+  const USE_PROXY = process.env.USE_PROXY !== 'false';
+  const PROXY_CONFIG = {
+    host: process.env.PROXY_HOST || '',
+    port: parseInt(process.env.PROXY_PORT || '0'),
+    username: process.env.PROXY_USERNAME || '',
+    password: process.env.PROXY_PASSWORD || ''
+  };
+  const proxyUrl = `http://${PROXY_CONFIG.username}:${PROXY_CONFIG.password}@${PROXY_CONFIG.host}:${PROXY_CONFIG.port}`;
+  return { USE_PROXY, PROXY_CONFIG, proxyUrl };
+}
 
-// --- Proxy Configuration from .env ---
-const USE_PROXY = process.env.USE_PROXY !== 'false';
-const PROXY_CONFIG = {
-  host: process.env.PROXY_HOST || '',
-  port: parseInt(process.env.PROXY_PORT || '0'),
-  username: process.env.PROXY_USERNAME || '',
-  password: process.env.PROXY_PASSWORD || ''
-};
-const proxyUrl = `http://${PROXY_CONFIG.username}:${PROXY_CONFIG.password}@${PROXY_CONFIG.host}:${PROXY_CONFIG.port}`;
+export interface HostsFinderOptions {
+  debug?: boolean;
+  listingsOnly?: boolean;
+  threshold?: number;
+  outputDir?: string;
+}
 
 // --- Headers for Emulating a Browser ---
 const BROWSER_HEADERS: HeadersInit = {
@@ -94,6 +99,7 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
  * Makes an HTTP request with retry logic, proxy support, and timeout.
  */
 async function makeRequest(url: string, options: RequestInit = {}, maxRetries: number = 5): Promise<string> {
+  const { USE_PROXY, proxyUrl } = getProxyConfig();
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const controller = new AbortController();
@@ -234,17 +240,211 @@ function createSmartSearchStrategy(polygon: GeoPolygon): Array<{center: number[]
 }
 
 /**
+ * Run host finder (importable wrapper for CLI)
+ */
+export async function runHostsFinder(location: string, options: HostsFinderOptions = {}): Promise<void> {
+  const AGENCY_THRESHOLD = options.threshold ?? 5;
+  const DEBUG_MODE = options.debug ?? false;
+  const DEBUG_LISTINGS_ONLY = options.listingsOnly ?? false;
+  const outputDir = options.outputDir ?? OUTPUT_DIR;
+  const DEBUG_MAX_LISTINGS = 10;
+  const DEBUG_MAX_AGENCIES = 3;
+
+  const { USE_PROXY, PROXY_CONFIG } = getProxyConfig();
+
+  console.log('🚀 Starting Airbnb Host Finder...');
+
+  if (USE_PROXY) {
+    console.log(`🔗 Proxy enabled: ${PROXY_CONFIG.host}:${PROXY_CONFIG.port}`);
+  } else {
+    console.log('🚫 Proxy disabled.');
+  }
+
+  try {
+    const apiKey = await getApiKey();
+    const geoPolygon = await getGeoPolygon(location);
+    const searchStrategy = createSmartSearchStrategy(geoPolygon);
+
+    const discoveredListingIds = new Set<string>();
+    const discoveredHostIds = new Set<string>();
+    const finalHosts: Host[] = [];
+
+    if (DEBUG_MODE) {
+      console.log(`🐛 DEBUG MODE: Will stop after finding ${DEBUG_MAX_LISTINGS} listings`);
+    }
+    if (DEBUG_LISTINGS_ONLY) {
+      console.log(`🔍 LISTINGS-ONLY MODE: Will only discover listings, skip host profiles`);
+    }
+
+    // Reuse the same search logic from main() — delegating to main's internal implementation
+    // For now, call the existing main logic flow inline
+    console.log('\n--- Stage 1: Discovering Listings with Smart Search ---');
+
+    let searchIndex = 0;
+
+    async function searchArea(center: number[], radius: number, priceRanges: Array<{min: number, max: number}>, depth: number = 0): Promise<void> {
+      const [lng, lat] = center;
+      for (const range of priceRanges) {
+        searchIndex++;
+        const latDelta = radius / 111;
+        const lngDelta = radius / (111 * Math.cos(lat * Math.PI / 180));
+        const ne_lat = lat + latDelta;
+        const ne_lng = lng + lngDelta;
+        const sw_lat = lat - latDelta;
+        const sw_lng = lng - lngDelta;
+
+        const searchUrl = new URL(`${AIRBNB_BASE_URL}/api/v2/explore_tabs`);
+        searchUrl.searchParams.set('search_by_map', 'true');
+        searchUrl.searchParams.set('ne_lat', String(ne_lat));
+        searchUrl.searchParams.set('ne_lng', String(ne_lng));
+        searchUrl.searchParams.set('sw_lat', String(sw_lat));
+        searchUrl.searchParams.set('sw_lng', String(sw_lng));
+        searchUrl.searchParams.set('items_per_grid', '50');
+        searchUrl.searchParams.set('items_offset', '0');
+        searchUrl.searchParams.set('refinement_paths[]', '/homes');
+        searchUrl.searchParams.set('key', apiKey);
+        searchUrl.searchParams.set('currency', 'USD');
+        searchUrl.searchParams.set('price_min', String(range.min));
+        if (range.max < 1000) searchUrl.searchParams.set('price_max', String(range.max));
+
+        try {
+          console.log(`  [${searchIndex}] 🔍 Searching area [${lat.toFixed(3)}, ${lng.toFixed(3)}] radius:${radius}km | Price ${range.min}-${range.max}...`);
+          let allListings: any[] = [];
+          let offset = 0;
+          const limit = 50;
+          let hasNextPage = true;
+
+          while (hasNextPage) {
+            searchUrl.searchParams.set('items_offset', String(offset));
+            const responseText = await makeRequest(searchUrl.toString(), { headers: { 'X-Airbnb-API-Key': apiKey }});
+            const data = JSON.parse(responseText);
+            const listings = data?.explore_tabs?.[0]?.sections?.find((s: any) => s.listings)?.listings || [];
+            allListings.push(...listings);
+            const paginationMetadata = data?.explore_tabs?.[0]?.pagination_metadata;
+            hasNextPage = paginationMetadata?.has_next_page && listings.length > 0;
+            if (hasNextPage) { offset += limit; await sleep(250); }
+          }
+
+          let foundCount = 0;
+          for (const item of allListings) {
+            const listingId = item?.listing?.id;
+            if (listingId && !discoveredListingIds.has(listingId)) {
+              discoveredListingIds.add(listingId);
+              foundCount++;
+              const hostId = item?.listing?.user?.id;
+              if (hostId && !discoveredHostIds.has(hostId)) {
+                discoveredHostIds.add(hostId);
+              }
+            }
+          }
+
+          if (foundCount > 0) {
+            console.log(`    -> Found ${foundCount} new listings. Total unique: ${discoveredListingIds.size}`);
+          }
+
+          if (DEBUG_MODE && discoveredListingIds.size >= DEBUG_MAX_LISTINGS) return;
+        } catch {
+          console.log(`    -> Skipping area due to error.`);
+        }
+        await sleep(500);
+      }
+    }
+
+    for (const area of searchStrategy) {
+      await searchArea(area.center, area.radius, area.priceRanges);
+      if (DEBUG_MODE && discoveredListingIds.size >= DEBUG_MAX_LISTINGS) break;
+    }
+
+    console.log(`\n--- Stage 2: Found ${discoveredHostIds.size} unique hosts ---`);
+
+    if (DEBUG_LISTINGS_ONLY) {
+      console.log(`📊 Summary: ${discoveredListingIds.size} listings, ${discoveredHostIds.size} hosts`);
+      return;
+    }
+
+    console.log('\n--- Stage 3: Fetching Host Profiles ---');
+    const hostIds = Array.from(discoveredHostIds);
+    let hostIndex = 0;
+    let agenciesFound = 0;
+    let consecutiveHostErrors = 0;
+    let currentHostApiKey = apiKey;
+
+    for (const hostId of hostIds) {
+      hostIndex++;
+      const hostUrl = `${AIRBNB_BASE_URL}/api/v2/users/${hostId}`;
+      try {
+        const responseText = await makeRequest(hostUrl, { headers: { 'X-Airbnb-API-Key': currentHostApiKey }});
+        const data = JSON.parse(responseText);
+        const user = data?.user;
+        if (user) {
+          const host: Host = {
+            id: user.id,
+            name: user.host_name || user.first_name || user.full_name || 'Unknown',
+            listingCount: user.listings_count,
+            isAgency: user.listings_count >= AGENCY_THRESHOLD,
+            rating: user.reviewee_rating || null,
+            pictureUrl: user.picture_url || null,
+            profileUrl: `${AIRBNB_BASE_URL}/users/show/${user.id}`
+          };
+          finalHosts.push(host);
+          if (host.isAgency) {
+            agenciesFound++;
+            console.log(`    -> Agency: ${host.name} (${host.listingCount} listings)`);
+            if (DEBUG_MODE && agenciesFound >= DEBUG_MAX_AGENCIES) break;
+          }
+        }
+        consecutiveHostErrors = 0;
+      } catch (error: any) {
+        consecutiveHostErrors++;
+        if (consecutiveHostErrors >= 3) {
+          try { currentHostApiKey = await getApiKey(); consecutiveHostErrors = 0; } catch {}
+        }
+      }
+      await sleep(250);
+    }
+
+    console.log('\n--- Stage 4: Saving Results ---');
+    if (finalHosts.length > 0) {
+      if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+      const safeLocationName = location.split(',')[0].replace(/[^a-z0-9]/gi, '_').toLowerCase();
+      const outputPath = path.join(outputDir, `${safeLocationName}_hosts.csv`);
+      const headers = ['hostId', 'hostName', 'listingCount', 'isAgency', 'hostRating', 'hostPictureUrl', 'profileUrl'];
+      const rows = finalHosts.map(h => [h.id, `"${h.name.replace(/"/g, '""')}"`, h.listingCount, h.isAgency, h.rating, h.pictureUrl, h.profileUrl].join(','));
+      fs.writeFileSync(outputPath, [headers.join(','), ...rows].join('\n'));
+      const agencies = finalHosts.filter(h => h.isAgency);
+      console.log(`✅ Saved ${finalHosts.length} hosts to ${outputPath}`);
+      console.log(`📈 ${agencies.length} potential agencies (>= ${AGENCY_THRESHOLD} listings).`);
+    } else {
+      console.log('⚠️ No hosts were found.');
+    }
+  } catch (error) {
+    console.error('\n❌ Fatal error:', error);
+    process.exit(1);
+  }
+
+  console.log('\n🎉 Scraper finished!');
+}
+
+/**
  * The main scraping function that orchestrates the entire process.
  */
 async function main() {
   console.log('🚀 Starting Airbnb Host Finder...');
-  
+
   const locationQuery = process.argv[2];
   if (!locationQuery) {
     console.error('❌ Error: Please provide a location query as a command-line argument.');
-    console.error('Usage: npx tsx src/find-hosts.ts "City, Country"');
+    console.error('Usage: npx tsx src/airbnb/hosts-finder.ts "City, Country"');
     process.exit(1);
   }
+
+  const AGENCY_THRESHOLD = parseInt(process.env.AGENCY_THRESHOLD || '5');
+  const DEBUG_MODE = process.env.DEBUG_MODE === 'true';
+  const DEBUG_MAX_LISTINGS = 10;
+  const DEBUG_MAX_AGENCIES = 3;
+  const DEBUG_LISTINGS_ONLY = process.env.DEBUG_LISTINGS_ONLY === 'true';
+
+  const { USE_PROXY, PROXY_CONFIG } = getProxyConfig();
 
   if (USE_PROXY) {
     console.log(`🔗 Proxy enabled: ${PROXY_CONFIG.host}:${PROXY_CONFIG.port}`);
@@ -547,4 +747,8 @@ async function main() {
   console.log('\n🎉 Scraper finished!');
 }
 
-main();
+// Run the scraper (only when executed directly)
+const isDirectRun = process.argv[1]?.includes('hosts-finder') || process.argv[1]?.includes('hosts-finder');
+if (isDirectRun) {
+  main();
+}
