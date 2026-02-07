@@ -1,61 +1,86 @@
-# Booking & Airbnb Reviews Scraper
+# reviewr — AI Hotel & Airbnb Comparison Agent
 
-A TypeScript toolkit for batch-scraping hotel and property reviews from Booking.com and Airbnb, with built-in analytics, CSV export, and host/agency discovery tools.
+An AI skill for Claude that compares hotel and rental listings from Booking.com and Airbnb. Give it a bunch of URLs, tell it your priorities, and get back a detailed HTML report with scores, photos, review analysis, and a recommendation on where to book.
+
+Built on top of a TypeScript CLI toolkit (`reviewr`) that handles review scraping, listing detail extraction, analytics, and host discovery.
 
 The code is distributed as-is, no warranties or what-so-ever.
 
-## Features
+## How It Works
 
-- **Batch Processing**: Process multiple hotels/properties from CSV files
-- **Smart Skip Logic**: Automatically skip already processed files
-- **Proxy Support**: Built-in proxy support for all scrapers
-- **Structured Output**: Export reviews to JSON format
-- **Analytics & BI**: Comprehensive business intelligence metrics for both platforms
-- **Host Discovery**: Find all hosts/agencies in a geographic area (Airbnb)
+Paste multiple Booking.com and/or Airbnb listing URLs into Claude and ask it to compare them. The agent will:
 
-## Installation
+1. **Ask about your preferences** — travel dates, priorities (noise, cleanliness, location, bed type, etc.), and deal-breakers
+2. **Scrape listing details and reviews** for each property via the `reviewr` CLI
+3. **Normalize scores** across platforms (Booking.com 0–10, Airbnb 0–5 scaled to 0–10)
+4. **Mine review text** for mentions relevant to your priorities (noise complaints, bed quality, pests, etc.)
+5. **Analyze photos** to assess renovation state, bed type, and general vibe
+6. **Score and rank** properties using weighted dimensions based on your priorities
+7. **Filter out** properties that fail your deal-breakers (bed bugs, wrong bed type, no AC, etc.)
+8. **Generate an HTML report** with property cards, photo embeds, a side-by-side comparison table, and a final recommendation
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/vicnaum/booking-reviews-scraper.git
-   cd booking-reviews-scraper
-   ```
+## Install the Skill
 
-2. **Install dependencies:**
-   ```bash
-   pnpm install
-   ```
+### Claude Desktop App
 
-3. **Set up environment variables:**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your actual proxy credentials
-   ```
+1. Download the [`skills/reviewr/`](skills/reviewr/) folder from this repo (or clone the whole repo)
+2. ZIP the `reviewr` folder so you have `reviewr.zip` containing `reviewr/SKILL.md`
+3. In Claude Desktop, go to **Settings > Capabilities**
+4. Ensure **"Code execution and file creation"** is enabled
+5. In the **Skills** section, click **"Upload skill"** and select `reviewr.zip`
+6. Toggle the skill on
 
-## Configuration
+The skill will now activate automatically when you paste property URLs or ask Claude to compare listings.
 
-Create a `.env` file in the root directory with your proxy configuration:
+> Requires a Claude Pro, Max, Team, or Enterprise plan.
 
-```env
-USE_PROXY=true
-PROXY_HOST=proxy-host.com
-PROXY_PORT=1000
-PROXY_USERNAME=your_username
-PROXY_PASSWORD=your_password
-```
+### Claude Code (CLI)
 
-Set `USE_PROXY=false` to disable proxy usage.
-
-## Quick Start — `reviewr` CLI
-
-The unified CLI auto-detects the platform from the URL:
+Copy the skill folder into your personal skills directory:
 
 ```bash
-# Scrape a single URL
+cp -r skills/reviewr ~/.claude/skills/reviewr
+```
+
+Or for project-scoped use, keep it in your repo's `skills/` directory — Claude Code auto-discovers skills there.
+
+### CLI Setup
+
+The skill uses the `reviewr` CLI under the hood. Install it:
+
+```bash
+git clone https://github.com/vicnaum/booking-reviews-scraper.git
+cd booking-reviews-scraper
+pnpm install
+npx playwright install chromium   # Required for Booking.com listing details
+pnpm build && npm link            # Makes `reviewr` available system-wide
+```
+
+Configure proxy (optional, needed for some regions):
+
+```bash
+reviewr auth http://user:pass@host:port   # Save proxy config
+reviewr auth                               # Check status
+```
+
+## CLI Reference
+
+The `reviewr` CLI can also be used standalone, outside of the AI skill. It auto-detects the platform from the URL.
+
+```bash
+# Single URL — fetch listing details (auto-detects platform)
 reviewr https://www.booking.com/hotel/pl/example.html
 reviewr https://www.airbnb.com/rooms/12345
+reviewr https://www.airbnb.com/rooms/12345 --download-photos
 
-# Batch scrape from CSV files
+# Fetch reviews
+reviewr reviews https://www.booking.com/hotel/pl/example.html
+reviewr reviews https://www.airbnb.com/rooms/12345 -p    # Print to stdout
+
+# Listing details with pricing (Airbnb)
+reviewr details "<airbnb-url>" --checkin 2026-03-29 --checkout 2026-04-04
+
+# Batch scrape reviews from CSV files
 reviewr scrape --booking
 reviewr scrape --airbnb
 
@@ -71,16 +96,6 @@ reviewr hosts "Gdansk, Poland"
 
 # Parse host HTML pages (Airbnb only)
 reviewr parse-hosts
-
-# Configure proxy
-reviewr auth http://user:pass@host:port
-reviewr auth                                # Check status
-```
-
-### Install system-wide
-
-```bash
-pnpm build && npm link
 ```
 
 ### Run without installing
@@ -89,38 +104,69 @@ pnpm build && npm link
 npx tsx src/cli.ts <command> [options]
 ```
 
-### Legacy pnpm scripts (still work)
+## CLI Commands
 
-```bash
-pnpm start              # Booking.com batch scrape
-pnpm airbnb             # Airbnb batch scrape
-pnpm analytics          # Booking analytics
-pnpm analytics:12m      # Booking 12-month rolling
-pnpm analytics:airbnb   # Airbnb analytics
-pnpm transform          # JSON to CSV
+| Command | Description |
+|---------|-------------|
+| `reviewr <url>` | Fetch listing details (both platforms) |
+| `reviewr reviews <url>` | Fetch reviews (both platforms) |
+| `reviewr details <url>` | Fetch listing details (both platforms) |
+| `reviewr scrape [path]` | Batch scrape reviews from CSV files |
+| `reviewr analytics [path]` | Run analytics on JSON output |
+| `reviewr transform [path]` | JSON to CSV (Booking only) |
+| `reviewr hosts <location>` | Find hosts/agencies (Airbnb only) |
+| `reviewr parse-hosts [path]` | Parse host HTML pages (Airbnb only) |
+| `reviewr auth [proxy-url]` | Configure/check proxy |
+
+## Global Flags
+
+| Flag | Description |
+|------|-------------|
+| `-p, --print` | Print to stdout instead of writing files |
+| `-f, --format <fmt>` | Output format: json, csv, both |
+| `-o, --output-dir <dir>` | Override output directory |
+| `--proxy <url>` | Use specific proxy URL |
+| `--no-proxy` | Disable proxy |
+| `--download-photos` | Download listing photos (linked room only for Booking.com) |
+| `--download-photos-all` | Download ALL room photos (Booking.com) |
+| `--booking` | Force Booking.com platform |
+| `--airbnb` | Force Airbnb platform |
+
+## Configuration
+
+Create a `.env` file in the root directory with your proxy configuration:
+
+```env
+USE_PROXY=true
+PROXY_HOST=proxy-host.com
+PROXY_PORT=1000
+PROXY_USERNAME=your_username
+PROXY_PASSWORD=your_password
 ```
 
-See [docs/booking.md](docs/booking.md) and [docs/airbnb.md](docs/airbnb.md) for detailed platform documentation.
+Set `USE_PROXY=false` to disable proxy usage.
 
 ## Project Structure
 
 ```
 booking-reviews-scraper/
+├── skills/
+│   └── reviewr/SKILL.md         # AI comparison agent skill
 ├── src/
 │   ├── cli.ts                   # Unified CLI entry point (reviewr)
 │   ├── config.ts                # Proxy auth resolution & persistence
 │   ├── utils.ts                 # Platform detection, URL parsing, output helpers
 │   ├── booking/
 │   │   ├── scraper.ts           # Booking.com reviews scraper
+│   │   ├── listing.ts           # Booking.com listing details scraper
 │   │   ├── analytics.ts         # Booking analytics and statistics
 │   │   └── transform-to-csv.ts  # JSON to CSV transformer
 │   └── airbnb/
 │       ├── scraper.ts           # Airbnb reviews scraper
+│       ├── listing.ts           # Airbnb listing details scraper
 │       ├── analytics.ts         # Airbnb analytics and statistics
 │       ├── hosts-finder.ts      # Airbnb host/agency finder
 │       └── parse-host-flats.ts  # Host listing HTML parser
-├── skills/
-│   └── reviewr/SKILL.md         # AI agent skill definition
 ├── docs/
 │   ├── booking.md               # Booking.com detailed documentation
 │   └── airbnb.md                # Airbnb detailed documentation
@@ -141,43 +187,7 @@ booking-reviews-scraper/
 └── README.md             # This file
 ```
 
-## CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `reviewr <url>` | Scrape reviews from URL (auto-detects platform) |
-| `reviewr scrape [path]` | Batch scrape from CSV files |
-| `reviewr analytics [path]` | Run analytics on JSON output |
-| `reviewr transform [path]` | JSON to CSV (Booking only) |
-| `reviewr hosts <location>` | Find hosts/agencies (Airbnb only) |
-| `reviewr parse-hosts [path]` | Parse host HTML pages (Airbnb only) |
-| `reviewr auth [proxy-url]` | Configure/check proxy |
-
-## Global Flags
-
-| Flag | Description |
-|------|-------------|
-| `-p, --print` | Print to stdout instead of writing files |
-| `-f, --format <fmt>` | Output format: json, csv, both |
-| `-o, --output-dir <dir>` | Override output directory |
-| `--proxy <url>` | Use specific proxy URL |
-| `--no-proxy` | Disable proxy |
-| `--booking` | Force Booking.com platform |
-| `--airbnb` | Force Airbnb platform |
-
-## Legacy pnpm Scripts
-
-| Script | Description |
-|--------|-------------|
-| `pnpm start` | Run the Booking.com reviews scraper |
-| `pnpm dev` | Booking.com scraper with hot reload |
-| `pnpm airbnb` | Run the Airbnb reviews scraper |
-| `pnpm transform` | Convert Booking.com JSON output to CSV |
-| `pnpm analytics` | Generate Booking.com analytics |
-| `pnpm analytics:12m` | Generate Booking.com 12-month rolling analytics |
-| `pnpm analytics:airbnb` | Generate Airbnb analytics |
-| `pnpm analytics:airbnb:12m` | Generate Airbnb 12-month rolling analytics |
-| `pnpm build` | Build TypeScript to JavaScript |
+See [docs/booking.md](docs/booking.md) and [docs/airbnb.md](docs/airbnb.md) for detailed platform documentation.
 
 ## License
 
