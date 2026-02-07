@@ -23,12 +23,11 @@ Paste multiple Booking.com and/or Airbnb listing URLs into Claude and ask it to 
 
 ### Claude Desktop App
 
-1. Download the [`skills/reviewr/`](skills/reviewr/) folder from this repo (or clone the whole repo)
-2. ZIP the `reviewr` folder so you have `reviewr.zip` containing `reviewr/SKILL.md`
-3. In Claude Desktop, go to **Settings > Capabilities**
-4. Ensure **"Code execution and file creation"** is enabled
-5. In the **Skills** section, click **"Upload skill"** and select `reviewr.zip`
-6. Toggle the skill on
+1. Download [`skills/reviewr/SKILL.md`](skills/reviewr/SKILL.md) from this repo
+2. In Claude Desktop, go to **Settings > Capabilities**
+3. Ensure **"Code execution and file creation"** is enabled
+4. In the **Skills** section, click **"Upload skill"** and select the `SKILL.md` file
+5. Toggle the skill on
 
 The skill will now activate automatically when you paste property URLs or ask Claude to compare listings.
 
