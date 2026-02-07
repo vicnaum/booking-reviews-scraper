@@ -3,11 +3,4 @@ dist/
 .DS_Store
 *.log
 .env
-input/*.*
-!example.csv
-output/*.*
-!output/example.json
-output-csv/
-analytics_results.csv
-docs/
-*.csv
+data/

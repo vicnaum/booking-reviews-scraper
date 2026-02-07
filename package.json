@@ -5,11 +5,14 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
-    "analytics": "tsx src/analytics.ts",
-    "analytics:12m": "tsx src/analytics.ts --12m",
-    "transform": "tsx src/transform-to-csv.ts",
+    "dev": "tsx watch src/booking/scraper.ts",
+    "start": "tsx src/booking/scraper.ts",
+    "airbnb": "tsx src/airbnb/scraper.ts",
+    "analytics": "tsx src/booking/analytics.ts",
+    "analytics:12m": "tsx src/booking/analytics.ts --12m",
+    "analytics:airbnb": "tsx src/airbnb/analytics.ts",
+    "analytics:airbnb:12m": "tsx src/airbnb/analytics.ts --12m",
+    "transform": "tsx src/booking/transform-to-csv.ts",
     "build": "tsc",
     "lint": "eslint . --ext .ts",
     "format": "prettier --write \"src/**/*.ts\""
@@ -27,11 +30,14 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
+    "@turf/turf": "^7.2.0",
     "axios": "^1.10.0",
     "cheerio": "^1.1.0",
     "dotenv": "^17.2.0",
     "http-proxy-agent": "^7.0.2",
     "https-proxy-agent": "^7.0.6",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "papaparse": "^5.5.3",
+    "turf": "^3.0.14"
   }
 }

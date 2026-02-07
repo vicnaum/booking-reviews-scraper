@@ -188,7 +188,7 @@ function filterHighQualityReviews(reviews: Review[]): { filtered: Review[]; remo
   return { filtered, removedCount };
 }
 
-const OUTPUT_DIR = 'output';
+const OUTPUT_DIR = 'data/booking/output';
 
 /**
  * Get output file names based on YTD flag
@@ -196,8 +196,8 @@ const OUTPUT_DIR = 'output';
 function getOutputFileNames(rolling12m: boolean) {
   const suffix = rolling12m ? '_12m' : '';
   return {
-    analytics: `analytics_results${suffix}.csv`,
-    rawData: `raw_reviews_data${suffix}.csv`
+    analytics: `data/booking/analytics_results${suffix}.csv`,
+    rawData: `data/booking/raw_reviews_data${suffix}.csv`
   };
 }
 
@@ -730,6 +730,7 @@ function generateRawCSV(allFileStats: FileStats[], outputDir: string, rolling12m
   const jsonFiles = fs.readdirSync(outputDir)
     .filter(file => file.endsWith('.json'))
     .filter(file => !file.toLowerCase().includes('example'))
+    .filter(file => file.toLowerCase().includes('crete'))
     .map(file => path.join(outputDir, file))
     .sort();
 
@@ -919,6 +920,7 @@ async function main(): Promise<void> {
   const jsonFiles = fs.readdirSync(OUTPUT_DIR)
     .filter(file => file.endsWith('.json'))
     .filter(file => !file.toLowerCase().includes('example'))
+    .filter(file => file.toLowerCase().includes('crete'))
     .map(file => path.join(OUTPUT_DIR, file))
     .sort();
 

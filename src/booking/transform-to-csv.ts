@@ -146,7 +146,7 @@ function transformJsonToCsv(jsonFilePath: string): { written: number; filtered: 
   }
   
   // Write CSV file
-  const outputDir = 'output-csv';
+  const outputDir = 'data/booking/output-csv';
   if (!fs.existsSync(outputDir)) {
     fs.mkdirSync(outputDir, { recursive: true });
   }
@@ -163,8 +163,8 @@ function transformJsonToCsv(jsonFilePath: string): { written: number; filtered: 
 }
 
 function main(): void {
-  const outputDir = 'output';
-  
+  const outputDir = 'data/booking/output';
+
   if (!fs.existsSync(outputDir)) {
     console.error(`Output directory '${outputDir}' does not exist!`);
     process.exit(1);

@@ -17,8 +17,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const BASE_URL = 'https://www.booking.com/reviewlist.en-gb.html';
-const INPUT_DIR = 'input';
-const OUTPUT_DIR = 'output';
+const INPUT_DIR = 'data/booking/input';
+const OUTPUT_DIR = 'data/booking/output';
 
 // Configuration from environment variables
 const USE_PROXY = process.env.USE_PROXY !== 'false'; // Default to true (proxy enabled)
