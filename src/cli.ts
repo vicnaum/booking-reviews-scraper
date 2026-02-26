@@ -52,9 +52,12 @@ function setupProxy(opts: any): void {
   applyProxyToEnv(resolved);
 }
 
-// --- Default command: scrape a single URL ---
+// --- Default command: single URL ---
+// Both platforms: fetches listing details by default
 program
-  .argument('[url]', 'URL to scrape reviews from (auto-detects platform)')
+  .argument('[url]', 'URL to scrape (fetches listing details for both platforms)')
+  .option('--download-photos', 'Download listing photos locally')
+  .option('--download-photos-all', 'Download ALL room photos (Booking.com)')
   .action(async (url: string | undefined, _options: any, command: Command) => {
     // If no URL and no subcommand, show help
     if (!url) {
@@ -72,31 +75,83 @@ program
       process.exit(1);
     }
 
-    console.log(`Scraping ${platform} URL: ${url}`);
+    if (platform === 'booking') {
+      const bookingListing = await import('./booking/listing.js');
+      const details = await bookingListing.scrapeListingDetails(url);
+
+      if (opts.print) {
+        console.log(JSON.stringify(details, null, 2));
+      } else {
+        const outputDir = opts.outputDir || 'data/booking/output';
+        const filename = `listing_${details.id}.json`;
+        bookingListing.saveListingDetails(details, filename, outputDir);
+      }
+
+      if (opts.downloadPhotos || opts.downloadPhotosAll) {
+        const outputDir = opts.outputDir || 'data/booking/output';
+        await bookingListing.downloadPhotos(details, outputDir, { downloadAll: !!opts.downloadPhotosAll });
+      }
+    } else {
+      const { scrapeListingDetails, saveListingDetails, downloadPhotos, parseAirbnbUrl } = await import('./airbnb/listing.js');
+
+      const urlInfo = parseAirbnbUrl(url);
+      const details = await scrapeListingDetails(url, {
+        checkIn: urlInfo.checkIn,
+        checkOut: urlInfo.checkOut,
+        adults: urlInfo.adults,
+      });
+
+      if (opts.print) {
+        console.log(JSON.stringify(details, null, 2));
+      } else {
+        const outputDir = opts.outputDir || 'data/airbnb/output';
+        const filename = `listing_${details.id}.json`;
+        saveListingDetails(details, filename, outputDir);
+      }
+
+      if (opts.downloadPhotos || opts.downloadPhotosAll) {
+        const outputDir = opts.outputDir || 'data/airbnb/output';
+        await downloadPhotos(details, outputDir);
+      }
+    }
+  });
+
+// --- reviews command: fetch reviews for a single URL ---
+program
+  .command('reviews <url>')
+  .description('Fetch reviews for a single URL (auto-detects platform)')
+  .action(async (url: string, _cmdOpts: any, command: Command) => {
+    const opts = command.optsWithGlobals();
+    setupProxy(opts);
+
+    const platform = resolvePlatform(url, opts);
+    if (!platform) {
+      console.error(`Cannot detect platform from URL: ${url}`);
+      process.exit(1);
+    }
+
+    console.log(`Fetching ${platform} reviews: ${url}`);
 
     if (platform === 'booking') {
-      const { scrapeUrl } = await import('./booking/scraper.js');
+      const { scrapeUrl, saveToJson } = await import('./booking/scraper.js');
       const reviews = await scrapeUrl(url);
       if (opts.print) {
         console.log(JSON.stringify(reviews, null, 2));
       } else {
-        const { saveToJson } = await import('./booking/scraper.js');
         const outputDir = opts.outputDir || 'data/booking/output';
-        // Use hotel name from URL as filename
         const urlMatch = url.match(/\/hotel\/[a-z]{2}\/([^.]+)\./);
         const filename = urlMatch ? `${urlMatch[1]}.json` : 'output.json';
         saveToJson(reviews, filename, outputDir);
       }
     } else {
-      const { scrapeUrl } = await import('./airbnb/scraper.js');
+      const { scrapeUrl, saveToJson } = await import('./airbnb/scraper.js');
       const reviews = await scrapeUrl(url);
       if (opts.print) {
         console.log(JSON.stringify(reviews, null, 2));
       } else {
-        const { saveToJson } = await import('./airbnb/scraper.js');
         const outputDir = opts.outputDir || 'data/airbnb/output';
         const urlMatch = url.match(/rooms\/(\d+)/);
-        const filename = urlMatch ? `room_${urlMatch[1]}.json` : 'output.json';
+        const filename = urlMatch ? `room_${urlMatch[1]}_reviews.json` : 'reviews.json';
         saveToJson(reviews, filename, outputDir);
       }
     }
@@ -190,6 +245,68 @@ program
       threshold: parseInt(cmdOpts.threshold),
       outputDir: opts.outputDir || undefined,
     });
+  });
+
+// --- details command (both platforms) ---
+program
+  .command('details <url>')
+  .description('Fetch listing details (auto-detects platform: photos, amenities, ratings, etc.)')
+  .option('--checkin <date>', 'Check-in date (YYYY-MM-DD) for pricing (Airbnb)')
+  .option('--checkout <date>', 'Check-out date (YYYY-MM-DD) for pricing (Airbnb)')
+  .option('--adults <n>', 'Number of adults (Airbnb)', '1')
+  .option('--download-photos', 'Download listing photos locally')
+  .option('--download-photos-all', 'Download ALL room photos (Booking.com)')
+  .action(async (url: string, cmdOpts: any, command: Command) => {
+    const opts = command.optsWithGlobals();
+    setupProxy(opts);
+
+    const platform = resolvePlatform(url, opts);
+    if (!platform) {
+      console.error(`Cannot detect platform from URL: ${url}`);
+      process.exit(1);
+    }
+
+    if (platform === 'booking') {
+      const bookingListing = await import('./booking/listing.js');
+      const details = await bookingListing.scrapeListingDetails(url);
+
+      if (opts.print) {
+        console.log(JSON.stringify(details, null, 2));
+      } else {
+        const outputDir = opts.outputDir || 'data/booking/output';
+        const filename = `listing_${details.id}.json`;
+        bookingListing.saveListingDetails(details, filename, outputDir);
+      }
+
+      if (cmdOpts.downloadPhotos || opts.downloadPhotos || cmdOpts.downloadPhotosAll || opts.downloadPhotosAll) {
+        const outputDir = opts.outputDir || 'data/booking/output';
+        const downloadAll = !!(cmdOpts.downloadPhotosAll || opts.downloadPhotosAll);
+        await bookingListing.downloadPhotos(details, outputDir, { downloadAll });
+      }
+    } else {
+      const { scrapeListingDetails, saveListingDetails, downloadPhotos, parseAirbnbUrl } = await import('./airbnb/listing.js');
+
+      // Auto-extract dates from URL if not provided via flags
+      const urlInfo = parseAirbnbUrl(url);
+      const checkIn = cmdOpts.checkin || urlInfo.checkIn;
+      const checkOut = cmdOpts.checkout || urlInfo.checkOut;
+      const adults = parseInt(cmdOpts.adults) || urlInfo.adults;
+
+      const details = await scrapeListingDetails(url, { checkIn, checkOut, adults });
+
+      if (opts.print) {
+        console.log(JSON.stringify(details, null, 2));
+      } else {
+        const outputDir = opts.outputDir || 'data/airbnb/output';
+        const filename = `listing_${details.id}.json`;
+        saveListingDetails(details, filename, outputDir);
+      }
+
+      if (cmdOpts.downloadPhotos || opts.downloadPhotos || cmdOpts.downloadPhotosAll || opts.downloadPhotosAll) {
+        const outputDir = opts.outputDir || 'data/airbnb/output';
+        await downloadPhotos(details, outputDir);
+      }
+    }
   });
 
 // --- parse-hosts command (Airbnb only) ---

@@ -1,10 +1,102 @@
 # Booking.com Scraper
 
-A TypeScript-based batch scraper for extracting hotel reviews from Booking.com with built-in proxy support.
+A TypeScript-based toolkit for extracting hotel listing details and reviews from Booking.com, with built-in proxy support and analytics.
 
 ## Overview
 
-The scraper uses **Cheerio** for HTML parsing and **node-fetch** with optional proxy support to scrape the Booking.com review pages. It processes multiple hotels from CSV input files, extracts all available reviews, and saves them as structured JSON.
+The toolkit has two main scrapers:
+- **Listing Details** (`src/booking/listing.ts`) — Uses **Playwright** headless browser to bypass Booking.com's AWS WAF JS challenge and extract full property details (name, description, photos, amenities, ratings, coordinates, etc.)
+- **Reviews** (`src/booking/scraper.ts`) — Uses **Cheerio** + **node-fetch** with proxy to scrape review list pages (no WAF on review endpoints)
+
+## Listing Details Scraper
+
+**CLI:** `reviewr <booking-url>` or `reviewr details <booking-url>`
+**Source:** `src/booking/listing.ts`
+
+### How It Works
+
+1. Launches a headless Chromium browser via Playwright
+2. Navigates to the hotel page and waits for AWS WAF JS challenge to resolve
+3. Extracts structured data from the fully-rendered page:
+   - **JSON-LD** (`<script type="application/ld+json">`) for name, description, address, aggregateRating
+   - **`data-testid` selectors** for amenities, sub-ratings, check-in/out times
+   - **`data-atlas-latlng`** attribute for GPS coordinates
+   - **Photo URLs** from `cf.bstatic.com` CDN, normalized to high-res (`max1024x768`), with per-room associations
+   - **Room info** from the availability table (`data-block-id`), with per-room photo mapping
+   - **Linked room ID** from URL query params (`matching_block_id`, `highlighted_blocks`)
+   - **Hidden inputs / script tags** for `hotel_id`
+
+### Usage
+
+```bash
+reviewr https://www.booking.com/hotel/fr/azurene-royal.html         # Save to data/booking/output/
+reviewr https://www.booking.com/hotel/fr/azurene-royal.html -p      # Print JSON to stdout
+reviewr details https://www.booking.com/hotel/fr/azurene-royal.html # Explicit details command
+reviewr details <url> --download-photos                              # Download linked room photos (or all)
+reviewr details <url> --download-photos-all                          # Download ALL room photos
+reviewr details <url> -o /custom/output/dir                         # Custom output directory
+```
+
+### Output
+
+**File naming:** `data/booking/output/listing_<hotel-name>.json`
+
+### Listing Data Structure
+
+```typescript
+interface BookingListingDetails {
+  id: string;                                  // Hotel name slug from URL
+  hotelId: number | null;                      // Numeric hotel ID
+  url: string;                                 // Normalized en-gb URL
+  title: string;                               // Hotel name
+  description: string;                         // Property description
+  propertyType: string | null;                 // Hotel, apartment, etc.
+  stars: number | null;                        // Star rating (1-5)
+  address: {
+    street: string | null;
+    city: string | null;
+    region: string | null;
+    postalCode: string | null;
+    country: string | null;
+    full: string | null;
+  } | null;
+  coordinates: { lat: number; lng: number } | null;
+  photos: {                                           // High-res photo URLs with room associations
+    url: string;
+    caption: string | null;
+    id: string | null;                                 // Photo numeric ID
+    highresUrl: string | null;                         // max1280x900 URL
+    associatedRooms: string[];                         // Room IDs this photo belongs to
+    orientation: string | null;
+    created: string | null;
+  }[];
+  amenities: string[];                         // Facility list
+  rating: number | null;                       // Overall rating (0-10)
+  ratingText: string | null;                   // e.g. "Good", "Exceptional"
+  reviewCount: number | null;                  // Total review count
+  subRatings: Record<string, number> | null;   // e.g. { Staff: 8.8, Cleanliness: 9.1 }
+  checkIn: string | null;                      // e.g. "14:00"
+  checkOut: string | null;                     // e.g. "11:00"
+  linkedRoomId: string | null;                 // Room ID from URL params (matching_block_id)
+  rooms: {                                     // Rooms from availability table
+    id: string;
+    name: string;
+    blockIds: string[];
+    photos: BookingPhoto[];                    // Photos associated with this room
+  }[];
+  scrapedAt: string;                           // ISO timestamp
+}
+```
+
+### Prerequisites
+
+Playwright must be installed with the Chromium browser:
+
+```bash
+npx playwright install chromium
+```
+
+---
 
 ## Reviews Scraper
 
@@ -254,7 +346,21 @@ Before analysis, low-quality reviews are filtered out: reviews with titles <=15 
 
 ---
 
-## Scripts Reference
+## CLI Commands (reviewr)
+
+| Command | Description |
+|---------|-------------|
+| `reviewr <booking-url>` | Fetch listing details (default) |
+| `reviewr details <booking-url>` | Fetch listing details (explicit) |
+| `reviewr details <url> --download-photos` | Fetch details + download linked room photos |
+| `reviewr details <url> --download-photos-all` | Fetch details + download ALL photos |
+| `reviewr reviews <booking-url>` | Fetch reviews for a single URL |
+| `reviewr scrape --booking` | Batch scrape reviews from CSV files |
+| `reviewr analytics --booking` | Run analytics on scraped reviews |
+| `reviewr analytics --booking --12m` | 12-month rolling analytics |
+| `reviewr transform` | Convert JSON reviews to CSV |
+
+## Legacy pnpm Scripts
 
 | Script | Description |
 |--------|-------------|
