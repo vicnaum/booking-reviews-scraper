@@ -2,9 +2,9 @@
   "name": "reviewr",
   "version": "1.0.0",
   "description": "Unified CLI for scraping and analyzing hotel/property reviews from Booking.com and Airbnb",
-  "main": "dist/cli.js",
+  "main": "dist/src/cli.js",
   "bin": {
-    "reviewr": "./dist/cli.js"
+    "reviewr": "./dist/src/cli.js"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",

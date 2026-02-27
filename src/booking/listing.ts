@@ -43,6 +43,7 @@ export interface BookingListingDetails {
   checkOut: string | null;
   linkedRoomId: string | null;
   rooms: BookingRoom[];
+  pricing: BookingPricing | null;
   scrapedAt: string;
 }
 
@@ -72,9 +73,24 @@ export interface BookingRoom {
   photos: BookingPhoto[];
 }
 
+export interface BookingPricing {
+  currency: string | null;
+  rooms: BookingRoomPrice[];
+}
+
+export interface BookingRoomPrice {
+  roomName: string;
+  roomId: string;
+  pricePerNight: string | null;
+  totalPrice: string | null;
+  occupancy: string | null;
+  mealPlan: string | null;
+  cancellation: string | null;
+}
+
 // --- Playwright page fetching ---
 
-async function fetchHotelPageHtml(url: string): Promise<string> {
+async function fetchHotelPageHtml(url: string, options?: { hasDates?: boolean }): Promise<string> {
   const { chromium } = await import('playwright');
 
   console.log('  Launching headless browser...');
@@ -108,6 +124,43 @@ async function fetchHotelPageHtml(url: string): Promise<string> {
       await page.waitForSelector('[data-testid="property-description"], #property_description_content', { timeout: 10000 });
     } catch {
       // Page may have loaded but without the expected selector — use what we have
+    }
+
+    // When dates are provided, also wait for the availability/pricing table
+    if (options?.hasDates) {
+      try {
+        console.log('  Waiting for availability table...');
+        await page.waitForSelector('.hprt-table', { timeout: 10000 });
+      } catch {
+        // Availability table may not appear for some properties
+      }
+    }
+
+    // Try expanding description "Read more" button
+    try {
+      const descButton = page.locator('[data-testid="property-description"] button').first();
+      if (await descButton.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await descButton.click();
+        await page.waitForTimeout(500);
+      }
+    } catch {
+      // Expansion not available
+    }
+
+    // Try expanding facilities/amenities section
+    try {
+      const facilitiesButtons = page.locator('button:has-text("Show all facilities"), button:has-text("See all facilities"), button:has-text("Show all amenities")');
+      const count = await facilitiesButtons.count();
+      for (let i = 0; i < count; i++) {
+        try {
+          await facilitiesButtons.nth(i).click();
+          await page.waitForTimeout(500);
+        } catch {
+          // Individual button click failed
+        }
+      }
+    } catch {
+      // Expansion not available
     }
 
     html = await page.content();
@@ -258,6 +311,136 @@ function parseRooms($: cheerio.CheerioAPI, photos: BookingPhoto[]): BookingRoom[
   }));
 }
 
+/**
+ * Parse pricing info from the availability table.
+ * Requires dates to be present in the URL for Booking to show prices.
+ */
+function parsePricing($: cheerio.CheerioAPI): BookingPricing | null {
+  const rows = $('tr[data-block-id]');
+  if (rows.length === 0) return null;
+
+  // Detect currency from the page
+  let currency: string | null = null;
+  const currencyEl = $('input[name="selected_currency"]');
+  if (currencyEl.length) {
+    currency = currencyEl.attr('value') || null;
+  }
+  if (!currency) {
+    // Try to extract from price text
+    const priceText = $('.bui-price-display__value, .prco-valign-middle-helper, [data-testid="price-and-discounted-price"]').first().text();
+    const currencyMatch = priceText.match(/(USD|EUR|GBP|[A-Z]{3}|[$\u20AC\u00A3\u00A5])/);
+    if (currencyMatch) currency = currencyMatch[1];
+  }
+
+  const roomPrices: BookingRoomPrice[] = [];
+  const seenRooms = new Map<string, boolean>();
+
+  rows.each((_, el) => {
+    const $row = $(el);
+    const blockId = $row.attr('data-block-id') || '';
+    const roomIdMatch = blockId.match(/^(\d+)/);
+    if (!roomIdMatch) return;
+
+    const roomId = roomIdMatch[1];
+    // Only take the first (cheapest) option per room
+    if (seenRooms.has(roomId)) return;
+    seenRooms.set(roomId, true);
+
+    // Room name
+    let roomName = '';
+    const nameLink = $row.find('.hprt-roomtype-link');
+    if (nameLink.length) {
+      roomName = cleanText(nameLink.text());
+    }
+
+    // Price - try multiple selectors
+    let totalPrice: string | null = null;
+    const priceEl = $row.find('.bui-price-display__value, .prco-valign-middle-helper, [data-testid="price-and-discounted-price"]').first();
+    if (priceEl.length) {
+      totalPrice = cleanText(priceEl.text());
+    }
+
+    // Per night price (some layouts show this separately)
+    let pricePerNight: string | null = null;
+    const perNightEl = $row.find('.hprt-price-price-per-night, .bui-price-display__per-night').first();
+    if (perNightEl.length) {
+      pricePerNight = cleanText(perNightEl.text());
+    }
+
+    // Occupancy
+    let occupancy: string | null = null;
+    const occupancyEl = $row.find('.hprt-occupancy-occupancy-info .bui-u-sr-only, [data-testid="occupancy-popup"]').first();
+    if (occupancyEl.length) {
+      occupancy = cleanText(occupancyEl.text());
+    }
+
+    // Meal plan
+    let mealPlan: string | null = null;
+    const mealEl = $row.find('.hprt-facilities-facility span, [data-testid="meal-plan"]').first();
+    if (mealEl.length) {
+      const text = cleanText(mealEl.text());
+      if (text.toLowerCase().includes('breakfast') || text.toLowerCase().includes('meal') || text.toLowerCase().includes('dinner')) {
+        mealPlan = text;
+      }
+    }
+
+    // Cancellation
+    let cancellation: string | null = null;
+    const cancelEl = $row.find('.bui-badge--outline, .hprt-conditions-text, [data-testid="cancellation-policy"]').first();
+    if (cancelEl.length) {
+      cancellation = cleanText(cancelEl.text());
+    }
+
+    roomPrices.push({
+      roomName,
+      roomId,
+      pricePerNight,
+      totalPrice,
+      occupancy,
+      mealPlan,
+      cancellation,
+    });
+  });
+
+  if (roomPrices.length === 0) return null;
+
+  return { currency, rooms: roomPrices };
+}
+
+/**
+ * Extract facility names from the Apollo cache embedded in the page.
+ * The cache is in a <script data-capla-store-data="apollo" type="application/json"> tag.
+ */
+function parseApolloFacilities(html: string): string[] {
+  const marker = 'data-capla-store-data="apollo"';
+  const idx = html.indexOf(marker);
+  if (idx === -1) return [];
+
+  const jsonStart = html.indexOf('>', idx) + 1;
+  const jsonEnd = html.indexOf('</script>', jsonStart);
+  if (jsonEnd === -1 || jsonStart <= 0) return [];
+
+  try {
+    const apollo = JSON.parse(html.substring(jsonStart, jsonEnd));
+    const facilities = new Set<string>();
+
+    for (const [key, val] of Object.entries(apollo) as [string, any][]) {
+      // Instance entries (individual facilities)
+      if (key.startsWith('Instance:') && val?.title) {
+        facilities.add(val.title);
+      }
+      // FacilityHighlight entries (includes room-level amenities like Private bathroom)
+      if (key.includes('FacilityHighlight') && val?.title) {
+        facilities.add(val.title);
+      }
+    }
+
+    return [...facilities];
+  } catch {
+    return [];
+  }
+}
+
 function parseHotelPage(html: string): Partial<BookingListingDetails> {
   const $ = cheerio.load(html);
   const result: Partial<BookingListingDetails> = {};
@@ -329,16 +512,20 @@ function parseHotelPage(html: string): Partial<BookingListingDetails> {
     result.stars = starSpans.length;
   }
 
-  // --- Description (fallback if JSON-LD didn't have it) ---
-  if (!result.description) {
+  // --- Description (DOM typically has longer text than JSON-LD) ---
+  {
+    let domDescription = '';
     const descEl = $('[data-testid="property-description"]');
     if (descEl.length) {
-      result.description = cleanText(descEl.text());
+      domDescription = cleanText(descEl.text());
     } else {
       const fallback = $('#property_description_content, .hp_desc_main_content');
       if (fallback.length) {
-        result.description = cleanText(fallback.text());
+        domDescription = cleanText(fallback.text());
       }
+    }
+    if (domDescription && domDescription.length > (result.description?.length || 0)) {
+      result.description = domDescription;
     }
   }
 
@@ -374,22 +561,38 @@ function parseHotelPage(html: string): Partial<BookingListingDetails> {
   // --- Rooms ---
   result.rooms = parseRooms($, result.photos);
 
-  // --- Amenities ---
+  // --- Pricing ---
+  result.pricing = parsePricing($);
+
+  // --- Amenities (merge from all sources) ---
   const amenities: string[] = [];
+  // Most popular facilities
   $('[data-testid="property-most-popular-facilities-wrapper"] span').each((_, el) => {
     const text = cleanText($(el).text());
     if (text && !amenities.includes(text)) {
       amenities.push(text);
     }
   });
-  // Also try the facility checklist items
-  if (amenities.length === 0) {
-    $('.facilitiesChecklist li, [data-testid="facility-list-item"]').each((_, el) => {
-      const text = cleanText($(el).text());
-      if (text && !amenities.includes(text)) {
-        amenities.push(text);
-      }
-    });
+  // Facility checklist items
+  $('.facilitiesChecklist li, [data-testid="facility-list-item"]').each((_, el) => {
+    const text = cleanText($(el).text());
+    if (text && !amenities.includes(text)) {
+      amenities.push(text);
+    }
+  });
+  // Full facility groups (expandable sections)
+  $('.hp-facility-group li, [data-testid="property-section--content"] .facility-list__content li').each((_, el) => {
+    const text = cleanText($(el).text());
+    if (text && !amenities.includes(text)) {
+      amenities.push(text);
+    }
+  });
+  // Apollo cache (most complete source — has all facilities including JS-rendered ones)
+  const apolloFacilities = parseApolloFacilities(html);
+  for (const name of apolloFacilities) {
+    if (name && !amenities.includes(name)) {
+      amenities.push(name);
+    }
   }
   result.amenities = amenities;
 
@@ -450,7 +653,10 @@ function parseHotelPage(html: string): Partial<BookingListingDetails> {
 
 // --- Main API functions ---
 
-export async function scrapeListingDetails(url: string): Promise<BookingListingDetails> {
+export async function scrapeListingDetails(
+  url: string,
+  options?: { checkIn?: string; checkOut?: string; adults?: number }
+): Promise<BookingListingDetails> {
   // Extract linked room ID from original URL before normalization strips params
   const linkedRoomId = extractLinkedRoomId(url);
 
@@ -459,15 +665,42 @@ export async function scrapeListingDetails(url: string): Promise<BookingListingD
     throw new Error(`Could not extract hotel info from URL: ${url}`);
   }
 
-  // Normalize URL to en-gb locale
-  const normalizedUrl = `https://www.booking.com/hotel/${hotelInfo.country_code}/${hotelInfo.hotel_name}.en-gb.html`;
+  // Auto-extract dates from URL params if not provided via options
+  let checkIn = options?.checkIn;
+  let checkOut = options?.checkOut;
+  let adults = options?.adults;
+  try {
+    const parsed = new URL(url);
+    if (!checkIn) checkIn = parsed.searchParams.get('checkin') || undefined;
+    if (!checkOut) checkOut = parsed.searchParams.get('checkout') || undefined;
+    if (!adults) {
+      const urlAdults = parsed.searchParams.get('group_adults');
+      if (urlAdults) adults = parseInt(urlAdults);
+    }
+  } catch {
+    // URL parsing failed
+  }
+
+  // Normalize URL to en-gb locale, preserving date/adults params
+  const baseUrl = `https://www.booking.com/hotel/${hotelInfo.country_code}/${hotelInfo.hotel_name}.en-gb.html`;
+  const normalizedParams = new URLSearchParams();
+  if (checkIn) normalizedParams.set('checkin', checkIn);
+  if (checkOut) normalizedParams.set('checkout', checkOut);
+  if (adults) normalizedParams.set('group_adults', String(adults));
+  const qs = normalizedParams.toString();
+  const normalizedUrl = qs ? `${baseUrl}?${qs}` : baseUrl;
+
+  const hasDates = !!(checkIn && checkOut);
 
   console.log(`Scraping Booking.com listing: ${hotelInfo.hotel_name}`);
+  if (hasDates) {
+    console.log(`  Dates: ${checkIn} to ${checkOut}${adults ? `, ${adults} adults` : ''}`);
+  }
   if (linkedRoomId) {
     console.log(`  Linked room ID: ${linkedRoomId}`);
   }
 
-  const html = await fetchHotelPageHtml(normalizedUrl);
+  const html = await fetchHotelPageHtml(normalizedUrl, { hasDates });
   const parsed = parseHotelPage(html);
 
   return {
@@ -490,6 +723,7 @@ export async function scrapeListingDetails(url: string): Promise<BookingListingD
     checkOut: parsed.checkOut || null,
     linkedRoomId,
     rooms: parsed.rooms || [],
+    pricing: hasDates ? (parsed.pricing || null) : null,
     scrapedAt: new Date().toISOString(),
   };
 }

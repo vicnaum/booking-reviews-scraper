@@ -77,6 +77,7 @@ program
 
     if (platform === 'booking') {
       const bookingListing = await import('./booking/listing.js');
+      // Default command auto-extracts dates from URL params
       const details = await bookingListing.scrapeListingDetails(url);
 
       if (opts.print) {
@@ -92,14 +93,10 @@ program
         await bookingListing.downloadPhotos(details, outputDir, { downloadAll: !!opts.downloadPhotosAll });
       }
     } else {
-      const { scrapeListingDetails, saveListingDetails, downloadPhotos, parseAirbnbUrl } = await import('./airbnb/listing.js');
+      const { scrapeListingDetails, saveListingDetails, downloadPhotos } = await import('./airbnb/listing.js');
 
-      const urlInfo = parseAirbnbUrl(url);
-      const details = await scrapeListingDetails(url, {
-        checkIn: urlInfo.checkIn,
-        checkOut: urlInfo.checkOut,
-        adults: urlInfo.adults,
-      });
+      // Airbnb scrapeListingDetails already auto-extracts dates from URL
+      const details = await scrapeListingDetails(url);
 
       if (opts.print) {
         console.log(JSON.stringify(details, null, 2));
@@ -251,9 +248,9 @@ program
 program
   .command('details <url>')
   .description('Fetch listing details (auto-detects platform: photos, amenities, ratings, etc.)')
-  .option('--checkin <date>', 'Check-in date (YYYY-MM-DD) for pricing (Airbnb)')
-  .option('--checkout <date>', 'Check-out date (YYYY-MM-DD) for pricing (Airbnb)')
-  .option('--adults <n>', 'Number of adults (Airbnb)', '1')
+  .option('--checkin <date>', 'Check-in date (YYYY-MM-DD) for pricing')
+  .option('--checkout <date>', 'Check-out date (YYYY-MM-DD) for pricing')
+  .option('--adults <n>', 'Number of adults', '1')
   .option('--download-photos', 'Download listing photos locally')
   .option('--download-photos-all', 'Download ALL room photos (Booking.com)')
   .action(async (url: string, cmdOpts: any, command: Command) => {
@@ -268,7 +265,11 @@ program
 
     if (platform === 'booking') {
       const bookingListing = await import('./booking/listing.js');
-      const details = await bookingListing.scrapeListingDetails(url);
+      const details = await bookingListing.scrapeListingDetails(url, {
+        checkIn: cmdOpts.checkin || undefined,
+        checkOut: cmdOpts.checkout || undefined,
+        adults: cmdOpts.adults ? parseInt(cmdOpts.adults) : undefined,
+      });
 
       if (opts.print) {
         console.log(JSON.stringify(details, null, 2));
@@ -321,6 +322,75 @@ program
       inputDir: fileOrDir || undefined,
       outputDir: opts.outputDir || undefined,
     });
+  });
+
+// --- preprocess command ---
+program
+  .command('preprocess <files...>')
+  .description('Preprocess URL files: deduplicate, detect dates, classify by platform')
+  .action(async (files: string[]) => {
+    const { preprocessFiles } = await import('./preprocess.js');
+    const result = preprocessFiles(files);
+    console.log(JSON.stringify(result, null, 2));
+  });
+
+// --- batch command ---
+program
+  .command('batch [files...]')
+  .description('Batch fetch details, reviews, and photos for URLs in text files')
+  .option('--details', 'Fetch listing details')
+  .option('--reviews', 'Fetch reviews')
+  .option('--photos', 'Download photos')
+  .option('--checkin <date>', 'Check-in date (YYYY-MM-DD)')
+  .option('--checkout <date>', 'Check-out date (YYYY-MM-DD)')
+  .option('--adults <n>', 'Number of adults')
+  .option('--force', 'Re-fetch even if output exists')
+  .option('--retry', 'Retry failed/partial listings from manifest')
+  .option('--download-photos-all', 'Download ALL room photos (Booking.com)')
+  .action(async (files: string[], cmdOpts: any, command: Command) => {
+    const opts = command.optsWithGlobals();
+    setupProxy(opts);
+
+    if (files.length === 0 && !cmdOpts.retry) {
+      console.error('Error: provide URL files or use --retry to retry failures from manifest.');
+      process.exit(1);
+    }
+
+    // If no phase flags specified, fetch all
+    const hasPhaseFlag = cmdOpts.details || cmdOpts.reviews || cmdOpts.photos;
+
+    const { runBatch } = await import('./batch.js');
+    await runBatch(files, {
+      fetchDetails: hasPhaseFlag ? !!cmdOpts.details : true,
+      fetchReviews: hasPhaseFlag ? !!cmdOpts.reviews : true,
+      fetchPhotos: hasPhaseFlag ? !!cmdOpts.photos : true,
+      checkIn: cmdOpts.checkin || undefined,
+      checkOut: cmdOpts.checkout || undefined,
+      adults: cmdOpts.adults ? parseInt(cmdOpts.adults) : undefined,
+      force: !!cmdOpts.force,
+      retryFailed: !!cmdOpts.retry,
+      downloadPhotosAll: !!(cmdOpts.downloadPhotosAll || opts.downloadPhotosAll),
+      outputDir: opts.outputDir || undefined,
+      print: !!opts.print,
+    });
+  });
+
+// --- refresh-hash command ---
+program
+  .command('refresh-hash')
+  .description('Refresh Airbnb API hashes via Playwright (fixes stale pricing)')
+  .action(async () => {
+    const { refreshHashesViaPlaywright, loadHashes } = await import('./airbnb/hash-manager.js');
+    console.log('Current hashes:');
+    const current = loadHashes();
+    console.log(`  Listing: ${current.listingHash.substring(0, 16)}...`);
+    console.log(`  Reviews: ${current.reviewsHash.substring(0, 16)}...`);
+    console.log(`  Last refreshed: ${current.lastRefreshed || 'never'}\n`);
+
+    const newHashes = await refreshHashesViaPlaywright();
+    console.log('\nNew hashes:');
+    console.log(`  Listing: ${newHashes.listingHash.substring(0, 16)}...`);
+    console.log(`  Reviews: ${newHashes.reviewsHash.substring(0, 16)}...`);
   });
 
 // --- auth command ---

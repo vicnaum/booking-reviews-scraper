@@ -21,11 +21,19 @@ When the user provides multiple listing URLs and wants help choosing where to st
 
 ### Phase 0: Requirements Gathering
 
-Before scraping anything, ask the user:
+Before scraping anything:
 
-1. **Dates** — If check-in/check-out dates aren't already in the URLs, ask: "Do you want date-specific pricing and availability, or just a general quality comparison?" If they provide dates, use them for Airbnb pricing via `--checkin`/`--checkout` flags.
+1. **Preprocess URLs** — If the user provides URL files or multiple URLs, run preprocessing first:
+   ```bash
+   reviewr preprocess <file1> [file2] ...
+   ```
+   This deduplicates URLs (by room ID for Airbnb, hotel name for Booking), classifies them by platform, and detects dates embedded in URL query params. The output tells you:
+   - How many unique Airbnb/Booking URLs there are and how many duplicates were removed
+   - Whether dates are `unanimous` (all URLs agree), `conflicting` (URLs have different dates), or `none` (no dates in URLs)
 
-2. **Priorities** — Ask what matters most. Suggest common dimensions and ask them to pick their top 3–5 or provide custom ones:
+2. **Dates** — If preprocessing found `unanimous` dates, use those automatically. If `conflicting`, show the user what was found and ask which dates to use. If `none`, ask: "Do you want date-specific pricing and availability, or just a general quality comparison?" Use dates for both Airbnb AND Booking pricing via `--checkin`/`--checkout` flags.
+
+3. **Priorities** — Ask what matters most. Suggest common dimensions and ask them to pick their top 3–5 or provide custom ones:
    - Sleep quality / noise levels
    - Cleanliness
    - Location / walkability
@@ -45,12 +53,28 @@ Before scraping anything, ask the user:
 
 ### Phase 1: Data Collection
 
-For each listing URL, collect two datasets:
+**Preferred: batch command** — fetches details, reviews, and photos for all URLs at once with skip-if-exists, error recovery, and progress tracking:
+
+```bash
+# Fetch everything (details + reviews + photos) for all URLs
+reviewr batch rome-booking.txt rome-airbnb.txt
+
+# With explicit dates (overrides dates in URLs)
+reviewr batch rome-booking.txt rome-airbnb.txt --checkin YYYY-MM-DD --checkout YYYY-MM-DD --adults 3
+
+# Fetch only what you need
+reviewr batch urls.txt --details                     # Only listing details
+reviewr batch urls.txt --details --reviews           # Details + reviews, no photos
+```
+
+The batch command auto-detects dates from URLs (if unanimous), deduplicates, and skips already-fetched data. Use `--force` to re-fetch.
+
+**Alternative: per-URL commands** (for single URLs or debugging):
 
 ```bash
 # 1. Listing details — photos, amenities, ratings, rooms, pricing
-reviewr details <url> -p                                    # Booking.com
-reviewr details <url> --checkin YYYY-MM-DD --checkout YYYY-MM-DD -p  # Airbnb with pricing
+reviewr details <url> -p                                                   # Without pricing
+reviewr details <url> --checkin YYYY-MM-DD --checkout YYYY-MM-DD -p        # With pricing (both platforms)
 
 # 2. Reviews — full text with scores and dates
 reviewr reviews <url> -p
@@ -59,7 +83,7 @@ reviewr reviews <url> -p
 reviewr details <url> --download-photos
 ```
 
-Run commands for different URLs in parallel where possible.
+Run per-URL commands for different URLs in parallel where possible.
 
 **What you get from listing details:**
 - Title, address, coordinates
@@ -68,14 +92,14 @@ Run commands for different URLs in parallel where possible.
 - Overall rating and sub-ratings
 - Check-in/check-out times
 - Room types, bed arrangements, linked room ID
-- Pricing (Airbnb only, when dates provided)
+- Pricing (both platforms, when dates provided via `--checkin`/`--checkout`)
 
 **What you get from reviews:**
 - Full review texts with scores and dates
 - Reviewer country, stay type, room info
 - Owner/host responses
 
-**Booking.com pricing note:** Booking.com prices are dynamic and user-specific (Genius levels, logged-in discounts). If the user wants price comparison, ask them to provide the per-night prices they see for each Booking.com listing. Alternatively, skip price comparison for Booking.com and focus on quality metrics.
+**Booking.com pricing:** When dates are provided via `--checkin`/`--checkout`, the scraper loads the hotel page with dates and extracts room pricing from the availability table. Note that prices are dynamic and may differ from what logged-in users see (Genius levels, member discounts). The scraper returns the first (cheapest) option per room type with total price, meal plan, and cancellation terms.
 
 If a Booking.com URL contains a specific room selection (via `matching_block_id` in the URL), the listing details will include a `linkedRoomId` — use this room's photos as the representative for that property.
 
@@ -296,7 +320,7 @@ reviewr hosts "Barcelona, Spain" --listings-only
 ```bash
 # Booking.com — full listing with room-aware photos
 reviewr details https://www.booking.com/hotel/pl/example.html -p
-reviewr details https://www.booking.com/hotel/pl/example.html
+reviewr details <booking-url> --checkin 2026-03-29 --checkout 2026-04-04  # With pricing
 
 # Airbnb — full listing with optional pricing
 reviewr details https://www.airbnb.com/rooms/12345 -p
@@ -305,9 +329,43 @@ reviewr details "<url-with-dates>"                                   # Auto-extr
 reviewr details <url> --download-photos                              # Download photos
 ```
 
-**Booking.com returns:** title, description, address, coordinates, photos (high-res, with per-room associations), rooms (with photo mapping), linked room ID, amenities, star rating, overall rating, sub-ratings (Staff, Cleanliness, Location, etc.), review count, check-in/out times. Use `--download-photos` for linked room's photos only, `--download-photos-all` for all photos.
+**Booking.com returns:** title, description, address, coordinates, photos (high-res, with per-room associations), rooms (with photo mapping), linked room ID, amenities, star rating, overall rating, sub-ratings (Staff, Cleanliness, Location, etc.), review count, check-in/out times, pricing (when dates provided: room prices, meal plans, cancellation terms). Use `--download-photos` for linked room's photos only, `--download-photos-all` for all photos.
 
 **Airbnb returns:** title, description, photos, amenities, host info, house rules, coordinates, ratings, sleeping arrangements, pricing (when dates provided).
+
+### Preprocess URL files
+
+```bash
+reviewr preprocess rome-booking.txt rome-airbnb.txt  # Deduplicate and detect dates
+```
+
+Returns JSON with classified URLs, duplicate counts, and detected dates (unanimous/conflicting/none).
+
+### Batch fetch (details + reviews + photos)
+
+```bash
+reviewr batch rome-booking.txt rome-airbnb.txt          # Fetch everything
+reviewr batch urls.txt --details                         # Only listing details
+reviewr batch urls.txt --reviews                         # Only reviews
+reviewr batch urls.txt --details --photos                # Details + photos, no reviews
+reviewr batch urls.txt --checkin 2026-03-16 --checkout 2026-03-21 --adults 3
+reviewr batch urls.txt --force                           # Re-fetch even if output exists
+reviewr batch --retry                                    # Retry all failures from last manifest
+reviewr batch --retry --details                          # Retry only failed details
+reviewr batch urls.txt --retry                           # Process new URLs + retry failures
+```
+
+Reads URL files, deduplicates, auto-detects dates from URLs, and fetches details + reviews + photos for all listings with skip-if-exists, error recovery, and progress reporting. If no `--details`/`--reviews`/`--photos` flags specified, fetches all three. If any specified, only those.
+
+Saves a manifest to `data/batch_manifest.json` tracking per-listing, per-phase status (`fetched`, `skipped`, `failed`, `partial`). Use `--retry` to re-process only failed/partial listings. Photos are checked for completeness (file count vs expected) and re-downloaded if incomplete.
+
+Output files: `listing_{id}.json` (details), `room_{id}_reviews.json` or `{id}_reviews.json` (reviews), `photos_{id}/` (photos) in the platform's output directory.
+
+### Refresh Airbnb API hashes
+
+```bash
+reviewr refresh-hash   # Fix stale Airbnb pricing (auto-detected, usually not needed)
+```
 
 ### Parse host HTML pages (Airbnb only)
 

@@ -16,8 +16,9 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import * as fs from 'fs';
 import * as path from 'path';
 
+import { getReviewsApiUrl, getReviewsHash } from './hash-manager.js';
+
 const AIRBNB_BASE_URL = 'https://www.airbnb.com';
-const AIRBNB_API_URL = 'https://www.airbnb.com/api/v3/StaysPdpReviewsQuery/dec1c8061483e78373602047450322fd474e79ba9afa8d3dbbc27f504030f91d/';
 const INPUT_DIR = 'data/airbnb/input';
 const OUTPUT_DIR = 'data/airbnb/output';
 
@@ -291,10 +292,10 @@ async function fetchReviewsFromOffset(
   const extension = {
     persistedQuery: {
       version: 1,
-      sha256Hash: "dec1c8061483e78373602047450322fd474e79ba9afa8d3dbbc27f504030f91d",
+      sha256Hash: getReviewsHash(),
     },
   };
-  
+
   const queryParams = new URLSearchParams({
     operationName: "StaysPdpReviewsQuery",
     locale: "en",
@@ -302,8 +303,8 @@ async function fetchReviewsFromOffset(
     variables: JSON.stringify(variablesData),
     extensions: JSON.stringify(extension),
   });
-  
-  const url = `${AIRBNB_API_URL}?${queryParams.toString()}`;
+
+  const url = `${getReviewsApiUrl()}?${queryParams.toString()}`;
   
   const headers = {
     ...API_HEADERS,

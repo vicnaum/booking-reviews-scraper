@@ -11,8 +11,7 @@ import 'dotenv/config';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getApiKey, makeRequest } from './scraper.js';
-
-const SECTIONS_API_URL = 'https://www.airbnb.com/api/v3/StaysPdpSections/80c7889b4b0027d99ffea830f6c0d4911a6e863a957cbe1044823f0fc746bf1f';
+import { getSectionsApiUrl, getListingHash, isStaleHash, refreshHashesViaPlaywright, invalidateSessionCache } from './hash-manager.js';
 const OUTPUT_DIR = 'data/airbnb/output';
 
 const API_HEADERS = {
@@ -252,7 +251,8 @@ function parseSections(sections: any[], metadata: any): Partial<AirbnbListingDet
     // Cancellation policy
     const cancellation = policiesSection.cancellationPolicyForDisplay;
     if (cancellation) {
-      result.cancellationPolicy = cancellation.title || JSON.stringify(cancellation);
+      const subtitles = (cancellation.subtitles || []).filter(Boolean);
+      result.cancellationPolicy = cancellation.title || subtitles.join(' ') || null;
     }
   }
 
@@ -336,6 +336,29 @@ function parseSections(sections: any[], metadata: any): Partial<AirbnbListingDet
     }
   }
 
+  // Fallback: parse bedrooms/beds/bathrooms from metadata.sharingConfig.title
+  // Format: "Rental unit in Rome · ★4.64 · 1 bedroom · 2 beds · 1 bath"
+  const sharingTitle = metadata?.sharingConfig?.title;
+  if (sharingTitle && typeof sharingTitle === 'string') {
+    if (result.bedrooms == null) {
+      const bedroomMatch = sharingTitle.match(/(\d+)\s*bedroom/);
+      if (bedroomMatch) result.bedrooms = parseInt(bedroomMatch[1]);
+    }
+    if (result.beds == null) {
+      const bedMatch = sharingTitle.match(/(\d+)\s*bed(?!room)/);
+      if (bedMatch) result.beds = parseInt(bedMatch[1]);
+    }
+    if (result.bathrooms == null) {
+      const bathMatch = sharingTitle.match(/(\d+)\s*bath/);
+      if (bathMatch) result.bathrooms = parseInt(bathMatch[1]);
+    }
+  }
+
+  // Fallback: personCapacity for capacity
+  if (result.capacity == null && metadata?.sharingConfig?.personCapacity != null) {
+    result.capacity = metadata.sharingConfig.personCapacity;
+  }
+
   // Extract listing ID from metadata
   const loggingContext = metadata?.loggingContext?.eventDataLogging;
   if (loggingContext) {
@@ -355,60 +378,200 @@ export async function fetchListingDetails(
   options?: { checkIn?: string; checkOut?: string; adults?: number }
 ): Promise<AirbnbListingDetails> {
   const globalId = Buffer.from(`StayListing:${roomId}`).toString('base64');
+  const demandId = Buffer.from(`DemandStayListing:${roomId}`).toString('base64');
 
   const pdpSectionsRequest: any = {
     adults: String(options?.adults || 1),
+    amenityFilters: null,
+    bypassTargetings: false,
+    categoryTag: null,
+    causeId: null,
     children: null,
+    disasterId: null,
+    discountedGuestFeeVersion: null,
+    federatedSearchId: null,
+    forceBoostPriorityMessageType: null,
+    hostPreview: false,
     infants: null,
-    pets: 0,
+    interactionType: null,
     layouts: ['SIDEBAR', 'SINGLE_COLUMN'],
+    pets: 0,
+    pdpTypeOverride: null,
+    photoId: null,
+    preview: false,
+    previousStateCheckIn: null,
+    previousStateCheckOut: null,
+    priceDropSource: null,
+    privateBooking: false,
+    promotionUuid: null,
+    relaxedAmenityIds: null,
+    searchId: null,
+    selectedCancellationPolicyId: null,
+    selectedRatePlanId: null,
+    splitStays: null,
+    staysBookingMigrationEnabled: false,
+    translateUgc: null,
+    useNewSectionWrapperApi: false,
+    sectionIds: null,
+    checkIn: options?.checkIn || null,
+    checkOut: options?.checkOut || null,
+    p3ImpressionId: `p3_${Date.now()}_auto`,
   };
 
-  if (options?.checkIn) pdpSectionsRequest.checkIn = options.checkIn;
-  if (options?.checkOut) pdpSectionsRequest.checkOut = options.checkOut;
-
-  const variables = { id: globalId, pdpSectionsRequest };
-
-  const extensions = {
-    persistedQuery: {
-      version: 1,
-      sha256Hash: '80c7889b4b0027d99ffea830f6c0d4911a6e863a957cbe1044823f0fc746bf1f',
-    },
+  const variables: any = {
+    id: globalId,
+    demandStayListingId: demandId,
+    pdpSectionsRequest,
+    includeHotelFragments: false,
+    categoryTag: null,
+    federatedSearchId: null,
+    p3ImpressionId: pdpSectionsRequest.p3ImpressionId,
+    photoId: null,
+    includePdpMigrationDescriptionFragment: false,
+    includeGpDescriptionFragment: true,
+    includePdpMigrationHighlightsFragment: false,
+    includeGpHighlightsFragment: true,
+    includePdpMigrationNavFragment: false,
+    includeGpNavFragment: true,
+    includePdpMigrationNavMobileFragment: false,
+    includeGpNavMobileFragment: true,
+    includePdpMigrationReviewsHighlightBannerFragment: false,
+    includeGpReviewsHighlightBannerFragment: true,
+    includePdpMigrationReportToAirbnbFragment: false,
+    includeGpReportToAirbnbFragment: true,
+    includePdpMigrationReviewsFragment: false,
+    includeGpReviewsFragment: true,
+    includePdpMigrationReviewsEmptyFragment: false,
+    includeGpReviewsEmptyFragment: true,
+    includePdpMigrationTitleFragment: false,
+    includeGpTitleFragment: true,
   };
 
-  const queryParams = new URLSearchParams({
-    operationName: 'StaysPdpSections',
-    locale: 'en',
-    currency: 'USD',
-    variables: JSON.stringify(variables),
-    extensions: JSON.stringify(extensions),
-  });
+  const makeApiCall = async (currentHash: string, sectionsRequest: any, vars: any) => {
+    const extensions = {
+      persistedQuery: {
+        version: 1,
+        sha256Hash: currentHash,
+      },
+    };
 
-  const url = `${SECTIONS_API_URL}?${queryParams.toString()}`;
+    const queryParams = new URLSearchParams({
+      operationName: 'StaysPdpSections',
+      locale: 'en',
+      currency: 'USD',
+      variables: JSON.stringify(vars),
+      extensions: JSON.stringify(extensions),
+    });
 
-  const response = await makeRequest(url, {
-    headers: { ...API_HEADERS, 'X-Airbnb-Api-Key': apiKey },
-  });
+    const apiUrl = `${getSectionsApiUrl()}?${queryParams.toString()}`;
+    return makeRequest(apiUrl, {
+      headers: { ...API_HEADERS, 'X-Airbnb-Api-Key': apiKey },
+    });
+  };
 
-  const json = JSON.parse(response.data);
+  let currentHash = getListingHash();
+  let response = await makeApiCall(currentHash, pdpSectionsRequest, variables);
+  let json = JSON.parse(response.data);
 
   if (json.errors) {
     throw new Error(`API error: ${json.errors[0]?.message || JSON.stringify(json.errors)}`);
   }
 
-  const page = json?.data?.presentation?.stayProductDetailPage;
+  let page = json?.data?.presentation?.stayProductDetailPage;
   if (!page) {
     throw new Error('No listing data in API response');
   }
 
-  const sections = page.sections?.sections || [];
+  let sections = page.sections?.sections || [];
   const metadata = page.sections?.metadata || {};
 
   if (sections.length === 0) {
     throw new Error('No sections returned from API');
   }
 
+  // Staleness detection: if dates were provided but BOOK_IT_SIDEBAR shows stale indicators
+  if (options?.checkIn && options?.checkOut) {
+    const bookItSection = findSection(sections, 'BOOK_IT_SIDEBAR');
+    if (isStaleHash(bookItSection)) {
+      console.log('Stale hash detected, refreshing...');
+      try {
+        const newHashes = await refreshHashesViaPlaywright();
+        invalidateSessionCache();
+        currentHash = newHashes.listingHash;
+
+        // Retry with new hash
+        response = await makeApiCall(currentHash, pdpSectionsRequest, variables);
+        json = JSON.parse(response.data);
+        page = json?.data?.presentation?.stayProductDetailPage;
+        if (page) {
+          sections = page.sections?.sections || sections;
+        }
+      } catch (err: any) {
+        console.error(`Warning: Hash refresh failed: ${err.message}`);
+      }
+    }
+  }
+
   const parsed = parseSections(sections, metadata);
+
+  // If dates are provided but pricing wasn't returned, make a second request
+  // specifically for BOOK_IT sections (Airbnb requires explicit sectionIds for pricing)
+  if (options?.checkIn && options?.checkOut && !parsed.pricing) {
+    try {
+      const pricingRequest = {
+        ...pdpSectionsRequest,
+        sectionIds: [
+          'BOOK_IT_FLOATING_FOOTER',
+          'POLICIES_DEFAULT',
+          'BOOK_IT_SIDEBAR',
+          'URGENCY_COMMITMENT_SIDEBAR',
+          'BOOK_IT_NAV',
+          'URGENCY_COMMITMENT',
+          'CANCELLATION_POLICY_PICKER_MODAL',
+          'BOOK_IT_CALENDAR_SHEET',
+        ],
+      };
+
+      const pricingVariables = { ...variables, pdpSectionsRequest: pricingRequest };
+      const pricingExtensions = {
+        persistedQuery: {
+          version: 1,
+          sha256Hash: currentHash,
+        },
+      };
+
+      const pricingParams = new URLSearchParams({
+        operationName: 'StaysPdpSections',
+        locale: 'en',
+        currency: 'USD',
+        variables: JSON.stringify(pricingVariables),
+        extensions: JSON.stringify(pricingExtensions),
+      });
+
+      const pricingUrl = `${getSectionsApiUrl()}?${pricingParams.toString()}`;
+      const pricingResponse = await makeRequest(pricingUrl, {
+        headers: { ...API_HEADERS, 'X-Airbnb-Api-Key': apiKey },
+      });
+
+      const pricingJson = JSON.parse(pricingResponse.data);
+      const pricingPage = pricingJson?.data?.presentation?.stayProductDetailPage;
+      if (pricingPage) {
+        const pricingSections = pricingPage.sections?.sections || [];
+        const pricingParsed = parseSections(pricingSections, {});
+        if (pricingParsed.pricing) {
+          parsed.pricing = pricingParsed.pricing;
+        }
+        if (pricingParsed.cancellationPolicy) {
+          parsed.cancellationPolicy = pricingParsed.cancellationPolicy;
+        }
+        if (pricingParsed.capacity) {
+          parsed.capacity = pricingParsed.capacity;
+        }
+      }
+    } catch (err: any) {
+      console.error(`Warning: Failed to fetch pricing: ${err.message}`);
+    }
+  }
 
   return {
     id: roomId,
