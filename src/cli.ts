@@ -342,7 +342,7 @@ program
   .option('--reviews', 'Fetch reviews')
   .option('--photos', 'Download photos')
   .option('--ai-reviews', 'Run AI review analysis')
-  .option('--ai-photos', 'Run AI photo analysis (not yet implemented)')
+  .option('--ai-photos', 'Run AI photo analysis (Gemini vision)')
   .option('--model <model>', 'LLM model for AI phases (default: gemini-3-flash-preview:high)')
   .option('--priorities <text>', 'Guest priorities for AI analysis (e.g. "quiet, fresh air")')
   .option('--checkin <date>', 'Check-in date (YYYY-MM-DD)')
@@ -372,10 +372,11 @@ program
       fetchReviews: hasPhaseFlag ? !!cmdOpts.reviews : true,
       fetchPhotos: hasPhaseFlag ? !!cmdOpts.photos : true,
       aiReviews: hasPhaseFlag ? !!cmdOpts.aiReviews : true,
-      aiPhotos: !!cmdOpts.aiPhotos,
+      aiPhotos: hasPhaseFlag ? !!cmdOpts.aiPhotos : true,
       aiModel: cmdOpts.model || undefined,
       aiPriorities: cmdOpts.priorities || undefined,
       aiReviewsExplicit: !!cmdOpts.aiReviews,
+      aiPhotosExplicit: !!cmdOpts.aiPhotos,
       checkIn: cmdOpts.checkin || undefined,
       checkOut: cmdOpts.checkout || undefined,
       adults: cmdOpts.adults ? parseInt(cmdOpts.adults) : undefined,
@@ -433,6 +434,27 @@ program
     if (result.data !== null) {
       console.log(typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2));
     }
+  });
+
+// --- analyze-photos command: AI-powered photo analysis ---
+program
+  .command('analyze-photos <photos-dir>')
+  .description('AI-powered photo analysis using Gemini vision')
+  .option('--listing <file>', 'Listing JSON file for cross-referencing')
+  .option('--model <model>', 'LLM model (default: gemini-3-flash-preview:high)')
+  .option('--priorities <text>', 'Guest priorities to check in photos')
+  .action(async (photosDir: string, cmdOpts: any) => {
+    // Load .env for GEMINI_API_KEY
+    try { await import('dotenv/config'); } catch {}
+
+    const { runAnalyzePhotos } = await import('./analyze-photos.js');
+    const result = await runAnalyzePhotos({
+      photosDir,
+      listingFile: cmdOpts.listing || undefined,
+      model: cmdOpts.model || undefined,
+      priorities: cmdOpts.priorities || undefined,
+    });
+    console.log(JSON.stringify(result.data, null, 2));
   });
 
 // --- auth command ---

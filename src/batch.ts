@@ -13,6 +13,7 @@ import * as airbnbScraper from './airbnb/scraper.js';
 import * as bookingListing from './booking/listing.js';
 import * as bookingScraper from './booking/scraper.js';
 import { runAnalyze, parseModelConfig, getProviderApiKey, PROVIDER_KEY_NAMES, type AnalysisResult } from './analyze.js';
+import { runAnalyzePhotos, type PhotoAnalysisResult } from './analyze-photos.js';
 
 // --- Interfaces ---
 
@@ -25,6 +26,7 @@ export interface BatchOptions {
   aiModel?: string;
   aiPriorities?: string;
   aiReviewsExplicit: boolean;  // true when --ai-reviews was explicitly passed
+  aiPhotosExplicit: boolean;   // true when --ai-photos was explicitly passed
   checkIn?: string;
   checkOut?: string;
   adults?: number;
@@ -81,6 +83,7 @@ interface PlatformResult {
   reviews: PhaseResult & { totalReviewCount: number };
   photos: PhaseResult;
   aiReviews: PhaseResult;
+  aiPhotos: PhaseResult;
   errors: Array<{ id: string; phase: string; message: string }>;
 }
 
@@ -134,6 +137,7 @@ function getListingsDir(outputDir: string): string { return path.join(outputDir,
 function getReviewsDir(outputDir: string): string { return path.join(outputDir, 'reviews'); }
 function getPhotosDir(outputDir: string): string { return path.join(outputDir, 'photos'); }
 function getAiReviewsDir(outputDir: string): string { return path.join(outputDir, 'ai-reviews'); }
+function getAiPhotosDir(outputDir: string): string { return path.join(outputDir, 'ai-photos'); }
 
 /**
  * Migrate v1 manifest to v2:
@@ -215,7 +219,7 @@ function migrateFilesToSubdirs(outputDir: string, manifest: BatchManifest): void
   }
 }
 
-function shouldRetryPhase(manifest: BatchManifest, key: string, phase: 'details' | 'reviews' | 'photos' | 'aiReviews'): boolean {
+function shouldRetryPhase(manifest: BatchManifest, key: string, phase: 'details' | 'reviews' | 'photos' | 'aiReviews' | 'aiPhotos'): boolean {
   const entry = manifest.listings[key];
   if (!entry) return false;
   const status = entry[phase].status;
@@ -229,6 +233,7 @@ function newPlatformResult(total: number): PlatformResult {
     reviews: { fetched: 0, skipped: 0, failed: 0, totalReviewCount: 0 },
     photos: { fetched: 0, skipped: 0, failed: 0 },
     aiReviews: { fetched: 0, skipped: 0, failed: 0 },
+    aiPhotos: { fetched: 0, skipped: 0, failed: 0 },
     errors: [],
   };
 }
@@ -268,7 +273,8 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
       const needsRetry = entry.details.status === 'failed' || entry.details.status === 'partial'
         || entry.reviews.status === 'failed' || entry.reviews.status === 'partial'
         || entry.photos.status === 'failed' || entry.photos.status === 'partial'
-        || entry.aiReviews?.status === 'failed';
+        || entry.aiReviews?.status === 'failed'
+        || entry.aiPhotos?.status === 'failed';
       if (!needsRetry) continue;
 
       if (entry.platform === 'airbnb') {
@@ -820,17 +826,96 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
     }
   }
 
-  // AI photo analysis stub
+  // 9. AI photo analysis phase (runs after all scraping)
   if (options.aiPhotos) {
-    console.log('\nAI photo analysis: not yet implemented (skipping)');
-    // Future capabilities:
-    // - Room type detection (bedroom, bathroom, kitchen, living room)
-    // - Bed type assessment (real bed vs sofa/couch, single vs double vs bunk)
-    // - Modernity assessment (modern/rustic/dated/renovated)
-    // - Cleanliness appearance from photos
-    // - Natural light / window presence
-    // - Listing-vs-reality comparison (match listing claims to photo evidence)
-    // - User priority support (e.g., "needs bathtub" -> check bathroom photos)
+    const aiOutputDir = options.outputDir || 'data';
+    const aiModel = options.aiModel || process.env.LLM_MODEL || 'gemini-3-flash-preview:high';
+    const aiPhotosOutputDir = getAiPhotosDir(aiOutputDir);
+
+    // Early API key validation
+    const modelConfig = parseModelConfig(aiModel);
+    const aiApiKey = getProviderApiKey(modelConfig.provider);
+    if (!aiApiKey) {
+      const keyName = PROVIDER_KEY_NAMES[modelConfig.provider];
+      if (options.aiPhotosExplicit) {
+        console.error(`Error: ${keyName} (or LLM_API_KEY) required for --ai-photos. Set it in your environment.`);
+        process.exit(1);
+      } else {
+        console.warn(`Warning: ${keyName} not set — skipping AI photo analysis.`);
+      }
+    } else {
+      console.log(`\nAI photo analysis (${modelConfig.model}):`);
+      if (!fs.existsSync(aiPhotosOutputDir)) fs.mkdirSync(aiPhotosOutputDir, { recursive: true });
+
+      let aiIndex = 0;
+      const aiEntries = Object.entries(manifest.listings);
+      for (const [manifestKey, entry] of aiEntries) {
+        aiIndex++;
+        const prefix = `[${aiIndex}/${aiEntries.length}] ${manifestKey}`;
+
+        const platformResult = entry.platform === 'airbnb' ? airbnbResult : bookingResult;
+
+        // Skip if already fetched (unless --force)
+        const aiFile = path.join(aiPhotosOutputDir, `${entry.id}.json`);
+        if (!options.force && entry.aiPhotos?.status === 'fetched' && fs.existsSync(aiFile)) {
+          if (!(options.retryFailed && shouldRetryPhase(manifest, manifestKey, 'aiPhotos'))) {
+            console.log(`${prefix} — ai-photos ⊘ skip`);
+            platformResult.aiPhotos.skipped++;
+            continue;
+          }
+        }
+
+        // Skip if retrying and AI already succeeded
+        if (options.retryFailed && entry.aiPhotos?.status === 'fetched') {
+          console.log(`${prefix} — ai-photos ⊘ skip`);
+          platformResult.aiPhotos.skipped++;
+          continue;
+        }
+
+        // Skip if no photos available
+        if (!entry.photos.dir || (entry.photos.status !== 'fetched' && entry.photos.status !== 'partial' && entry.photos.status !== 'skipped')) {
+          console.log(`${prefix} — ai-photos ⊘ skip (no photos)`);
+          platformResult.aiPhotos.skipped++;
+          entry.aiPhotos = { status: 'skipped', reason: 'no photos' };
+          continue;
+        }
+
+        // Resolve full paths
+        const photosPath = path.join(aiOutputDir, entry.photos.dir!);
+        if (!fs.existsSync(photosPath) || fs.readdirSync(photosPath).length === 0) {
+          console.log(`${prefix} — ai-photos ⊘ skip (photos dir empty/missing)`);
+          platformResult.aiPhotos.skipped++;
+          entry.aiPhotos = { status: 'skipped', reason: 'photos dir empty' };
+          continue;
+        }
+
+        const listingPath = entry.details.file ? path.join(aiOutputDir, entry.details.file) : undefined;
+
+        const t = Date.now();
+        try {
+          const result: PhotoAnalysisResult = await runAnalyzePhotos({
+            photosDir: photosPath,
+            listingFile: listingPath && fs.existsSync(listingPath) ? listingPath : undefined,
+            model: aiModel,
+            priorities: options.aiPriorities,
+          });
+
+          // Write result to ai-photos dir
+          fs.writeFileSync(aiFile, JSON.stringify(result.data, null, 2));
+
+          console.log(`${prefix} — ai-photos ✓ ${result.photoCount} photos (${formatDuration(Date.now() - t)})`);
+          platformResult.aiPhotos.fetched++;
+          entry.aiPhotos = { status: 'fetched', file: `ai-photos/${entry.id}.json`, model: result.model, count: result.photoCount };
+        } catch (err: any) {
+          console.log(`${prefix} — ai-photos ✗ ${err.message}`);
+          platformResult.aiPhotos.failed++;
+          platformResult.errors.push({ id: entry.id, phase: 'ai-photos', message: err.message });
+          entry.aiPhotos = { status: 'failed', error: err.message, model: modelConfig.model };
+        }
+
+        saveManifest(manifest, manifestPath);
+      }
+    }
   }
 
   const totalTimeMs = Date.now() - startTime;
@@ -841,21 +926,23 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
   // 10. Print summary
   console.log('\nSummary:');
   if (preprocessed.airbnb.count > 0) {
-    const { details: d, reviews: r, photos: p, aiReviews: ai } = airbnbResult;
+    const { details: d, reviews: r, photos: p, aiReviews: ai, aiPhotos: ap } = airbnbResult;
     let line = `  Airbnb:  ${airbnbResult.total} listings`;
     if (d.fetched + d.skipped + d.failed > 0) line += ` | details: ${d.fetched}\u2713 ${d.skipped}\u2298 ${d.failed}\u2717`;
     if (r.fetched + r.skipped + r.failed > 0) line += ` | reviews: ${r.fetched}\u2713 ${r.skipped}\u2298 ${r.failed}\u2717`;
     if (p.fetched + p.skipped + p.failed > 0) line += ` | photos: ${p.fetched}\u2713 ${p.skipped}\u2298 ${p.failed}\u2717`;
     if (ai.fetched + ai.skipped + ai.failed > 0) line += ` | ai-reviews: ${ai.fetched}\u2713 ${ai.skipped}\u2298 ${ai.failed}\u2717`;
+    if (ap.fetched + ap.skipped + ap.failed > 0) line += ` | ai-photos: ${ap.fetched}\u2713 ${ap.skipped}\u2298 ${ap.failed}\u2717`;
     console.log(line);
   }
   if (preprocessed.booking.count > 0) {
-    const { details: d, reviews: r, photos: p, aiReviews: ai } = bookingResult;
+    const { details: d, reviews: r, photos: p, aiReviews: ai, aiPhotos: ap } = bookingResult;
     let line = `  Booking: ${bookingResult.total} listings`;
     if (d.fetched + d.skipped + d.failed > 0) line += ` | details: ${d.fetched}\u2713 ${d.skipped}\u2298 ${d.failed}\u2717`;
     if (r.fetched + r.skipped + r.failed > 0) line += ` | reviews: ${r.fetched}\u2713 ${r.skipped}\u2298 ${r.failed}\u2717`;
     if (p.fetched + p.skipped + p.failed > 0) line += ` | photos: ${p.fetched}\u2713 ${p.skipped}\u2298 ${p.failed}\u2717`;
     if (ai.fetched + ai.skipped + ai.failed > 0) line += ` | ai-reviews: ${ai.fetched}\u2713 ${ai.skipped}\u2298 ${ai.failed}\u2717`;
+    if (ap.fetched + ap.skipped + ap.failed > 0) line += ` | ai-photos: ${ap.fetched}\u2713 ${ap.skipped}\u2298 ${ap.failed}\u2717`;
     console.log(line);
   }
   console.log(`  Time: ${formatDuration(totalTimeMs)}`);
@@ -874,7 +961,8 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
     if (entry.details.status === 'failed' || entry.details.status === 'partial'
       || entry.reviews.status === 'failed' || entry.reviews.status === 'partial'
       || entry.photos.status === 'failed' || entry.photos.status === 'partial'
-      || entry.aiReviews?.status === 'failed') {
+      || entry.aiReviews?.status === 'failed'
+      || entry.aiPhotos?.status === 'failed') {
       failureCount++;
     }
   }
