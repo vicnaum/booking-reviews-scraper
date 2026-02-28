@@ -110,6 +110,9 @@ function cleanBookingUrl(info: BookingUrlInfo): string {
   let url = `https://www.booking.com/hotel/${info.countryCode}/${info.hotelName}.en-gb.html`;
   const params = new URLSearchParams();
   if (info.matchingBlockId) params.set('matching_block_id', info.matchingBlockId);
+  if (info.checkIn) params.set('checkin', info.checkIn);
+  if (info.checkOut) params.set('checkout', info.checkOut);
+  if (info.adults) params.set('group_adults', String(info.adults));
   const qs = params.toString();
   return qs ? `${url}?${qs}` : url;
 }

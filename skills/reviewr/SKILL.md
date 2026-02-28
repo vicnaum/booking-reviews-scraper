@@ -124,9 +124,31 @@ Build a unified data structure per property:
 - Representative photo URLs
 - Full review texts (for mining)
 
-### Phase 3: Review Text Mining
+### Phase 3: AI Review Analysis
 
-Search review texts for priority-relevant mentions. For each property, mine reviews for:
+**Preferred: batch AI analysis** — Runs AI-powered review analysis for all listings in the manifest automatically:
+
+```bash
+# Run AI analysis on all listings that have reviews
+reviewr batch --retry --ai-reviews -o data/rome
+
+# With guest priorities (fed into the AI prompt as deal-breaker criteria)
+reviewr batch --retry --ai-reviews -o data/rome --priorities "quiet, fresh air, double bed, modern"
+
+# Custom model (default: gemini-3-flash-preview:high)
+reviewr batch --retry --ai-reviews -o data/rome --model gemini-2.5-flash-preview-05-20:high
+```
+
+This produces per-listing JSON files in `ai-reviews/` with structured analysis: strengths, weaknesses, red flags, deal-breakers, trends, demographics, priority verdicts, and a summary score.
+
+**Alternative: single-file analysis** (for one listing):
+
+```bash
+reviewr analyze reviews/room_42739155_reviews.json listings/listing_42739155.json --priorities "quiet, fresh air"
+reviewr analyze reviews/hotel_reviews.json --dry-run   # Preview without AI call
+```
+
+**Manual text mining** — For supplementary analysis, search review texts for priority-relevant mentions:
 
 | Priority | Search terms |
 |----------|-------------|
@@ -144,7 +166,7 @@ For each category: count positive vs negative mentions, calculate sentiment rati
 
 ### Phase 4: Photo Analysis
 
-View downloaded photos for each property (use the Read tool on the downloaded image files in `data/booking/output/` or `data/airbnb/output/`). Assess:
+View downloaded photos for each property (use the Read tool on the downloaded image files in `photos/{id}/` under the output directory). Assess:
 
 - **Renovation state** — Modern/recent vs dated/worn
 - **Cleanliness** — Clean surfaces, fresh linens, or visible issues
@@ -341,25 +363,56 @@ reviewr preprocess rome-booking.txt rome-airbnb.txt  # Deduplicate and detect da
 
 Returns JSON with classified URLs, duplicate counts, and detected dates (unanimous/conflicting/none).
 
-### Batch fetch (details + reviews + photos)
+### Batch fetch (details + reviews + photos + AI)
 
 ```bash
-reviewr batch rome-booking.txt rome-airbnb.txt          # Fetch everything
+reviewr batch rome-booking.txt rome-airbnb.txt          # Fetch everything (details + reviews + photos + AI)
 reviewr batch urls.txt --details                         # Only listing details
 reviewr batch urls.txt --reviews                         # Only reviews
-reviewr batch urls.txt --details --photos                # Details + photos, no reviews
+reviewr batch urls.txt --details --photos                # Details + photos, no reviews or AI
 reviewr batch urls.txt --checkin 2026-03-16 --checkout 2026-03-21 --adults 3
 reviewr batch urls.txt --force                           # Re-fetch even if output exists
 reviewr batch --retry                                    # Retry all failures from last manifest
-reviewr batch --retry --details                          # Retry only failed details
+reviewr batch --retry --ai-reviews                       # Run AI analysis on existing data
+reviewr batch --retry --ai-reviews --priorities "quiet, modern, no basement"
+reviewr batch --retry --ai-reviews --model gpt-5-mini    # Use a different LLM
 reviewr batch urls.txt --retry                           # Process new URLs + retry failures
 ```
 
-Reads URL files, deduplicates, auto-detects dates from URLs, and fetches details + reviews + photos for all listings with skip-if-exists, error recovery, and progress reporting. If no `--details`/`--reviews`/`--photos` flags specified, fetches all three. If any specified, only those.
+Reads URL files, deduplicates, auto-detects dates from URLs, and fetches details + reviews + photos + AI analysis for all listings with skip-if-exists, error recovery, and progress reporting. If no phase flags specified, fetches all phases (including AI review analysis if API key is available — warns and skips AI if missing). If any phase flag specified, only those phases run.
 
-Saves a manifest to `data/batch_manifest.json` tracking per-listing, per-phase status (`fetched`, `skipped`, `failed`, `partial`). Use `--retry` to re-process only failed/partial listings. Photos are checked for completeness (file count vs expected) and re-downloaded if incomplete.
+**AI analysis flags:**
+- `--ai-reviews` — Run AI review analysis (uses listing + reviews data)
+- `--ai-photos` — AI photo analysis (not yet implemented)
+- `--model <model>` — LLM model (default: `gemini-3-flash-preview:high`). Supports Gemini, OpenAI, xAI models with `:thinking-level` suffix
+- `--priorities <text>` — Guest priorities fed into AI as deal-breaker criteria
 
-Output files: `listing_{id}.json` (details), `room_{id}_reviews.json` or `{id}_reviews.json` (reviews), `photos_{id}/` (photos) in the platform's output directory.
+Saves a v2 manifest to `batch_manifest.json` tracking per-listing, per-phase status (`fetched`, `skipped`, `failed`, `partial`, `not_requested`). Use `--retry` to re-process failed/partial listings or run new phases on existing data. Photos are checked for completeness and re-downloaded if incomplete.
+
+**Output directory structure** (batch mode):
+```
+{output-dir}/
+├── batch_manifest.json
+├── listings/           # listing_{id}.json
+├── reviews/            # room_{id}_reviews.json, {id}_reviews.json
+├── photos/             # {id}/  (per-listing photo directories)
+└── ai-reviews/         # {id}.json  (AI analysis results)
+```
+
+### AI-powered review analysis (single file)
+
+```bash
+reviewr analyze <reviews-file> [listing-file]            # Run AI analysis
+reviewr analyze reviews.json listing.json --priorities "quiet, modern"
+reviewr analyze reviews.json --dry-run                    # Preview prompt without AI call
+reviewr analyze reviews.json --model gpt-5-mini           # Use different model
+reviewr analyze reviews.json --room "Standard Double"     # Filter by room type
+reviewr analyze reviews.json --all-years                  # Include all reviews (default: last 4 years)
+```
+
+Returns structured JSON with: overall sentiment, strengths, weaknesses, red flags, deal-breakers, trends, guest demographics, summary score, and priority analysis (when `--priorities` provided). Supports Gemini, OpenAI, and xAI models. Default model: `gemini-3-flash-preview:high`.
+
+For batch analysis across many listings, use `reviewr batch --ai-reviews` instead.
 
 ### Refresh Airbnb API hashes
 

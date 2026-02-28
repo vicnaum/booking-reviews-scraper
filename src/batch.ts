@@ -12,6 +12,7 @@ import * as airbnbListing from './airbnb/listing.js';
 import * as airbnbScraper from './airbnb/scraper.js';
 import * as bookingListing from './booking/listing.js';
 import * as bookingScraper from './booking/scraper.js';
+import { runAnalyze, parseModelConfig, getProviderApiKey, PROVIDER_KEY_NAMES, type AnalysisResult } from './analyze.js';
 
 // --- Interfaces ---
 
@@ -19,6 +20,11 @@ export interface BatchOptions {
   fetchDetails: boolean;
   fetchReviews: boolean;
   fetchPhotos: boolean;
+  aiReviews: boolean;
+  aiPhotos: boolean;
+  aiModel?: string;
+  aiPriorities?: string;
+  aiReviewsExplicit: boolean;  // true when --ai-reviews was explicitly passed
   checkIn?: string;
   checkOut?: string;
   adults?: number;
@@ -39,6 +45,7 @@ export interface ManifestPhase {
   reason?: string;
   count?: number;
   expected?: number;
+  model?: string;
 }
 
 export interface ManifestEntry {
@@ -48,6 +55,10 @@ export interface ManifestEntry {
   details: ManifestPhase;
   reviews: ManifestPhase;
   photos: ManifestPhase;
+  aiReviews: ManifestPhase;
+  aiPhotos: ManifestPhase;
+  verdict?: 'keep' | 'eliminated' | 'shortlisted';
+  verdictReason?: string;
 }
 
 export interface BatchManifest {
@@ -69,6 +80,7 @@ interface PlatformResult {
   details: PhaseResult;
   reviews: PhaseResult & { totalReviewCount: number };
   photos: PhaseResult;
+  aiReviews: PhaseResult;
   errors: Array<{ id: string; phase: string; message: string }>;
 }
 
@@ -116,7 +128,94 @@ function saveManifest(manifest: BatchManifest, manifestPath: string): void {
   fs.renameSync(tmpPath, manifestPath);
 }
 
-function shouldRetryPhase(manifest: BatchManifest, key: string, phase: 'details' | 'reviews' | 'photos'): boolean {
+// --- Subdir path helpers (batch mode organizes output into subdirectories) ---
+
+function getListingsDir(outputDir: string): string { return path.join(outputDir, 'listings'); }
+function getReviewsDir(outputDir: string): string { return path.join(outputDir, 'reviews'); }
+function getPhotosDir(outputDir: string): string { return path.join(outputDir, 'photos'); }
+function getAiReviewsDir(outputDir: string): string { return path.join(outputDir, 'ai-reviews'); }
+
+/**
+ * Migrate v1 manifest to v2:
+ * - Add aiReviews/aiPhotos phases to each entry
+ * - Prefix flat file paths with subdirectories
+ * - Bump version to 2
+ */
+function migrateManifestV2(manifest: BatchManifest): BatchManifest {
+  if (manifest.version >= 2) return manifest;
+
+  for (const entry of Object.values(manifest.listings)) {
+    // Add new phases
+    if (!(entry as any).aiReviews) {
+      (entry as ManifestEntry).aiReviews = { status: 'not_requested' };
+    }
+    if (!(entry as any).aiPhotos) {
+      (entry as ManifestEntry).aiPhotos = { status: 'not_requested' };
+    }
+
+    // Migrate flat paths to subdirs
+    if (entry.details.file && !entry.details.file.includes('/')) {
+      entry.details.file = `listings/${entry.details.file}`;
+    }
+    if (entry.reviews.file && !entry.reviews.file.includes('/')) {
+      entry.reviews.file = `reviews/${entry.reviews.file}`;
+    }
+    if (entry.photos.dir && !entry.photos.dir.includes('/')) {
+      // Convert photos_ID -> photos/ID
+      const dirName = entry.photos.dir.replace(/^photos_/, '');
+      entry.photos.dir = `photos/${dirName}`;
+    }
+  }
+
+  manifest.version = 2;
+  return manifest;
+}
+
+/**
+ * Move files from flat layout to subdirectory layout during v1->v2 migration.
+ * Silently skips if source doesn't exist or destination already exists.
+ */
+function migrateFilesToSubdirs(outputDir: string, manifest: BatchManifest): void {
+  for (const entry of Object.values(manifest.listings)) {
+    // Move listing files
+    if (entry.details.file) {
+      const basename = path.basename(entry.details.file);
+      const oldPath = path.join(outputDir, basename);
+      const newPath = path.join(outputDir, entry.details.file);
+      if (fs.existsSync(oldPath) && !fs.existsSync(newPath)) {
+        const dir = path.dirname(newPath);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.renameSync(oldPath, newPath);
+      }
+    }
+
+    // Move review files
+    if (entry.reviews.file) {
+      const basename = path.basename(entry.reviews.file);
+      const oldPath = path.join(outputDir, basename);
+      const newPath = path.join(outputDir, entry.reviews.file);
+      if (fs.existsSync(oldPath) && !fs.existsSync(newPath)) {
+        const dir = path.dirname(newPath);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.renameSync(oldPath, newPath);
+      }
+    }
+
+    // Move photo directories: photos_ID -> photos/ID
+    if (entry.photos.dir) {
+      const cleanId = path.basename(entry.photos.dir);
+      const oldDir = path.join(outputDir, `photos_${cleanId}`);
+      const newDir = path.join(outputDir, entry.photos.dir);
+      if (fs.existsSync(oldDir) && !fs.existsSync(newDir)) {
+        const parent = path.dirname(newDir);
+        if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true });
+        fs.renameSync(oldDir, newDir);
+      }
+    }
+  }
+}
+
+function shouldRetryPhase(manifest: BatchManifest, key: string, phase: 'details' | 'reviews' | 'photos' | 'aiReviews'): boolean {
   const entry = manifest.listings[key];
   if (!entry) return false;
   const status = entry[phase].status;
@@ -129,6 +228,7 @@ function newPlatformResult(total: number): PlatformResult {
     details: { fetched: 0, skipped: 0, failed: 0 },
     reviews: { fetched: 0, skipped: 0, failed: 0, totalReviewCount: 0 },
     photos: { fetched: 0, skipped: 0, failed: 0 },
+    aiReviews: { fetched: 0, skipped: 0, failed: 0 },
     errors: [],
   };
 }
@@ -139,14 +239,23 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
   const startTime = Date.now();
   const manifestPath = getManifestPath(options);
 
-  // 1. Load or create manifest
-  const manifest: BatchManifest = loadManifest(manifestPath) || {
-    version: 1,
+  // 1. Load or create manifest (v2 format with subdirectories)
+  let manifest: BatchManifest = loadManifest(manifestPath) || {
+    version: 2,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     dates: {},
     listings: {},
   };
+
+  // Migrate v1 manifest to v2 (add aiReviews/aiPhotos, prefix paths with subdirs)
+  if (manifest.version < 2) {
+    const outputDir = options.outputDir || 'data';
+    manifest = migrateManifestV2(manifest);
+    migrateFilesToSubdirs(outputDir, manifest);
+    saveManifest(manifest, manifestPath);
+    console.log('Manifest migrated to v2 (subdirectory layout)');
+  }
 
   // 2. Preprocess files (may be empty for --retry-only)
   const preprocessed = filePaths.length > 0
@@ -158,7 +267,8 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
     for (const [key, entry] of Object.entries(manifest.listings)) {
       const needsRetry = entry.details.status === 'failed' || entry.details.status === 'partial'
         || entry.reviews.status === 'failed' || entry.reviews.status === 'partial'
-        || entry.photos.status === 'failed' || entry.photos.status === 'partial';
+        || entry.photos.status === 'failed' || entry.photos.status === 'partial'
+        || entry.aiReviews?.status === 'failed';
       if (!needsRetry) continue;
 
       if (entry.platform === 'airbnb') {
@@ -207,7 +317,9 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
   if (options.fetchDetails) phases.push('details');
   if (options.fetchReviews) phases.push('reviews');
   if (options.fetchPhotos) phases.push('photos');
-  console.log(`Fetching: ${phases.join(', ')}\n`);
+  if (options.aiReviews) phases.push('ai-reviews');
+  if (options.aiPhotos) phases.push('ai-photos');
+  console.log(`Phases: ${phases.join(', ')}\n`);
 
   const dateOpts = { checkIn, checkOut, adults };
   const airbnbResult = newPlatformResult(preprocessed.airbnb.count);
@@ -244,6 +356,8 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           details: { status: 'not_requested' },
           reviews: { status: 'not_requested' },
           photos: { status: 'not_requested' },
+          aiReviews: { status: 'not_requested' },
+          aiPhotos: { status: 'not_requested' },
         };
       }
       const entry = manifest.listings[manifestKey];
@@ -262,11 +376,12 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           airbnbResult.errors.push({ id: roomId, phase: 'details', message: 'No API key' });
           entry.details = { status: 'failed', error: 'No API key' };
         } else {
-          const detailsFile = path.join(airbnbOutputDir, `listing_${roomId}.json`);
+          const listingsDir = getListingsDir(airbnbOutputDir);
+          const detailsFile = path.join(listingsDir, `listing_${roomId}.json`);
           if (!options.force && fs.existsSync(detailsFile)) {
             statusParts.push('details \u2298 skip');
             airbnbResult.details.skipped++;
-            entry.details = { status: 'skipped', file: `listing_${roomId}.json` };
+            entry.details = { status: 'skipped', file: `listings/listing_${roomId}.json` };
             if (options.fetchPhotos) {
               try { details = JSON.parse(fs.readFileSync(detailsFile, 'utf-8')); } catch {}
             }
@@ -275,11 +390,11 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
             try {
               details = await airbnbListing.fetchListingDetails(apiKey, roomId, dateOpts);
               if (!options.print) {
-                airbnbListing.saveListingDetails(details, `listing_${roomId}.json`, airbnbOutputDir);
+                airbnbListing.saveListingDetails(details, `listing_${roomId}.json`, listingsDir);
               }
               statusParts.push(`details \u2713 (${formatDuration(Date.now() - t)})`);
               airbnbResult.details.fetched++;
-              entry.details = { status: 'fetched', file: `listing_${roomId}.json` };
+              entry.details = { status: 'fetched', file: `listings/listing_${roomId}.json` };
             } catch (err: any) {
               statusParts.push('details \u2717 error');
               airbnbResult.details.failed++;
@@ -299,7 +414,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
 
       // Load details for photos/review-check if not already loaded
       if (!details && (options.fetchPhotos || options.fetchReviews)) {
-        const detailsFile = path.join(airbnbOutputDir, `listing_${roomId}.json`);
+        const detailsFile = path.join(getListingsDir(airbnbOutputDir), `listing_${roomId}.json`);
         if (fs.existsSync(detailsFile)) {
           try { details = JSON.parse(fs.readFileSync(detailsFile, 'utf-8')); } catch {}
         }
@@ -313,11 +428,12 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           airbnbResult.errors.push({ id: roomId, phase: 'reviews', message: 'No API key' });
           entry.reviews = { status: 'failed', error: 'No API key' };
         } else {
-          const reviewsFile = path.join(airbnbOutputDir, `room_${roomId}_reviews.json`);
+          const reviewsDir = getReviewsDir(airbnbOutputDir);
+          const reviewsFile = path.join(reviewsDir, `room_${roomId}_reviews.json`);
           if (!options.force && fs.existsSync(reviewsFile) && !shouldRetryPhase(manifest, manifestKey, 'reviews')) {
             statusParts.push('reviews \u2298 skip');
             airbnbResult.reviews.skipped++;
-            entry.reviews = { status: 'skipped', file: `room_${roomId}_reviews.json` };
+            entry.reviews = { status: 'skipped', file: `reviews/room_${roomId}_reviews.json` };
           } else {
             const t = Date.now();
             try {
@@ -332,7 +448,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
               };
               const reviews = await airbnbScraper.fetchPropertyReviews(apiKey, property);
               if (!options.print) {
-                if (!fs.existsSync(airbnbOutputDir)) fs.mkdirSync(airbnbOutputDir, { recursive: true });
+                if (!fs.existsSync(reviewsDir)) fs.mkdirSync(reviewsDir, { recursive: true });
                 const output = {
                   scraped_at: new Date().toISOString(),
                   total_reviews: reviews.length,
@@ -340,7 +456,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
                   reviews,
                 };
                 fs.writeFileSync(
-                  path.join(airbnbOutputDir, `room_${roomId}_reviews.json`),
+                  path.join(reviewsDir, `room_${roomId}_reviews.json`),
                   JSON.stringify(output, null, 2),
                 );
               }
@@ -351,10 +467,10 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
               // Review completeness check
               const expectedReviews = details?.reviewCount;
               if (expectedReviews && reviews.length < expectedReviews * 0.8) {
-                entry.reviews = { status: 'partial', file: `room_${roomId}_reviews.json`, count: reviews.length, expected: expectedReviews };
+                entry.reviews = { status: 'partial', file: `reviews/room_${roomId}_reviews.json`, count: reviews.length, expected: expectedReviews };
                 console.warn(`  Warning: got ${reviews.length}/${expectedReviews} reviews (partial)`);
               } else {
-                entry.reviews = { status: 'fetched', file: `room_${roomId}_reviews.json`, count: reviews.length, expected: expectedReviews || undefined };
+                entry.reviews = { status: 'fetched', file: `reviews/room_${roomId}_reviews.json`, count: reviews.length, expected: expectedReviews || undefined };
               }
             } catch (err: any) {
               statusParts.push('reviews \u2717 error');
@@ -374,7 +490,8 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
 
       // --- Photos ---
       if (doPhotos) {
-        const photosDir = path.join(airbnbOutputDir, `photos_${roomId}`);
+        const photosBase = getPhotosDir(airbnbOutputDir);
+        const photosDir = path.join(photosBase, roomId);
         const dirExists = fs.existsSync(photosDir);
         const expectedPhotos = details?.photos?.length || 0;
         const actualPhotos = dirExists ? fs.readdirSync(photosDir).length : 0;
@@ -383,7 +500,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         if (!options.force && dirExistsAndNonEmpty(photosDir) && !photosIncomplete) {
           statusParts.push('photos \u2298 skip');
           airbnbResult.photos.skipped++;
-          entry.photos = { status: 'skipped', dir: `photos_${roomId}`, count: actualPhotos, expected: expectedPhotos || undefined };
+          entry.photos = { status: 'skipped', dir: `photos/${roomId}`, count: actualPhotos, expected: expectedPhotos || undefined };
         } else if (!details) {
           statusParts.push('photos \u2298 skip (no details)');
           airbnbResult.photos.skipped++;
@@ -393,21 +510,21 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
             statusParts.push(`photos: ${actualPhotos}/${expectedPhotos} incomplete, re-downloading`);
           }
           try {
-            await airbnbListing.downloadPhotos(details, airbnbOutputDir);
+            await airbnbListing.downloadPhotos(details, photosBase, { dirName: roomId });
             const finalCount = fs.existsSync(photosDir) ? fs.readdirSync(photosDir).length : 0;
             if (expectedPhotos > 0 && finalCount < expectedPhotos) {
               statusParts.push(`photos \u2713 ${finalCount}/${expectedPhotos} (partial)`);
-              entry.photos = { status: 'partial', dir: `photos_${roomId}`, count: finalCount, expected: expectedPhotos };
+              entry.photos = { status: 'partial', dir: `photos/${roomId}`, count: finalCount, expected: expectedPhotos };
             } else {
               statusParts.push(`photos \u2713 ${finalCount}`);
-              entry.photos = { status: 'fetched', dir: `photos_${roomId}`, count: finalCount, expected: expectedPhotos || undefined };
+              entry.photos = { status: 'fetched', dir: `photos/${roomId}`, count: finalCount, expected: expectedPhotos || undefined };
             }
             airbnbResult.photos.fetched++;
           } catch (err: any) {
             statusParts.push('photos \u2717 error');
             airbnbResult.photos.failed++;
             airbnbResult.errors.push({ id: roomId, phase: 'photos', message: err.message });
-            entry.photos = { status: 'failed', dir: `photos_${roomId}`, error: err.message };
+            entry.photos = { status: 'failed', dir: `photos/${roomId}`, error: err.message };
           }
         }
       } else if (options.fetchPhotos) {
@@ -452,6 +569,8 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           details: { status: 'not_requested' },
           reviews: { status: 'not_requested' },
           photos: { status: 'not_requested' },
+          aiReviews: { status: 'not_requested' },
+          aiPhotos: { status: 'not_requested' },
         };
       }
       const entry = manifest.listings[manifestKey];
@@ -464,11 +583,12 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
 
       // --- Details ---
       if (doDetails) {
-        const detailsFile = path.join(bookingOutputDir, `listing_${id}.json`);
+        const listingsDir = getListingsDir(bookingOutputDir);
+        const detailsFile = path.join(listingsDir, `listing_${id}.json`);
         if (!options.force && fs.existsSync(detailsFile)) {
           statusParts.push('details \u2298 skip');
           bookingResult.details.skipped++;
-          entry.details = { status: 'skipped', file: `listing_${id}.json` };
+          entry.details = { status: 'skipped', file: `listings/listing_${id}.json` };
           if (options.fetchPhotos) {
             try { details = JSON.parse(fs.readFileSync(detailsFile, 'utf-8')); } catch {}
           }
@@ -477,11 +597,11 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           try {
             details = await bookingListing.scrapeListingDetails(url, dateOpts);
             if (!options.print) {
-              bookingListing.saveListingDetails(details, `listing_${id}.json`, bookingOutputDir);
+              bookingListing.saveListingDetails(details, `listing_${id}.json`, listingsDir);
             }
             statusParts.push(`details \u2713 (${formatDuration(Date.now() - t)})`);
             bookingResult.details.fetched++;
-            entry.details = { status: 'fetched', file: `listing_${id}.json` };
+            entry.details = { status: 'fetched', file: `listings/listing_${id}.json` };
           } catch (err: any) {
             statusParts.push('details \u2717 error');
             bookingResult.details.failed++;
@@ -496,7 +616,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
 
       // Load details for photos/review-check if not already loaded
       if (!details && (options.fetchPhotos || options.fetchReviews)) {
-        const detailsFile = path.join(bookingOutputDir, `listing_${id}.json`);
+        const detailsFile = path.join(getListingsDir(bookingOutputDir), `listing_${id}.json`);
         if (fs.existsSync(detailsFile)) {
           try { details = JSON.parse(fs.readFileSync(detailsFile, 'utf-8')); } catch {}
         }
@@ -504,17 +624,18 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
 
       // --- Reviews ---
       if (doReviews) {
-        const reviewsFile = path.join(bookingOutputDir, `${id}_reviews.json`);
+        const reviewsDir = getReviewsDir(bookingOutputDir);
+        const reviewsFile = path.join(reviewsDir, `${id}_reviews.json`);
         if (!options.force && fs.existsSync(reviewsFile) && !shouldRetryPhase(manifest, manifestKey, 'reviews')) {
           statusParts.push('reviews \u2298 skip');
           bookingResult.reviews.skipped++;
-          entry.reviews = { status: 'skipped', file: `${id}_reviews.json` };
+          entry.reviews = { status: 'skipped', file: `reviews/${id}_reviews.json` };
         } else {
           const t = Date.now();
           try {
             const reviews = await bookingScraper.scrapeHotelReviews(hotelInfo);
             if (!options.print) {
-              if (!fs.existsSync(bookingOutputDir)) fs.mkdirSync(bookingOutputDir, { recursive: true });
+              if (!fs.existsSync(reviewsDir)) fs.mkdirSync(reviewsDir, { recursive: true });
               const output = {
                 scraped_at: new Date().toISOString(),
                 total_reviews: reviews.length,
@@ -522,7 +643,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
                 reviews,
               };
               fs.writeFileSync(
-                path.join(bookingOutputDir, `${id}_reviews.json`),
+                path.join(reviewsDir, `${id}_reviews.json`),
                 JSON.stringify(output, null, 2),
               );
             }
@@ -533,10 +654,10 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
             // Review completeness check
             const expectedReviews = details?.reviewCount;
             if (expectedReviews && reviews.length < expectedReviews * 0.8) {
-              entry.reviews = { status: 'partial', file: `${id}_reviews.json`, count: reviews.length, expected: expectedReviews };
+              entry.reviews = { status: 'partial', file: `reviews/${id}_reviews.json`, count: reviews.length, expected: expectedReviews };
               console.warn(`  Warning: got ${reviews.length}/${expectedReviews} reviews (partial)`);
             } else {
-              entry.reviews = { status: 'fetched', file: `${id}_reviews.json`, count: reviews.length, expected: expectedReviews || undefined };
+              entry.reviews = { status: 'fetched', file: `reviews/${id}_reviews.json`, count: reviews.length, expected: expectedReviews || undefined };
             }
           } catch (err: any) {
             statusParts.push('reviews \u2717 error');
@@ -552,7 +673,8 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
 
       // --- Photos ---
       if (doPhotos) {
-        const photosDir = path.join(bookingOutputDir, `photos_${id}`);
+        const photosBase = getPhotosDir(bookingOutputDir);
+        const photosDir = path.join(photosBase, id);
         const dirExists = fs.existsSync(photosDir);
         const expectedPhotos = details?.photos?.length || 0;
         const actualPhotos = dirExists ? fs.readdirSync(photosDir).length : 0;
@@ -561,7 +683,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         if (!options.force && dirExistsAndNonEmpty(photosDir) && !photosIncomplete) {
           statusParts.push('photos \u2298 skip');
           bookingResult.photos.skipped++;
-          entry.photos = { status: 'skipped', dir: `photos_${id}`, count: actualPhotos, expected: expectedPhotos || undefined };
+          entry.photos = { status: 'skipped', dir: `photos/${id}`, count: actualPhotos, expected: expectedPhotos || undefined };
         } else if (!details) {
           statusParts.push('photos \u2298 skip (no details)');
           bookingResult.photos.skipped++;
@@ -571,23 +693,24 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
             statusParts.push(`photos: ${actualPhotos}/${expectedPhotos} incomplete, re-downloading`);
           }
           try {
-            await bookingListing.downloadPhotos(details, bookingOutputDir, {
+            await bookingListing.downloadPhotos(details, photosBase, {
               downloadAll: options.downloadPhotosAll,
+              dirName: id,
             });
             const finalCount = fs.existsSync(photosDir) ? fs.readdirSync(photosDir).length : 0;
             if (expectedPhotos > 0 && finalCount < expectedPhotos) {
               statusParts.push(`photos \u2713 ${finalCount}/${expectedPhotos} (partial)`);
-              entry.photos = { status: 'partial', dir: `photos_${id}`, count: finalCount, expected: expectedPhotos };
+              entry.photos = { status: 'partial', dir: `photos/${id}`, count: finalCount, expected: expectedPhotos };
             } else {
               statusParts.push(`photos \u2713 ${finalCount}`);
-              entry.photos = { status: 'fetched', dir: `photos_${id}`, count: finalCount, expected: expectedPhotos || undefined };
+              entry.photos = { status: 'fetched', dir: `photos/${id}`, count: finalCount, expected: expectedPhotos || undefined };
             }
             bookingResult.photos.fetched++;
           } catch (err: any) {
             statusParts.push('photos \u2717 error');
             bookingResult.photos.failed++;
             bookingResult.errors.push({ id, phase: 'photos', message: err.message });
-            entry.photos = { status: 'failed', dir: `photos_${id}`, error: err.message };
+            entry.photos = { status: 'failed', dir: `photos/${id}`, error: err.message };
           }
         }
       } else if (options.fetchPhotos) {
@@ -603,27 +726,136 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
     }
   }
 
+  // 8. AI review analysis phase (runs after all scraping)
+  if (options.aiReviews) {
+    const aiOutputDir = options.outputDir || 'data';
+    const aiModel = options.aiModel || process.env.LLM_MODEL || 'gemini-3-flash-preview:high';
+    const aiReviewsDir = getAiReviewsDir(aiOutputDir);
+
+    // Early API key validation
+    const modelConfig = parseModelConfig(aiModel);
+    const aiApiKey = getProviderApiKey(modelConfig.provider);
+    if (!aiApiKey) {
+      const keyName = PROVIDER_KEY_NAMES[modelConfig.provider];
+      if (options.aiReviewsExplicit) {
+        console.error(`Error: ${keyName} (or LLM_API_KEY) required for --ai-reviews. Set it in your environment.`);
+        process.exit(1);
+      } else {
+        console.warn(`Warning: ${keyName} not set \u2014 skipping AI review analysis.`);
+      }
+    } else {
+      console.log(`\nAI review analysis (${modelConfig.model}):`);
+      if (!fs.existsSync(aiReviewsDir)) fs.mkdirSync(aiReviewsDir, { recursive: true });
+
+      let aiIndex = 0;
+      const aiEntries = Object.entries(manifest.listings);
+      for (const [manifestKey, entry] of aiEntries) {
+        aiIndex++;
+        const prefix = `[${aiIndex}/${aiEntries.length}] ${manifestKey}`;
+
+        // Determine platform-specific result tracker
+        const platformResult = entry.platform === 'airbnb' ? airbnbResult : bookingResult;
+
+        // Skip if already fetched (unless --force)
+        const aiFile = path.join(aiReviewsDir, `${entry.id}.json`);
+        if (!options.force && entry.aiReviews?.status === 'fetched' && fs.existsSync(aiFile)) {
+          if (!(options.retryFailed && shouldRetryPhase(manifest, manifestKey, 'aiReviews'))) {
+            console.log(`${prefix} \u2014 ai-reviews \u2298 skip`);
+            platformResult.aiReviews.skipped++;
+            continue;
+          }
+        }
+
+        // Skip if retrying and AI already succeeded for this listing
+        // (not_requested is NOT skipped — it means AI hasn't run yet, not that user didn't want it)
+        if (options.retryFailed && entry.aiReviews?.status === 'fetched') {
+          console.log(`${prefix} \u2014 ai-reviews \u2298 skip`);
+          platformResult.aiReviews.skipped++;
+          continue;
+        }
+
+        // Skip if no reviews available
+        if (!entry.reviews.file || (entry.reviews.status !== 'fetched' && entry.reviews.status !== 'partial')) {
+          console.log(`${prefix} \u2014 ai-reviews \u2298 skip (no reviews)`);
+          platformResult.aiReviews.skipped++;
+          entry.aiReviews = { status: 'skipped', reason: 'no reviews' };
+          continue;
+        }
+
+        // Resolve full paths for reviews and listing files
+        const reviewsPath = path.join(aiOutputDir, entry.reviews.file!);
+        const listingPath = entry.details.file ? path.join(aiOutputDir, entry.details.file) : undefined;
+
+        if (!fs.existsSync(reviewsPath)) {
+          console.log(`${prefix} \u2014 ai-reviews \u2298 skip (reviews file missing)`);
+          platformResult.aiReviews.skipped++;
+          entry.aiReviews = { status: 'skipped', reason: 'reviews file missing' };
+          continue;
+        }
+
+        const t = Date.now();
+        try {
+          const result: AnalysisResult = await runAnalyze({
+            reviewsFile: reviewsPath,
+            listingFile: listingPath && fs.existsSync(listingPath) ? listingPath : undefined,
+            model: aiModel,
+            priorities: options.aiPriorities,
+          });
+
+          // Write result to ai-reviews dir
+          fs.writeFileSync(aiFile, JSON.stringify(result.data, null, 2));
+
+          console.log(`${prefix} \u2014 ai-reviews \u2713 (${formatDuration(Date.now() - t)})`);
+          platformResult.aiReviews.fetched++;
+          entry.aiReviews = { status: 'fetched', file: `ai-reviews/${entry.id}.json`, model: result.model };
+        } catch (err: any) {
+          console.log(`${prefix} \u2014 ai-reviews \u2717 ${err.message}`);
+          platformResult.aiReviews.failed++;
+          platformResult.errors.push({ id: entry.id, phase: 'ai-reviews', message: err.message });
+          entry.aiReviews = { status: 'failed', error: err.message, model: modelConfig.model };
+        }
+
+        saveManifest(manifest, manifestPath);
+      }
+    }
+  }
+
+  // AI photo analysis stub
+  if (options.aiPhotos) {
+    console.log('\nAI photo analysis: not yet implemented (skipping)');
+    // Future capabilities:
+    // - Room type detection (bedroom, bathroom, kitchen, living room)
+    // - Bed type assessment (real bed vs sofa/couch, single vs double vs bunk)
+    // - Modernity assessment (modern/rustic/dated/renovated)
+    // - Cleanliness appearance from photos
+    // - Natural light / window presence
+    // - Listing-vs-reality comparison (match listing claims to photo evidence)
+    // - User priority support (e.g., "needs bathtub" -> check bathroom photos)
+  }
+
   const totalTimeMs = Date.now() - startTime;
 
-  // 8. Final manifest save
+  // 9. Final manifest save
   saveManifest(manifest, manifestPath);
 
-  // 9. Print summary
+  // 10. Print summary
   console.log('\nSummary:');
   if (preprocessed.airbnb.count > 0) {
-    const { details: d, reviews: r, photos: p } = airbnbResult;
+    const { details: d, reviews: r, photos: p, aiReviews: ai } = airbnbResult;
     let line = `  Airbnb:  ${airbnbResult.total} listings`;
     if (d.fetched + d.skipped + d.failed > 0) line += ` | details: ${d.fetched}\u2713 ${d.skipped}\u2298 ${d.failed}\u2717`;
     if (r.fetched + r.skipped + r.failed > 0) line += ` | reviews: ${r.fetched}\u2713 ${r.skipped}\u2298 ${r.failed}\u2717`;
     if (p.fetched + p.skipped + p.failed > 0) line += ` | photos: ${p.fetched}\u2713 ${p.skipped}\u2298 ${p.failed}\u2717`;
+    if (ai.fetched + ai.skipped + ai.failed > 0) line += ` | ai-reviews: ${ai.fetched}\u2713 ${ai.skipped}\u2298 ${ai.failed}\u2717`;
     console.log(line);
   }
   if (preprocessed.booking.count > 0) {
-    const { details: d, reviews: r, photos: p } = bookingResult;
+    const { details: d, reviews: r, photos: p, aiReviews: ai } = bookingResult;
     let line = `  Booking: ${bookingResult.total} listings`;
     if (d.fetched + d.skipped + d.failed > 0) line += ` | details: ${d.fetched}\u2713 ${d.skipped}\u2298 ${d.failed}\u2717`;
     if (r.fetched + r.skipped + r.failed > 0) line += ` | reviews: ${r.fetched}\u2713 ${r.skipped}\u2298 ${r.failed}\u2717`;
     if (p.fetched + p.skipped + p.failed > 0) line += ` | photos: ${p.fetched}\u2713 ${p.skipped}\u2298 ${p.failed}\u2717`;
+    if (ai.fetched + ai.skipped + ai.failed > 0) line += ` | ai-reviews: ${ai.fetched}\u2713 ${ai.skipped}\u2298 ${ai.failed}\u2717`;
     console.log(line);
   }
   console.log(`  Time: ${formatDuration(totalTimeMs)}`);
@@ -641,7 +873,8 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
   for (const entry of Object.values(manifest.listings)) {
     if (entry.details.status === 'failed' || entry.details.status === 'partial'
       || entry.reviews.status === 'failed' || entry.reviews.status === 'partial'
-      || entry.photos.status === 'failed' || entry.photos.status === 'partial') {
+      || entry.photos.status === 'failed' || entry.photos.status === 'partial'
+      || entry.aiReviews?.status === 'failed') {
       failureCount++;
     }
   }

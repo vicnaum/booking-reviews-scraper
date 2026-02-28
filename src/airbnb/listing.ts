@@ -654,9 +654,11 @@ export async function scrapeListingDetails(
  */
 export async function downloadPhotos(
   details: AirbnbListingDetails,
-  outputDir?: string
+  outputDir?: string,
+  options?: { dirName?: string }
 ): Promise<string> {
-  const photosDir = path.join(outputDir || OUTPUT_DIR, `photos_${details.id}`);
+  const folderName = options?.dirName || `photos_${details.id}`;
+  const photosDir = path.join(outputDir || OUTPUT_DIR, folderName);
   if (!fs.existsSync(photosDir)) {
     fs.mkdirSync(photosDir, { recursive: true });
   }

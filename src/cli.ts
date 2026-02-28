@@ -341,6 +341,10 @@ program
   .option('--details', 'Fetch listing details')
   .option('--reviews', 'Fetch reviews')
   .option('--photos', 'Download photos')
+  .option('--ai-reviews', 'Run AI review analysis')
+  .option('--ai-photos', 'Run AI photo analysis (not yet implemented)')
+  .option('--model <model>', 'LLM model for AI phases (default: gemini-3-flash-preview:high)')
+  .option('--priorities <text>', 'Guest priorities for AI analysis (e.g. "quiet, fresh air")')
   .option('--checkin <date>', 'Check-in date (YYYY-MM-DD)')
   .option('--checkout <date>', 'Check-out date (YYYY-MM-DD)')
   .option('--adults <n>', 'Number of adults')
@@ -356,14 +360,22 @@ program
       process.exit(1);
     }
 
-    // If no phase flags specified, fetch all
-    const hasPhaseFlag = cmdOpts.details || cmdOpts.reviews || cmdOpts.photos;
+    // Load .env for LLM API keys
+    try { await import('dotenv/config'); } catch {}
+
+    // If no phase flags specified, fetch all (including AI)
+    const hasPhaseFlag = cmdOpts.details || cmdOpts.reviews || cmdOpts.photos || cmdOpts.aiReviews || cmdOpts.aiPhotos;
 
     const { runBatch } = await import('./batch.js');
     await runBatch(files, {
       fetchDetails: hasPhaseFlag ? !!cmdOpts.details : true,
       fetchReviews: hasPhaseFlag ? !!cmdOpts.reviews : true,
       fetchPhotos: hasPhaseFlag ? !!cmdOpts.photos : true,
+      aiReviews: hasPhaseFlag ? !!cmdOpts.aiReviews : true,
+      aiPhotos: !!cmdOpts.aiPhotos,
+      aiModel: cmdOpts.model || undefined,
+      aiPriorities: cmdOpts.priorities || undefined,
+      aiReviewsExplicit: !!cmdOpts.aiReviews,
       checkIn: cmdOpts.checkin || undefined,
       checkOut: cmdOpts.checkout || undefined,
       adults: cmdOpts.adults ? parseInt(cmdOpts.adults) : undefined,
@@ -391,6 +403,36 @@ program
     console.log('\nNew hashes:');
     console.log(`  Listing: ${newHashes.listingHash.substring(0, 16)}...`);
     console.log(`  Reviews: ${newHashes.reviewsHash.substring(0, 16)}...`);
+  });
+
+// --- analyze command: AI-powered review analysis ---
+program
+  .command('analyze <reviews-file> [listing-file]')
+  .description('AI-powered review analysis using Google Gemini')
+  .option('--dry-run', 'Output compact text + prompt to stdout, no AI call')
+  .option('--prompt <text>', 'Custom question (replaces default analysis prompt)')
+  .option('--model <model>', 'LLM model (default: gemini-2.5-flash-preview-05-20, supports :thinking-level suffix)')
+  .option('--room <text>', 'Filter reviews by room type (substring match on room_view)')
+  .option('--priorities <text>', 'Guest priorities to focus on (e.g. "quiet, fresh air, high floor")')
+  .option('--all-years', 'Include all reviews regardless of age (default: last 4 years)')
+  .action(async (reviewsFile: string, listingFile: string | undefined, cmdOpts: any) => {
+    // Load .env for GEMINI_API_KEY
+    try { await import('dotenv/config'); } catch {}
+
+    const { runAnalyze } = await import('./analyze.js');
+    const result = await runAnalyze({
+      reviewsFile,
+      listingFile,
+      dryRun: !!cmdOpts.dryRun,
+      prompt: cmdOpts.prompt || undefined,
+      model: cmdOpts.model || undefined,
+      room: cmdOpts.room || undefined,
+      priorities: cmdOpts.priorities || undefined,
+      allYears: !!cmdOpts.allYears,
+    });
+    if (result.data !== null) {
+      console.log(typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2));
+    }
   });
 
 // --- auth command ---
