@@ -1210,6 +1210,138 @@ function getJS(): string {
     });
   }
 
+  // --- SPIDERFY: fan out overlapping markers ---
+  const SPIDER_ZOOM_THRESHOLD = 16; // only spiderfy at this zoom and above
+  const SPIDER_PIXEL_DIST = 50;     // px distance to consider "overlapping"
+  let clusters = [];                 // current cluster groups
+  let hoveredCluster = null;         // cluster currently fanned out
+
+  function computeClusters() {
+    if (!map) return;
+    clusters = [];
+    const zoom = map.getZoom();
+    if (zoom < SPIDER_ZOOM_THRESHOLD) {
+      // at low zoom, reset all offsets — overlap is expected
+      Object.keys(markers).forEach(id => {
+        const m = markers[id];
+        if (map.hasLayer(m.marker)) {
+          m.marker.setLatLng(m.data._origLatLng || [m.data.lat, m.data.lng]);
+        }
+      });
+      return;
+    }
+
+    // collect visible marker pixel positions
+    const visible = [];
+    Object.keys(markers).forEach(id => {
+      const m = markers[id];
+      if (!map.hasLayer(m.marker)) return;
+      if (!m.data._origLatLng) m.data._origLatLng = [m.data.lat, m.data.lng];
+      const pt = map.latLngToContainerPoint(m.data._origLatLng);
+      visible.push({ id: id, px: pt.x, py: pt.y });
+    });
+
+    // greedy clustering
+    const used = new Set();
+    for (let i = 0; i < visible.length; i++) {
+      if (used.has(i)) continue;
+      const group = [visible[i]];
+      used.add(i);
+      for (let j = i + 1; j < visible.length; j++) {
+        if (used.has(j)) continue;
+        const dx = visible[i].px - visible[j].px;
+        const dy = visible[i].py - visible[j].py;
+        if (Math.sqrt(dx*dx + dy*dy) < SPIDER_PIXEL_DIST) {
+          group.push(visible[j]);
+          used.add(j);
+        }
+      }
+      if (group.length > 1) {
+        clusters.push(group);
+      } else {
+        // single marker — reset to original position
+        const m = markers[group[0].id];
+        m.marker.setLatLng(m.data._origLatLng);
+      }
+    }
+
+    // apply stacked offsets (small diagonal shift)
+    clusters.forEach(group => {
+      applyStackOffsets(group);
+    });
+  }
+
+  function applyStackOffsets(group) {
+    const cx = group.reduce((s, g) => s + g.px, 0) / group.length;
+    const cy = group.reduce((s, g) => s + g.py, 0) / group.length;
+    group.forEach((g, i) => {
+      const offset = i * 4; // 4px diagonal per card
+      const pt = L.point(cx + offset, cy + offset);
+      const ll = map.containerPointToLatLng(pt);
+      markers[g.id].marker.setLatLng(ll);
+      const el = markers[g.id].marker.getElement();
+      if (el) el.style.zIndex = String(100 + i);
+    });
+  }
+
+  function fanOutCluster(group) {
+    if (!map) return;
+    const cx = group.reduce((s, g) => s + g.px, 0) / group.length;
+    const cy = group.reduce((s, g) => s + g.py, 0) / group.length;
+    const n = group.length;
+    const radius = Math.max(40, n * 18);
+    group.forEach((g, i) => {
+      const angle = (2 * Math.PI * i) / n - Math.PI / 2;
+      const px = cx + radius * Math.cos(angle);
+      const py = cy + radius * Math.sin(angle);
+      const ll = map.containerPointToLatLng(L.point(px, py));
+      markers[g.id].marker.setLatLng(ll);
+      const el = markers[g.id].marker.getElement();
+      if (el) {
+        el.style.zIndex = String(500 + i);
+        el.style.transition = 'transform 0.2s';
+      }
+    });
+  }
+
+  function findClusterForId(id) {
+    for (const c of clusters) {
+      if (c.find(g => g.id === id)) return c;
+    }
+    return null;
+  }
+
+  function attachSpiderfyHover() {
+    Object.keys(markers).forEach(id => {
+      const el = markers[id].marker.getElement();
+      if (!el) return;
+      if (el._spiderfyBound) return;
+      el._spiderfyBound = true;
+      el.addEventListener('mouseenter', function() {
+        const cluster = findClusterForId(id);
+        if (!cluster || cluster.length < 2) return;
+        if (hoveredCluster === cluster) return;
+        hoveredCluster = cluster;
+        fanOutCluster(cluster);
+      });
+      el.addEventListener('mouseleave', function() {
+        // delay collapse so user can move to another marker in the fan
+        setTimeout(() => {
+          if (!hoveredCluster) return;
+          // check if mouse is over any marker in this cluster
+          const still = hoveredCluster.some(g => {
+            const mEl = markers[g.id].marker.getElement();
+            return mEl && mEl.matches(':hover');
+          });
+          if (!still) {
+            applyStackOffsets(hoveredCluster);
+            hoveredCluster = null;
+          }
+        }, 150);
+      });
+    });
+  }
+
   // Override scrollToRow to also highlight marker
   const origScrollToRow = window.scrollToRow;
   window.scrollToRow = function(id) {
@@ -1222,6 +1354,18 @@ function getJS(): string {
 
   render();
   initMap();
+
+  if (map) {
+    map.on('zoomend moveend', function() {
+      computeClusters();
+      attachSpiderfyHover();
+    });
+    // initial clustering after tiles load
+    setTimeout(function() {
+      computeClusters();
+      attachSpiderfyHover();
+    }, 500);
+  }
 })();
 `;
 }
