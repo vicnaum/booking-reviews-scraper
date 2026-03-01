@@ -343,6 +343,7 @@ program
   .option('--photos', 'Download photos')
   .option('--ai-reviews', 'Run AI review analysis')
   .option('--ai-photos', 'Run AI photo analysis (Gemini vision)')
+  .option('--triage', 'Run AI triage (grade listings against priorities)')
   .option('--model <model>', 'LLM model for AI phases (default: gemini-3-flash-preview:high)')
   .option('--priorities <text>', 'Guest priorities for AI analysis (e.g. "quiet, fresh air")')
   .option('--checkin <date>', 'Check-in date (YYYY-MM-DD)')
@@ -364,7 +365,7 @@ program
     try { await import('dotenv/config'); } catch {}
 
     // If no phase flags specified, fetch all (including AI)
-    const hasPhaseFlag = cmdOpts.details || cmdOpts.reviews || cmdOpts.photos || cmdOpts.aiReviews || cmdOpts.aiPhotos;
+    const hasPhaseFlag = cmdOpts.details || cmdOpts.reviews || cmdOpts.photos || cmdOpts.aiReviews || cmdOpts.aiPhotos || cmdOpts.triage;
 
     const { runBatch } = await import('./batch.js');
     await runBatch(files, {
@@ -373,10 +374,12 @@ program
       fetchPhotos: hasPhaseFlag ? !!cmdOpts.photos : true,
       aiReviews: hasPhaseFlag ? !!cmdOpts.aiReviews : true,
       aiPhotos: hasPhaseFlag ? !!cmdOpts.aiPhotos : true,
+      triage: hasPhaseFlag ? !!cmdOpts.triage : true,
       aiModel: cmdOpts.model || undefined,
       aiPriorities: cmdOpts.priorities || undefined,
       aiReviewsExplicit: !!cmdOpts.aiReviews,
       aiPhotosExplicit: !!cmdOpts.aiPhotos,
+      triageExplicit: !!cmdOpts.triage,
       checkIn: cmdOpts.checkin || undefined,
       checkOut: cmdOpts.checkout || undefined,
       adults: cmdOpts.adults ? parseInt(cmdOpts.adults) : undefined,
@@ -412,7 +415,7 @@ program
   .description('AI-powered review analysis using Google Gemini')
   .option('--dry-run', 'Output compact text + prompt to stdout, no AI call')
   .option('--prompt <text>', 'Custom question (replaces default analysis prompt)')
-  .option('--model <model>', 'LLM model (default: gemini-2.5-flash-preview-05-20, supports :thinking-level suffix)')
+  .option('--model <model>', 'LLM model (default: gemini-3-flash-preview:high, supports :thinking-level suffix)')
   .option('--room <text>', 'Filter reviews by room type (substring match on room_view)')
   .option('--priorities <text>', 'Guest priorities to focus on (e.g. "quiet, fresh air, high floor")')
   .option('--all-years', 'Include all reviews regardless of age (default: last 4 years)')
@@ -451,6 +454,29 @@ program
     const result = await runAnalyzePhotos({
       photosDir,
       listingFile: cmdOpts.listing || undefined,
+      model: cmdOpts.model || undefined,
+      priorities: cmdOpts.priorities || undefined,
+    });
+    console.log(JSON.stringify(result.data, null, 2));
+  });
+
+// --- triage command: AI-powered listing triage ---
+program
+  .command('triage <listing-file>')
+  .description('AI-powered listing triage — grade against guest priorities')
+  .option('--ai-reviews <file>', 'AI review analysis JSON')
+  .option('--ai-photos <file>', 'AI photo analysis JSON')
+  .option('--model <model>', 'LLM model (default: gemini-3-flash-preview:high)')
+  .option('--priorities <text>', 'Guest requirements to evaluate against')
+  .action(async (listingFile: string, cmdOpts: any) => {
+    // Load .env for GEMINI_API_KEY
+    try { await import('dotenv/config'); } catch {}
+
+    const { runTriage } = await import('./triage.js');
+    const result = await runTriage({
+      listingFile,
+      aiReviewsFile: cmdOpts.aiReviews || undefined,
+      aiPhotosFile: cmdOpts.aiPhotos || undefined,
       model: cmdOpts.model || undefined,
       priorities: cmdOpts.priorities || undefined,
     });

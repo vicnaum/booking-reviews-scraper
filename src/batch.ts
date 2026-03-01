@@ -14,6 +14,7 @@ import * as bookingListing from './booking/listing.js';
 import * as bookingScraper from './booking/scraper.js';
 import { runAnalyze, parseModelConfig, getProviderApiKey, PROVIDER_KEY_NAMES, type AnalysisResult } from './analyze.js';
 import { runAnalyzePhotos, type PhotoAnalysisResult } from './analyze-photos.js';
+import { runTriage, type TriageResult } from './triage.js';
 
 // --- Interfaces ---
 
@@ -23,10 +24,12 @@ export interface BatchOptions {
   fetchPhotos: boolean;
   aiReviews: boolean;
   aiPhotos: boolean;
+  triage: boolean;
   aiModel?: string;
   aiPriorities?: string;
   aiReviewsExplicit: boolean;  // true when --ai-reviews was explicitly passed
   aiPhotosExplicit: boolean;   // true when --ai-photos was explicitly passed
+  triageExplicit: boolean;     // true when --triage was explicitly passed
   checkIn?: string;
   checkOut?: string;
   adults?: number;
@@ -59,6 +62,7 @@ export interface ManifestEntry {
   photos: ManifestPhase;
   aiReviews: ManifestPhase;
   aiPhotos: ManifestPhase;
+  triage: ManifestPhase;
   verdict?: 'keep' | 'eliminated' | 'shortlisted';
   verdictReason?: string;
 }
@@ -84,6 +88,7 @@ interface PlatformResult {
   photos: PhaseResult;
   aiReviews: PhaseResult;
   aiPhotos: PhaseResult;
+  triage: PhaseResult;
   errors: Array<{ id: string; phase: string; message: string }>;
 }
 
@@ -138,6 +143,7 @@ function getReviewsDir(outputDir: string): string { return path.join(outputDir, 
 function getPhotosDir(outputDir: string): string { return path.join(outputDir, 'photos'); }
 function getAiReviewsDir(outputDir: string): string { return path.join(outputDir, 'ai-reviews'); }
 function getAiPhotosDir(outputDir: string): string { return path.join(outputDir, 'ai-photos'); }
+function getTriageDir(outputDir: string): string { return path.join(outputDir, 'triage'); }
 
 /**
  * Migrate v1 manifest to v2:
@@ -155,6 +161,9 @@ function migrateManifestV2(manifest: BatchManifest): BatchManifest {
     }
     if (!(entry as any).aiPhotos) {
       (entry as ManifestEntry).aiPhotos = { status: 'not_requested' };
+    }
+    if (!(entry as any).triage) {
+      (entry as ManifestEntry).triage = { status: 'not_requested' };
     }
 
     // Migrate flat paths to subdirs
@@ -219,7 +228,7 @@ function migrateFilesToSubdirs(outputDir: string, manifest: BatchManifest): void
   }
 }
 
-function shouldRetryPhase(manifest: BatchManifest, key: string, phase: 'details' | 'reviews' | 'photos' | 'aiReviews' | 'aiPhotos'): boolean {
+function shouldRetryPhase(manifest: BatchManifest, key: string, phase: 'details' | 'reviews' | 'photos' | 'aiReviews' | 'aiPhotos' | 'triage'): boolean {
   const entry = manifest.listings[key];
   if (!entry) return false;
   const status = entry[phase].status;
@@ -234,6 +243,7 @@ function newPlatformResult(total: number): PlatformResult {
     photos: { fetched: 0, skipped: 0, failed: 0 },
     aiReviews: { fetched: 0, skipped: 0, failed: 0 },
     aiPhotos: { fetched: 0, skipped: 0, failed: 0 },
+    triage: { fetched: 0, skipped: 0, failed: 0 },
     errors: [],
   };
 }
@@ -274,7 +284,8 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         || entry.reviews.status === 'failed' || entry.reviews.status === 'partial'
         || entry.photos.status === 'failed' || entry.photos.status === 'partial'
         || entry.aiReviews?.status === 'failed'
-        || entry.aiPhotos?.status === 'failed';
+        || entry.aiPhotos?.status === 'failed'
+        || entry.triage?.status === 'failed';
       if (!needsRetry) continue;
 
       if (entry.platform === 'airbnb') {
@@ -325,6 +336,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
   if (options.fetchPhotos) phases.push('photos');
   if (options.aiReviews) phases.push('ai-reviews');
   if (options.aiPhotos) phases.push('ai-photos');
+  if (options.triage) phases.push('triage');
   console.log(`Phases: ${phases.join(', ')}\n`);
 
   const dateOpts = { checkIn, checkOut, adults };
@@ -364,6 +376,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           photos: { status: 'not_requested' },
           aiReviews: { status: 'not_requested' },
           aiPhotos: { status: 'not_requested' },
+          triage: { status: 'not_requested' },
         };
       }
       const entry = manifest.listings[manifestKey];
@@ -577,6 +590,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           photos: { status: 'not_requested' },
           aiReviews: { status: 'not_requested' },
           aiPhotos: { status: 'not_requested' },
+          triage: { status: 'not_requested' },
         };
       }
       const entry = manifest.listings[manifestKey];
@@ -918,31 +932,129 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
     }
   }
 
+  // 10. AI triage phase (runs after all AI analysis)
+  if (options.triage) {
+    const aiOutputDir = options.outputDir || 'data';
+    const aiModel = options.aiModel || process.env.LLM_MODEL || 'gemini-3-flash-preview:high';
+    const triageOutputDir = getTriageDir(aiOutputDir);
+
+    // Early API key validation
+    const modelConfig = parseModelConfig(aiModel);
+    const aiApiKey = getProviderApiKey(modelConfig.provider);
+    if (!aiApiKey) {
+      const keyName = PROVIDER_KEY_NAMES[modelConfig.provider];
+      if (options.triageExplicit) {
+        console.error(`Error: ${keyName} (or LLM_API_KEY) required for --triage. Set it in your environment.`);
+        process.exit(1);
+      } else {
+        console.warn(`Warning: ${keyName} not set — skipping AI triage.`);
+      }
+    } else {
+      console.log(`\nAI triage (${modelConfig.model}):`);
+      if (!fs.existsSync(triageOutputDir)) fs.mkdirSync(triageOutputDir, { recursive: true });
+
+      let triageIndex = 0;
+      const triageEntries = Object.entries(manifest.listings);
+      for (const [manifestKey, entry] of triageEntries) {
+        triageIndex++;
+        const prefix = `[${triageIndex}/${triageEntries.length}] ${manifestKey}`;
+
+        const platformResult = entry.platform === 'airbnb' ? airbnbResult : bookingResult;
+
+        // Skip if already fetched (unless --force)
+        const triageFile = path.join(triageOutputDir, `${entry.id}.json`);
+        if (!options.force && entry.triage?.status === 'fetched' && fs.existsSync(triageFile)) {
+          if (!(options.retryFailed && shouldRetryPhase(manifest, manifestKey, 'triage'))) {
+            console.log(`${prefix} — triage ⊘ skip`);
+            platformResult.triage.skipped++;
+            continue;
+          }
+        }
+
+        // Skip if retrying and triage already succeeded
+        if (options.retryFailed && entry.triage?.status === 'fetched') {
+          console.log(`${prefix} — triage ⊘ skip`);
+          platformResult.triage.skipped++;
+          continue;
+        }
+
+        // Skip if no listing details available (required for triage)
+        if (!entry.details.file || (entry.details.status !== 'fetched' && entry.details.status !== 'skipped')) {
+          console.log(`${prefix} — triage ⊘ skip (no listing details)`);
+          platformResult.triage.skipped++;
+          entry.triage = { status: 'skipped', reason: 'no listing details' };
+          continue;
+        }
+
+        const listingPath = path.join(aiOutputDir, entry.details.file!);
+        if (!fs.existsSync(listingPath)) {
+          console.log(`${prefix} — triage ⊘ skip (listing file missing)`);
+          platformResult.triage.skipped++;
+          entry.triage = { status: 'skipped', reason: 'listing file missing' };
+          continue;
+        }
+
+        // Resolve optional AI analysis files
+        const aiReviewsPath = entry.aiReviews?.file ? path.join(aiOutputDir, entry.aiReviews.file) : undefined;
+        const aiPhotosPath = entry.aiPhotos?.file ? path.join(aiOutputDir, entry.aiPhotos.file) : undefined;
+
+        const t = Date.now();
+        try {
+          const result: TriageResult = await runTriage({
+            listingFile: listingPath,
+            aiReviewsFile: aiReviewsPath && fs.existsSync(aiReviewsPath) ? aiReviewsPath : undefined,
+            aiPhotosFile: aiPhotosPath && fs.existsSync(aiPhotosPath) ? aiPhotosPath : undefined,
+            model: aiModel,
+            priorities: options.aiPriorities,
+          });
+
+          // Write result to triage dir
+          fs.writeFileSync(triageFile, JSON.stringify(result.data, null, 2));
+
+          const tier = result.data?.tier || '?';
+          const fitScore = result.data?.fitScore ?? '?';
+          console.log(`${prefix} — triage ✓ ${tier} (${fitScore}) (${formatDuration(Date.now() - t)})`);
+          platformResult.triage.fetched++;
+          entry.triage = { status: 'fetched', file: `triage/${entry.id}.json`, model: result.model };
+        } catch (err: any) {
+          console.log(`${prefix} — triage ✗ ${err.message}`);
+          platformResult.triage.failed++;
+          platformResult.errors.push({ id: entry.id, phase: 'triage', message: err.message });
+          entry.triage = { status: 'failed', error: err.message, model: modelConfig.model };
+        }
+
+        saveManifest(manifest, manifestPath);
+      }
+    }
+  }
+
   const totalTimeMs = Date.now() - startTime;
 
-  // 9. Final manifest save
+  // Final manifest save
   saveManifest(manifest, manifestPath);
 
   // 10. Print summary
   console.log('\nSummary:');
   if (preprocessed.airbnb.count > 0) {
-    const { details: d, reviews: r, photos: p, aiReviews: ai, aiPhotos: ap } = airbnbResult;
+    const { details: d, reviews: r, photos: p, aiReviews: ai, aiPhotos: ap, triage: t } = airbnbResult;
     let line = `  Airbnb:  ${airbnbResult.total} listings`;
     if (d.fetched + d.skipped + d.failed > 0) line += ` | details: ${d.fetched}\u2713 ${d.skipped}\u2298 ${d.failed}\u2717`;
     if (r.fetched + r.skipped + r.failed > 0) line += ` | reviews: ${r.fetched}\u2713 ${r.skipped}\u2298 ${r.failed}\u2717`;
     if (p.fetched + p.skipped + p.failed > 0) line += ` | photos: ${p.fetched}\u2713 ${p.skipped}\u2298 ${p.failed}\u2717`;
     if (ai.fetched + ai.skipped + ai.failed > 0) line += ` | ai-reviews: ${ai.fetched}\u2713 ${ai.skipped}\u2298 ${ai.failed}\u2717`;
     if (ap.fetched + ap.skipped + ap.failed > 0) line += ` | ai-photos: ${ap.fetched}\u2713 ${ap.skipped}\u2298 ${ap.failed}\u2717`;
+    if (t.fetched + t.skipped + t.failed > 0) line += ` | triage: ${t.fetched}\u2713 ${t.skipped}\u2298 ${t.failed}\u2717`;
     console.log(line);
   }
   if (preprocessed.booking.count > 0) {
-    const { details: d, reviews: r, photos: p, aiReviews: ai, aiPhotos: ap } = bookingResult;
+    const { details: d, reviews: r, photos: p, aiReviews: ai, aiPhotos: ap, triage: t } = bookingResult;
     let line = `  Booking: ${bookingResult.total} listings`;
     if (d.fetched + d.skipped + d.failed > 0) line += ` | details: ${d.fetched}\u2713 ${d.skipped}\u2298 ${d.failed}\u2717`;
     if (r.fetched + r.skipped + r.failed > 0) line += ` | reviews: ${r.fetched}\u2713 ${r.skipped}\u2298 ${r.failed}\u2717`;
     if (p.fetched + p.skipped + p.failed > 0) line += ` | photos: ${p.fetched}\u2713 ${p.skipped}\u2298 ${p.failed}\u2717`;
     if (ai.fetched + ai.skipped + ai.failed > 0) line += ` | ai-reviews: ${ai.fetched}\u2713 ${ai.skipped}\u2298 ${ai.failed}\u2717`;
     if (ap.fetched + ap.skipped + ap.failed > 0) line += ` | ai-photos: ${ap.fetched}\u2713 ${ap.skipped}\u2298 ${ap.failed}\u2717`;
+    if (t.fetched + t.skipped + t.failed > 0) line += ` | triage: ${t.fetched}\u2713 ${t.skipped}\u2298 ${t.failed}\u2717`;
     console.log(line);
   }
   console.log(`  Time: ${formatDuration(totalTimeMs)}`);
@@ -962,7 +1074,8 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
       || entry.reviews.status === 'failed' || entry.reviews.status === 'partial'
       || entry.photos.status === 'failed' || entry.photos.status === 'partial'
       || entry.aiReviews?.status === 'failed'
-      || entry.aiPhotos?.status === 'failed') {
+      || entry.aiPhotos?.status === 'failed'
+      || entry.triage?.status === 'failed') {
       failureCount++;
     }
   }
