@@ -76,25 +76,30 @@ reviewr https://www.airbnb.com/rooms/12345 --download-photos
 reviewr reviews https://www.booking.com/hotel/pl/example.html
 reviewr reviews https://www.airbnb.com/rooms/12345 -p    # Print to stdout
 
-# Listing details with pricing (Airbnb)
-reviewr details "<airbnb-url>" --checkin 2026-03-29 --checkout 2026-04-04
+# Listing details with pricing
+reviewr details "<url>" --checkin 2026-03-29 --checkout 2026-04-04
 
-# Batch scrape reviews from CSV files
-reviewr scrape --booking
-reviewr scrape --airbnb
+# Batch workflow: scrape + AI analysis + triage
+reviewr batch urls.txt --checkin 2026-03-16 --checkout 2026-03-21 --adults 3 \
+  --priorities "quiet, modern, double bed" -o data/rome
+
+# Run specific AI phases on existing data
+reviewr batch --retry --ai-reviews -o data/rome
+reviewr batch --retry --triage --priorities "quiet, elevator" -o data/rome
+
+# Generate interactive HTML report
+reviewr report -o data/rome
+
+# Ask follow-up questions about shortlisted properties
+reviewr ask "Is there free parking? ZTL zone?" --picks liked -o data/rome
+reviewr ask "How noisy at night?" --ids 12345,mamomi-house -o data/rome
 
 # Analytics
 reviewr analytics --booking
 reviewr analytics --airbnb --12m
 
-# Transform JSON to CSV (Booking only)
-reviewr transform
-
 # Find hosts/agencies in a location (Airbnb only)
 reviewr hosts "Gdansk, Poland"
-
-# Parse host HTML pages (Airbnb only)
-reviewr parse-hosts
 ```
 
 ### Run without installing
@@ -109,7 +114,13 @@ npx tsx src/cli.ts <command> [options]
 |---------|-------------|
 | `reviewr <url>` | Fetch listing details (both platforms) |
 | `reviewr reviews <url>` | Fetch reviews (both platforms) |
-| `reviewr details <url>` | Fetch listing details (both platforms) |
+| `reviewr details <url>` | Fetch listing details with pricing options |
+| `reviewr batch [files...]` | Batch fetch details, reviews, photos, and AI analysis |
+| `reviewr analyze <file>` | AI review analysis for a single listing |
+| `reviewr analyze-photos <dir>` | AI photo analysis using Gemini vision |
+| `reviewr triage <file>` | AI triage -- grade listing against guest priorities |
+| `reviewr ask <question>` | Ask a question about shortlisted properties |
+| `reviewr report` | Generate HTML report from triage results |
 | `reviewr scrape [path]` | Batch scrape reviews from CSV files |
 | `reviewr analytics [path]` | Run analytics on JSON output |
 | `reviewr transform [path]` | JSON to CSV (Booking only) |
@@ -155,6 +166,13 @@ booking-reviews-scraper/
 │   ├── cli.ts                   # Unified CLI entry point (reviewr)
 │   ├── config.ts                # Proxy auth resolution & persistence
 │   ├── utils.ts                 # Platform detection, URL parsing, output helpers
+│   ├── batch.ts                 # Batch orchestrator (details + reviews + photos + AI)
+│   ├── analyze.ts               # AI review analysis (Gemini/OpenAI/xAI)
+│   ├── analyze-photos.ts        # AI photo analysis (Gemini vision)
+│   ├── triage.ts                # AI triage — grade listings against priorities
+│   ├── ask.ts                   # Ad-hoc Q&A for shortlisted properties
+│   ├── report.ts                # HTML report generator with Q&A tab
+│   ├── preprocess.ts            # URL deduplication and date detection
 │   ├── booking/
 │   │   ├── scraper.ts           # Booking.com reviews scraper
 │   │   ├── listing.ts           # Booking.com listing details scraper

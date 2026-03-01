@@ -393,10 +393,14 @@ Saves a v2 manifest to `batch_manifest.json` tracking per-listing, per-phase sta
 ```
 {output-dir}/
 ├── batch_manifest.json
-├── listings/           # listing_{id}.json
-├── reviews/            # room_{id}_reviews.json, {id}_reviews.json
-├── photos/             # {id}/  (per-listing photo directories)
-└── ai-reviews/         # {id}.json  (AI analysis results)
+├── picks.json              # Liked/hidden listing IDs (from report UI)
+├── report.html             # Generated HTML report
+├── listings/               # listing_{id}.json
+├── reviews/                # room_{id}_reviews.json, {id}_reviews.json
+├── photos/                 # {id}/  (per-listing photo directories)
+├── ai-reviews/             # {id}.json  (AI analysis results)
+├── triage/                 # {id}.json  (AI triage results)
+└── queries/                # {slug}.json  (ad-hoc Q&A results)
 ```
 
 ### AI-powered review analysis (single file)
@@ -413,6 +417,51 @@ reviewr analyze reviews.json --all-years                  # Include all reviews 
 Returns structured JSON with: overall sentiment, strengths, weaknesses, red flags, deal-breakers, trends, guest demographics, summary score, and priority analysis (when `--priorities` provided). Supports Gemini, OpenAI, and xAI models. Default model: `gemini-3-flash-preview:high`.
 
 For batch analysis across many listings, use `reviewr batch --ai-reviews` instead.
+
+### AI triage — grade listings against priorities
+
+```bash
+reviewr triage listings/listing_42739155.json --priorities "quiet, modern, double bed"
+reviewr triage listing.json --ai-reviews ai-reviews/42739155.json --ai-photos ai-photos/42739155.json
+reviewr triage listing.json --model gemini-2.5-flash-preview-05-20:high
+```
+
+Grades a single listing against guest requirements. Produces a structured assessment with fit score (0-100), tier (top_pick/shortlist/consider/unlikely/no_go), requirement status, sub-scores, highlights, concerns, and deal-breakers. For batch triage across all listings, use `reviewr batch --triage`.
+
+### Ad-hoc Q&A for shortlisted properties
+
+```bash
+# Ask a question about all liked properties
+reviewr ask "Is there free parking? ZTL zone?" --picks liked -o data/rome
+
+# Ask about specific listings by ID
+reviewr ask "How noisy at night?" --ids 1619653081989176802,mamomi-house -o data/rome
+
+# Custom model, custom filename
+reviewr ask "Is there a bathtub?" --model gemini-2.0-flash --save-name bathtub -o data/rome
+
+# Re-run an existing query
+reviewr ask "Is there free parking?" --force -o data/rome
+```
+
+Makes one LLM call per listing with the full listing details + raw guest reviews. Returns per-listing answers with confidence level (high/medium/low) and supporting evidence. Results are saved to `queries/{slug}.json` and displayed as a summary table.
+
+Options: `--picks liked|hidden|all` (default: liked), `--ids <csv>`, `--model <m>`, `--save-name <slug>`, `--force`.
+
+### Generate HTML report
+
+```bash
+reviewr report -o data/rome                           # Generate report from triage results
+reviewr report -o data/rome --output-file report.html  # Custom output path
+```
+
+Generates a self-contained HTML report from triage results with:
+- Top picks hero cards, tier filters, sortable table
+- Detail panels with tabs: Triage (requirements, scores), Reviews AI (strengths, weaknesses), Q&A (if queries exist)
+- Like/hide buttons with `picks.json` persistence
+- Photo galleries per listing
+
+Q&A tab automatically loads all `queries/*.json` files and shows per-listing answers with confidence badges and evidence quotes.
 
 ### Refresh Airbnb API hashes
 

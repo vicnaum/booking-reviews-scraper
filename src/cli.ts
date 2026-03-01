@@ -483,6 +483,50 @@ program
     console.log(JSON.stringify(result.data, null, 2));
   });
 
+// --- ask command: ad-hoc Q&A for shortlisted properties ---
+program
+  .command('ask <question>')
+  .description('Ask a question about shortlisted properties (AI-powered)')
+  .option('--picks <subset>', 'Which picks to query: liked, hidden, or all', 'liked')
+  .option('--ids <ids>', 'Specific listing IDs (comma-separated)')
+  .option('--model <model>', 'LLM model (default: gemini-3-flash-preview:high)')
+  .option('--save-name <name>', 'Custom query filename slug')
+  .option('--force', 'Re-run even if query result exists')
+  .action(async (question: string, cmdOpts: any, command: Command) => {
+    const opts = command.optsWithGlobals();
+
+    // Load .env for API keys
+    try { await import('dotenv/config'); } catch {}
+
+    const { runAsk } = await import('./ask.js');
+    await runAsk({
+      question,
+      outputDir: cmdOpts.outputDir || opts.outputDir || 'data',
+      picks: cmdOpts.picks || 'liked',
+      ids: cmdOpts.ids ? cmdOpts.ids.split(',') : undefined,
+      model: cmdOpts.model || undefined,
+      saveName: cmdOpts.saveName || undefined,
+      force: !!cmdOpts.force,
+    });
+  });
+
+// --- report command ---
+program
+  .command('report')
+  .description('Generate HTML report from triage results')
+  .option('-o, --output-dir <dir>', 'Data directory with manifest + triage results')
+  .option('--output-file <file>', 'Output HTML file path')
+  .action(async (cmdOpts: any, command: Command) => {
+    const opts = command.optsWithGlobals();
+    const { generateReport } = await import('./report.js');
+    const outputDir = cmdOpts.outputDir || opts.outputDir || 'data';
+    const result = await generateReport({
+      outputDir,
+      outputFile: cmdOpts.outputFile || undefined,
+    });
+    console.log(`Report: ${result}`);
+  });
+
 // --- auth command ---
 program
   .command('auth [proxy-url]')
