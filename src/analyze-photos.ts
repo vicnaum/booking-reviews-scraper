@@ -5,7 +5,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { parseModelConfig, getProviderApiKey, PROVIDER_KEY_NAMES, type LLMProvider } from './analyze.js';
+import { parseModelConfig, getProviderApiKey, PROVIDER_KEY_NAMES, type LLMProvider, type UsageSummary } from './analyze.js';
 
 // --- Types ---
 
@@ -22,6 +22,7 @@ export interface PhotoAnalysisResult {
   provider: LLMProvider;
   photoCount: number;
   tokensUsed?: number;
+  usage?: UsageSummary;
 }
 
 // --- Constants ---
@@ -468,12 +469,19 @@ Check the photos for visual evidence related to each priority. Include a "priori
   console.error(`\nUsage:`);
   console.error(formatUsageSummary(result.usageMetadata, modelConfig.model, result.durationMs));
 
+  const prompt = result.usageMetadata?.promptTokenCount || 0;
+  const response = result.usageMetadata?.candidatesTokenCount || 0;
+  const thinking = result.usageMetadata?.thoughtsTokenCount || 0;
+  const pricing = PRICING[modelConfig.model] || PRICING.default;
+  const cost = +(((prompt / 1_000_000) * pricing.input) + ((response / 1_000_000) * pricing.output)).toFixed(4);
+
   return {
     data: parsed,
     model: modelConfig.model,
     provider: modelConfig.provider,
     photoCount: imageFiles.length,
-    tokensUsed: result.usageMetadata?.promptTokenCount,
+    tokensUsed: prompt,
+    usage: { inputTokens: prompt, outputTokens: response, thinkingTokens: thinking || undefined, cost },
   };
 }
 

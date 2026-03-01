@@ -910,11 +910,19 @@ export interface AnalyzeOptions {
   allYears?: boolean;
 }
 
+export interface UsageSummary {
+  inputTokens: number;
+  outputTokens: number;
+  thinkingTokens?: number;
+  cost: number;        // USD
+}
+
 export interface AnalysisResult {
   data: any;          // parsed analysis JSON, or null for dry-run
   model: string;
   provider: LLMProvider;
   multiYear: boolean;
+  usage?: UsageSummary;
 }
 
 const YEAR_SPLIT_THRESHOLD = 200;
@@ -1169,7 +1177,8 @@ Include a "priorityAnalysis" section in your response analyzing each priority wi
       _meta: getUsageMeta(usage, modelName),
     };
     console.error(`\n${formatUsageSummary(usage, modelName)}`);
-    return { data: output, model: modelName, provider: modelConfig.provider, multiYear: true };
+    const meta = getUsageMeta(usage, modelName);
+    return { data: output, model: modelName, provider: modelConfig.provider, multiYear: true, usage: { inputTokens: meta.totals.promptTokens, outputTokens: meta.totals.responseTokens, thinkingTokens: meta.totals.thinkingTokens || undefined, cost: meta.cost.total } };
   } else {
     // --- Single-request mode: year headers + recency weighting ---
     let reviewResult: FormatResult;
@@ -1204,7 +1213,8 @@ Include a "priorityAnalysis" section in your response analyzing each priority wi
     }
 
     console.error(`\n${formatUsageSummary(usage, modelName)}`);
-    return { data: outputData, model: modelName, provider: modelConfig.provider, multiYear: false };
+    const meta = getUsageMeta(usage, modelName);
+    return { data: outputData, model: modelName, provider: modelConfig.provider, multiYear: false, usage: { inputTokens: meta.totals.promptTokens, outputTokens: meta.totals.responseTokens, thinkingTokens: meta.totals.thinkingTokens || undefined, cost: meta.cost.total } };
   }
 }
 

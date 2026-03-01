@@ -51,6 +51,7 @@ export interface ManifestPhase {
   count?: number;
   expected?: number;
   model?: string;
+  cost?: number;        // USD cost of AI processing
 }
 
 export interface ManifestEntry {
@@ -827,7 +828,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
 
           console.log(`${prefix} \u2014 ai-reviews \u2713 (${formatDuration(Date.now() - t)})`);
           platformResult.aiReviews.fetched++;
-          entry.aiReviews = { status: 'fetched', file: `ai-reviews/${entry.id}.json`, model: result.model };
+          entry.aiReviews = { status: 'fetched', file: `ai-reviews/${entry.id}.json`, model: result.model, cost: result.usage?.cost };
         } catch (err: any) {
           console.log(`${prefix} \u2014 ai-reviews \u2717 ${err.message}`);
           platformResult.aiReviews.failed++;
@@ -919,7 +920,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
 
           console.log(`${prefix} — ai-photos ✓ ${result.photoCount} photos (${formatDuration(Date.now() - t)})`);
           platformResult.aiPhotos.fetched++;
-          entry.aiPhotos = { status: 'fetched', file: `ai-photos/${entry.id}.json`, model: result.model, count: result.photoCount };
+          entry.aiPhotos = { status: 'fetched', file: `ai-photos/${entry.id}.json`, model: result.model, count: result.photoCount, cost: result.usage?.cost };
         } catch (err: any) {
           console.log(`${prefix} — ai-photos ✗ ${err.message}`);
           platformResult.aiPhotos.failed++;
@@ -1015,7 +1016,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           const fitScore = result.data?.fitScore ?? '?';
           console.log(`${prefix} — triage ✓ ${tier} (${fitScore}) (${formatDuration(Date.now() - t)})`);
           platformResult.triage.fetched++;
-          entry.triage = { status: 'fetched', file: `triage/${entry.id}.json`, model: result.model };
+          entry.triage = { status: 'fetched', file: `triage/${entry.id}.json`, model: result.model, cost: result.usage?.cost };
         } catch (err: any) {
           console.log(`${prefix} — triage ✗ ${err.message}`);
           platformResult.triage.failed++;
@@ -1058,6 +1059,17 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
     console.log(line);
   }
   console.log(`  Time: ${formatDuration(totalTimeMs)}`);
+
+  // Sum AI costs from manifest
+  let totalCost = 0;
+  for (const entry of Object.values(manifest.listings)) {
+    if (entry.aiReviews?.cost) totalCost += entry.aiReviews.cost;
+    if (entry.aiPhotos?.cost) totalCost += entry.aiPhotos.cost;
+    if (entry.triage?.cost) totalCost += entry.triage.cost;
+  }
+  if (totalCost > 0) {
+    console.log(`  AI cost: $${totalCost.toFixed(2)} (all phases, all listings in manifest)`);
+  }
 
   const allErrors = [...airbnbResult.errors, ...bookingResult.errors];
   if (allErrors.length > 0) {
