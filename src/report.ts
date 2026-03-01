@@ -74,6 +74,8 @@ interface ListingRow {
   hasElevator: boolean;
   hasAC: boolean;
   hasBalcony: boolean;
+  lat: number | null;
+  lng: number | null;
   // AI review data
   aiOverallSentiment: string;
   aiStrengths: Array<{ theme: string; description: string; evidence: string[]; frequency: string }>;
@@ -129,6 +131,8 @@ export async function generateReport(options: ReportOptions): Promise<string> {
     let checkInTime = '';
     let checkOutTime = '';
     let hasParking = false, hasWifi = false, hasElevator = false, hasAC = false, hasBalcony = false;
+    let lat: number | null = null;
+    let lng: number | null = null;
     if (entry.details?.status === 'fetched') {
       const listingPath = join(outputDir, entry.details.file);
       if (existsSync(listingPath)) {
@@ -150,6 +154,8 @@ export async function generateReport(options: ReportOptions): Promise<string> {
         hasElevator = /elevator|lift/i.test(amenStr);
         hasAC = /air.?condition|a\/c|\bac\b|cooling/i.test(amenStr);
         hasBalcony = /balcon|terrace|patio/i.test(amenStr);
+        lat = listing.coordinates?.lat ?? null;
+        lng = listing.coordinates?.lng ?? null;
       }
     }
 
@@ -194,6 +200,8 @@ export async function generateReport(options: ReportOptions): Promise<string> {
       dealBreakers: triage.dealBreakers || [],
       summary: triage.summary || '',
       photos,
+      lat,
+      lng,
       rating,
       reviewCount,
       bedrooms,
@@ -294,6 +302,8 @@ function buildHTML(rows: ListingRow[], dates?: { checkIn: string; checkOut: stri
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Listing Report — ${rows.length} properties</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
 ${getCSS()}
 </style>
@@ -341,6 +351,14 @@ ${tierOrder.map(t => `  <button class="tier-btn active" data-tier="${t}"><span c
 <tbody id="liked-body">
 </tbody>
 </table>
+</section>
+
+<!-- MAP -->
+<section id="map-section">
+  <h2 class="section-title">Map</h2>
+  <div id="map-resize-top" class="map-resize-handle" title="Drag to resize map"><span>⋯</span></div>
+  <div id="map" style="height:500px;border-radius:0;border:1px solid var(--border);border-top:none;border-bottom:none;margin:0 32px"></div>
+  <div id="map-resize-bottom" class="map-resize-handle" title="Drag to resize map"><span>⋯</span></div>
 </section>
 
 <!-- TABLE -->
@@ -601,6 +619,24 @@ tr.detail-row td { padding: 0; }
 .qa-evidence-item::before { content: '"'; }
 .qa-evidence-item::after { content: '"'; }
 
+/* MAP */
+#map-section { padding: 16px 0; }
+.map-resize-handle { margin: 0 32px; height: 14px; background: var(--card); border: 1px solid var(--border); cursor: ns-resize; display: flex; align-items: center; justify-content: center; user-select: none; color: var(--muted); font-size: 16px; letter-spacing: 2px; transition: background .15s; }
+.map-resize-handle:hover { background: #e2e8f0; }
+.map-resize-handle:active { background: #cbd5e1; }
+#map-resize-top { border-radius: 12px 12px 0 0; border-bottom: none; }
+#map-resize-bottom { border-radius: 0 0 12px 12px; border-top: none; }
+
+/* MAP MARKERS */
+.map-marker { background: none; border: none; }
+.marker-card { width: 64px; background: var(--card); border-radius: 8px; border: 2px solid var(--border); box-shadow: 0 2px 8px rgba(0,0,0,.15); overflow: hidden; cursor: pointer; transition: all .15s; position: relative; }
+.marker-card:hover { transform: scale(1.1); z-index: 1000 !important; }
+.marker-card.liked { border-color: #ef4444; }
+.marker-card.active { border-color: var(--shortlist); box-shadow: 0 2px 12px rgba(59,130,246,.4); }
+.marker-card .marker-photo { width: 100%; height: 44px; object-fit: cover; display: block; background: #e2e8f0; }
+.marker-card .marker-price { font-size: 9px; font-weight: 700; text-align: center; padding: 2px 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2; }
+.marker-card .marker-dot { position: absolute; top: 3px; right: 3px; width: 8px; height: 8px; border-radius: 50%; border: 1px solid #fff; }
+
 @media (max-width: 900px) {
   .detail-panel { flex-direction: column; }
   .detail-left { flex: none; width: 100%; }
@@ -752,6 +788,7 @@ function getJS(): string {
 
     bindRowClicks();
     updateCounts();
+    updateMapMarkers();
   }
 
   function buildThemeCard(t, type) {
@@ -1068,7 +1105,123 @@ function getJS(): string {
   function parsePrice(s) { if (!s) return 99999; const m = s.replace(/[^0-9.]/g,''); return m ? parseFloat(m) : 99999; }
   function tierRank(t) { return {top_pick:0,shortlist:1,consider:2,unlikely:3,no_go:4}[t] ?? 5; }
 
+  // --- MAP ---
+  let map = null;
+  const markers = {};
+  let activeMarkerId = null;
+
+  function initMap() {
+    const withCoords = DATA.filter(r => r.lat != null && r.lng != null);
+    if (withCoords.length === 0) {
+      const sec = document.getElementById('map-section');
+      if (sec) sec.style.display = 'none';
+      return;
+    }
+
+    map = L.map('map', { scrollWheelZoom: true });
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
+      maxZoom: 19
+    }).addTo(map);
+
+    const bounds = [];
+    withCoords.forEach(r => {
+      const photo = r.photos[0] || '';
+      const isLiked = likedIds.has(r.id);
+      const tierColor = TIER_COLORS[r.tier] || '#6b7280';
+      const html = '<div class="marker-card' + (isLiked ? ' liked' : '') + '" data-id="' + r.id + '">'
+        + (photo ? '<img class="marker-photo" src="' + esc(photo) + '" alt="">' : '<div class="marker-photo"></div>')
+        + '<div class="marker-price">' + esc(r.priceTotal) + '</div>'
+        + '<div class="marker-dot" style="background:' + tierColor + '"></div>'
+        + '</div>';
+
+      const icon = L.divIcon({ className: 'map-marker', html: html, iconSize: [64, 62], iconAnchor: [32, 62] });
+      const marker = L.marker([r.lat, r.lng], { icon: icon }).addTo(map);
+      marker.on('click', function() {
+        window.scrollToRow(r.id);
+        setActiveMarker(r.id);
+      });
+      markers[r.id] = { marker: marker, data: r };
+      bounds.push([r.lat, r.lng]);
+    });
+
+    if (bounds.length > 0) {
+      map.fitBounds(bounds, { padding: [30, 30] });
+    }
+    updateMapMarkers();
+
+    // Resize handles
+    const mapEl = document.getElementById('map');
+    function attachResize(handleId, direction) {
+      const handle = document.getElementById(handleId);
+      if (!handle || !mapEl) return;
+      let startY, startH;
+      handle.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        startY = e.clientY;
+        startH = mapEl.offsetHeight;
+        function onMove(e) {
+          const delta = (e.clientY - startY) * direction;
+          const h = Math.max(200, startH + delta);
+          mapEl.style.height = h + 'px';
+          map.invalidateSize();
+        }
+        function onUp() {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+    }
+    attachResize('map-resize-top', -1);
+    attachResize('map-resize-bottom', 1);
+  }
+
+  function setActiveMarker(id) {
+    if (activeMarkerId && markers[activeMarkerId]) {
+      const el = markers[activeMarkerId].marker.getElement();
+      if (el) { const card = el.querySelector('.marker-card'); if (card) card.classList.remove('active'); }
+    }
+    activeMarkerId = id;
+    if (id && markers[id]) {
+      const el = markers[id].marker.getElement();
+      if (el) { const card = el.querySelector('.marker-card'); if (card) card.classList.add('active'); }
+    }
+  }
+
+  function updateMapMarkers() {
+    if (!map) return;
+    Object.keys(markers).forEach(id => {
+      const m = markers[id];
+      const r = m.data;
+      const visible = activeTiers.has(r.tier) && (showHidden || !hiddenIds.has(r.id));
+      if (visible && !map.hasLayer(m.marker)) m.marker.addTo(map);
+      else if (!visible && map.hasLayer(m.marker)) map.removeLayer(m.marker);
+
+      // Update liked styling
+      const el = m.marker.getElement();
+      if (el) {
+        const card = el.querySelector('.marker-card');
+        if (card) {
+          card.classList.toggle('liked', likedIds.has(id));
+        }
+      }
+    });
+  }
+
+  // Override scrollToRow to also highlight marker
+  const origScrollToRow = window.scrollToRow;
+  window.scrollToRow = function(id) {
+    origScrollToRow(id);
+    setActiveMarker(id);
+    if (markers[id] && map) {
+      map.panTo(markers[id].marker.getLatLng(), { animate: true });
+    }
+  };
+
   render();
+  initMap();
 })();
 `;
 }
