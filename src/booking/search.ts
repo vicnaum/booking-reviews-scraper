@@ -30,6 +30,12 @@ interface BookingSession {
   destId: number | null;
 }
 
+// In-memory session cache to avoid re-bootstrapping Playwright on every call.
+// The CSRF JWT typically lasts ~24h, so we cache aggressively.
+let cachedSession: BookingSession | null = null;
+let cachedSessionTime = 0;
+const SESSION_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
 async function bootstrapSession(
   params: BookingSearchParams,
 ): Promise<BookingSession> {
@@ -45,8 +51,13 @@ async function bootstrapSession(
     });
     const page = await context.newPage();
 
-    // Build a search URL that will trigger GraphQL requests
-    const searchUrl = buildSearchUrl(params);
+    // Build a search URL that will trigger GraphQL requests.
+    // If no location/destId provided (bbox-only search), use a fallback city
+    // so the page loads results and fires GraphQL (needed to capture CSRF token).
+    const bootstrapParams = (!params.location && !params.destId)
+      ? { ...params, destId: '-2601889', location: undefined } as BookingSearchParams  // London
+      : params;
+    const searchUrl = buildSearchUrl(bootstrapParams);
     console.log(`  Navigating to: ${searchUrl}`);
 
     // Intercept first GraphQL request to capture headers
@@ -615,11 +626,21 @@ export async function searchBooking(
   }
 
   let session: BookingSession;
-  try {
-    session = await bootstrapSession(params);
-  } catch (error: any) {
-    console.log(`❌ Bootstrap failed: ${error.message}`);
-    throw error;
+  const now = Date.now();
+  if (cachedSession && cachedSession.headers['x-booking-csrf-token'] && (now - cachedSessionTime) < SESSION_TTL_MS) {
+    console.log('♻️  Reusing cached Booking session');
+    session = cachedSession;
+  } else {
+    try {
+      session = await bootstrapSession(params);
+      if (session.headers['x-booking-csrf-token']) {
+        cachedSession = session;
+        cachedSessionTime = Date.now();
+      }
+    } catch (error: any) {
+      console.log(`❌ Bootstrap failed: ${error.message}`);
+      throw error;
+    }
   }
 
   const seenIds = new Set<string>();
@@ -640,8 +661,12 @@ export async function searchBooking(
     if (onProgress) onProgress(page);
   };
 
-  if (!params.exhaustive) {
-    // Quick mode: FullSearch with offset pagination
+  // Use MapMarkers when we have a bbox but no city (viewport search).
+  // FullSearch only works with destType=CITY; it ignores bbox.
+  const useBboxSearch = !!bbox && !params.location && !params.destId;
+
+  if (!params.exhaustive && !useBboxSearch) {
+    // Quick mode: FullSearch with offset pagination (city-based)
     console.log(`🔍 Quick search via FullSearch (25/page, max ${params.maxResults || 'unlimited'} results)...`);
     let offset = 0;
     let pageIndex = 0;
@@ -675,7 +700,12 @@ export async function searchBooking(
         if (error.message.includes('403') && !retried) {
           console.log('  🔄 Session expired, re-bootstrapping...');
           try {
+            cachedSession = null;
             session = await bootstrapSession(params);
+            if (session.headers['x-booking-csrf-token']) {
+              cachedSession = session;
+              cachedSessionTime = Date.now();
+            }
             retried = true;
             continue;
           } catch {
@@ -690,6 +720,65 @@ export async function searchBooking(
 
         const ssrResults = await searchBookingSSR(params, session, seenIds, params.maxResults ? params.maxResults - allResults.length : undefined, progressTracker);
         allResults.push(...ssrResults);
+        break;
+      }
+    }
+  } else if (useBboxSearch && !params.exhaustive) {
+    // Quick bbox mode: MapMarkersDesktop on the single viewport bbox (no grid)
+    if (!bbox) throw new Error('Bbox search requires a bounding box');
+
+    console.log(`🔍 Quick bbox search via MapMarkersDesktop (100/page, max ${params.maxResults || 'unlimited'} results)...`);
+    let offset = 0;
+    let pageIndex = 0;
+    let retried = false;
+
+    while (true) {
+      try {
+        const body = buildMapMarkersBody(params, session, bbox, offset);
+        const mapSession = { ...session };
+        mapSession.headers = {
+          ...session.headers,
+          'x-booking-context-action': 'markers_on_map-search_results',
+          'x-booking-topic': 'capla_browser_b-search-web-searchresults, markers_on_map-search_results',
+        };
+
+        const data = await fetchGraphQL(mapSession, body);
+        const page = parseMapMarkersResponse(data, params, pageIndex);
+
+        const newResults: SearchResult[] = [];
+        for (const r of page.results) {
+          if (!seenIds.has(r.id)) {
+            seenIds.add(r.id);
+            newResults.push(r);
+          }
+        }
+
+        allResults.push(...newResults);
+        progressTracker({ ...page, results: newResults });
+
+        if (!page.hasNextPage) break;
+        if (params.maxResults && allResults.length >= params.maxResults) break;
+
+        offset += 100;
+        pageIndex++;
+        await sleep(PAGE_DELAY_MS);
+      } catch (error: any) {
+        if (error.message.includes('403') && !retried) {
+          console.log('  🔄 Session expired, re-bootstrapping...');
+          try {
+            cachedSession = null;
+            session = await bootstrapSession(params);
+            if (session.headers['x-booking-csrf-token']) {
+              cachedSession = session;
+              cachedSessionTime = Date.now();
+            }
+            retried = true;
+            continue;
+          } catch {
+            console.log('  ❌ Re-bootstrap failed, falling back to SSR');
+          }
+        }
+        console.log(`  ⚠️  MapMarkers error: ${error.message}`);
         break;
       }
     }

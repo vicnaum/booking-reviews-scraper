@@ -1,0 +1,75 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Platform {
+  airbnb
+  booking
+}
+
+enum JobStatus {
+  pending
+  running
+  completed
+  failed
+  cancelled
+}
+
+model SearchJob {
+  id           String    @id @default(cuid())
+  status       JobStatus @default(pending)
+  platform     Platform
+  location     String?
+  boundingBox  Json?
+  checkin      String?
+  checkout     String?
+  adults       Int       @default(2)
+  currency     String    @default("USD")
+  filters      Json?
+  totalResults Int       @default(0)
+  pagesScanned Int       @default(0)
+  progress     Float     @default(0)
+  errorMessage String?
+  bullJobId    String?
+  createdAt    DateTime  @default(now())
+  startedAt    DateTime?
+  completedAt  DateTime?
+  durationMs   Int?
+  results      SearchResult[]
+}
+
+model SearchResult {
+  id               String   @id @default(cuid())
+  jobId            String
+  job              SearchJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  listingId        String
+  platform         Platform
+  name             String
+  url              String
+  rating           Float?
+  reviewCount      Int      @default(0)
+  priceAmount      Float?
+  priceCurrency    String?
+  totalPrice       Float?
+  lat              Float?
+  lng              Float?
+  propertyType     String?
+  photoUrl         String?
+  bedrooms         Int?
+  bathrooms        Int?
+  maxGuests        Int?
+  superhost        Boolean?
+  instantBook      Boolean?
+  hostId           String?
+  stars            Int?
+  freeCancellation Boolean?
+  createdAt        DateTime @default(now())
+
+  @@unique([jobId, listingId, platform])
+  @@index([jobId])
+}

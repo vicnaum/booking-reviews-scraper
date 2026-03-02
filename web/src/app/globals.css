@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+:root {
+  --color-background: #0a0a0a;
+  --color-foreground: #ededed;
+  --color-airbnb: #ff5a5f;
+  --color-booking: #003580;
+  --color-muted: #888;
+}
+
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* Leaflet overrides for dark theme */
+.leaflet-container {
+  background: #1a1a2e;
+}
+
+.leaflet-control-zoom a {
+  background: #1e1e2e !important;
+  color: #ccc !important;
+  border-color: #333 !important;
+}
+
+.leaflet-control-attribution {
+  background: rgba(0, 0, 0, 0.6) !important;
+  color: #888 !important;
+}
+
+.leaflet-control-attribution a {
+  color: #aaa !important;
+}
+
+/* Price marker: prevent Leaflet from clipping the pill */
+.leaflet-marker-icon {
+  overflow: visible !important;
+}
