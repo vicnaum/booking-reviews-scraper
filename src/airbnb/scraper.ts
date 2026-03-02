@@ -38,7 +38,7 @@ function getProxyConfig() {
 }
 
 // Browser headers for AirBnB requests
-const BROWSER_HEADERS = {
+export const BROWSER_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   'Accept-Language': 'en-US,en;q=0.9',
   'Accept-Encoding': 'gzip, deflate, br',
@@ -57,7 +57,7 @@ const BROWSER_HEADERS = {
 };
 
 // API headers for GraphQL requests
-const API_HEADERS = {
+export const API_HEADERS = {
   'Accept': 'application/json',
   'Content-Type': 'application/json',
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',

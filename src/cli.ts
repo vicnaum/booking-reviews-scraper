@@ -244,6 +244,64 @@ program
     });
   });
 
+// --- search command ---
+program
+  .command('search')
+  .description('Search for listings on Airbnb or Booking.com')
+  .requiredOption('--platform <platform>', 'Platform: airbnb or booking')
+  .option('--location <location>', 'Location to search (geocoded to bbox)')
+  .option('--bbox <coords>', 'Bounding box: neLat,neLng,swLat,swLng')
+  .option('--checkin <date>', 'Check-in date (YYYY-MM-DD)')
+  .option('--checkout <date>', 'Check-out date (YYYY-MM-DD)')
+  .option('--adults <n>', 'Number of adults', '2')
+  .option('--min-rating <n>', 'Minimum rating (0-10 scale)')
+  .option('--price-min <n>', 'Min price per night')
+  .option('--price-max <n>', 'Max price per night')
+  .option('--property-type <type>', 'Property type: entire, private, hotel')
+  .option('--currency <code>', 'Currency code', 'USD')
+  .option('--max-results <n>', 'Max results in quick mode', '100')
+  .option('--exhaustive', 'Full area coverage via bbox subdivision')
+  // Airbnb-specific
+  .option('--superhost', 'Airbnb: Superhost only')
+  .option('--instant-book', 'Airbnb: Instant Book only')
+  .option('--amenities <ids>', 'Airbnb: Amenity IDs (comma-separated)')
+  // Booking-specific
+  .option('--stars <n>', 'Booking: Star ratings (comma-separated)')
+  .option('--free-cancellation', 'Booking: Free cancellation only')
+  .option('--dest-id <id>', 'Booking: Direct destination ID')
+  .action(async (cmdOpts: any, command: Command) => {
+    const opts = command.optsWithGlobals();
+    setupProxy(opts);
+
+    const { parseBboxString } = await import('./search/geo.js');
+    const { runSearch } = await import('./search/search.js');
+
+    await runSearch({
+      platform: cmdOpts.platform,
+      location: cmdOpts.location || undefined,
+      boundingBox: cmdOpts.bbox ? parseBboxString(cmdOpts.bbox) : undefined,
+      checkin: cmdOpts.checkin || undefined,
+      checkout: cmdOpts.checkout || undefined,
+      adults: parseInt(cmdOpts.adults),
+      currency: cmdOpts.currency,
+      minRating: cmdOpts.minRating ? parseFloat(cmdOpts.minRating) : undefined,
+      priceMin: cmdOpts.priceMin ? parseFloat(cmdOpts.priceMin) : undefined,
+      priceMax: cmdOpts.priceMax ? parseFloat(cmdOpts.priceMax) : undefined,
+      propertyType: cmdOpts.propertyType || undefined,
+      maxResults: cmdOpts.maxResults ? parseInt(cmdOpts.maxResults) : undefined,
+      exhaustive: !!cmdOpts.exhaustive,
+      outputDir: opts.outputDir || undefined,
+      // Airbnb-specific
+      superhost: cmdOpts.superhost || undefined,
+      instantBook: cmdOpts.instantBook || undefined,
+      amenities: cmdOpts.amenities ? cmdOpts.amenities.split(',').map(Number) : undefined,
+      // Booking-specific
+      stars: cmdOpts.stars ? cmdOpts.stars.split(',').map(Number) : undefined,
+      freeCancellation: cmdOpts.freeCancellation || undefined,
+      destId: cmdOpts.destId || undefined,
+    } as any);
+  });
+
 // --- details command (both platforms) ---
 program
   .command('details <url>')
