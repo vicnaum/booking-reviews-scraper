@@ -6,6 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "worker": "tsx src/lib/search-worker.ts",
+    "worker:dev": "tsx watch src/lib/search-worker.ts",
     "lint": "next lint",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
@@ -16,9 +18,11 @@
     "@prisma/client": "^6.2.0",
     "@turf/turf": "^7.3.4",
     "axios": "^1.13.6",
+    "bullmq": "^5.71.0",
     "cheerio": "^1.2.0",
     "dotenv": "^17.3.1",
     "https-proxy-agent": "^7.0.6",
+    "ioredis": "^5.10.0",
     "leaflet": "^1.9.4",
     "next": "^15.1.0",
     "node-fetch": "^3.3.2",
@@ -40,6 +44,7 @@
     "postcss": "^8.4.0",
     "prisma": "^6.2.0",
     "tailwindcss": "^4.0.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.7.0"
   }
 }

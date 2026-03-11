@@ -25,8 +25,20 @@ export default function FilterPanel() {
   const priceDisplay = useSearchStore((s) => s.priceDisplay);
   const airbnbFilters = useSearchStore((s) => s.airbnbFilters);
   const bookingFilters = useSearchStore((s) => s.bookingFilters);
+  const viewportBbox = useSearchStore((s) => s.viewportBbox);
+  const userBbox = useSearchStore((s) => s.userBbox);
+  const zoom = useSearchStore((s) => s.zoom);
+  const activeJobId = useSearchStore((s) => s.activeJobId);
+  const jobProgress = useSearchStore((s) => s.jobProgress);
   const setFilter = useSearchStore((s) => s.setFilter);
   const triggerQuickSearch = useSearchStore((s) => s.triggerQuickSearch);
+  const startFullSearch = useSearchStore((s) => s.startFullSearch);
+
+  const fullSearchBbox = userBbox ?? viewportBbox;
+  const canStartFullSearch =
+    !!fullSearchBbox &&
+    (userBbox !== null || zoom >= 12) &&
+    !activeJobId;
 
   // Immediate update + search (for selects, checkboxes, buttons)
   const update = useCallback(
@@ -252,6 +264,23 @@ export default function FilterPanel() {
           </label>
         </>
       )}
+
+      <div className="ml-auto flex items-center gap-2">
+        {activeJobId && (
+          <span className="text-xs text-neutral-500">
+            Full search {Math.round(jobProgress * 100)}%
+          </span>
+        )}
+        <button
+          onClick={() => {
+            void startFullSearch();
+          }}
+          disabled={!canStartFullSearch}
+          className="rounded border border-emerald-700 bg-emerald-900/40 px-3 py-1.5 text-xs font-medium text-emerald-200 transition hover:bg-emerald-900/60 disabled:cursor-not-allowed disabled:border-neutral-800 disabled:bg-neutral-900 disabled:text-neutral-600"
+        >
+          {activeJobId ? 'Full search running...' : 'Full search this area'}
+        </button>
+      </div>
     </div>
   );
 }

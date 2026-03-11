@@ -13,6 +13,8 @@ export default function ResultsSidebar() {
   const lastSearchMs = useSearchStore((s) => s.lastSearchMs);
   const platform = useSearchStore((s) => s.platform);
   const zoom = useSearchStore((s) => s.zoom);
+  const activeJobId = useSearchStore((s) => s.activeJobId);
+  const jobProgress = useSearchStore((s) => s.jobProgress);
 
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const listRef = useRef<HTMLDivElement>(null);
@@ -56,6 +58,21 @@ export default function ResultsSidebar() {
           </span>
         )}
       </div>
+
+      {activeJobId && (
+        <div className="border-b border-neutral-800 px-4 py-3">
+          <div className="flex items-center justify-between text-xs text-neutral-400">
+            <span>Full search job running</span>
+            <span>{Math.round(jobProgress * 100)}%</span>
+          </div>
+          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-neutral-800">
+            <div
+              className="h-full rounded-full bg-emerald-500 transition-all"
+              style={{ width: `${Math.max(4, Math.round(jobProgress * 100))}%` }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Results list */}
       <div ref={listRef} className="flex-1 overflow-y-auto p-2 space-y-2">

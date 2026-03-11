@@ -10,6 +10,13 @@ export interface BoundingBox {
 
 export type Platform = 'airbnb' | 'booking';
 
+export type SearchJobStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
 export interface SearchResult {
   id: string;
   platform: Platform;
@@ -41,6 +48,7 @@ export interface GeocodeResult {
 export interface QuickSearchRequest {
   platform: Platform;
   boundingBox: BoundingBox;
+  location?: string;
   checkin?: string;
   checkout?: string;
   adults?: number;
@@ -58,6 +66,35 @@ export interface QuickSearchRequest {
 export interface QuickSearchResponse {
   results: SearchResult[];
   totalResults: number;
+  pagesScanned: number;
   durationMs: number;
   truncated: boolean;
+}
+
+export interface FullSearchRequest extends QuickSearchRequest {
+  exhaustive?: boolean;
+}
+
+export interface StartSearchResponse {
+  jobId: string;
+  status: SearchJobStatus;
+}
+
+export type CreateSearchJobResponse = StartSearchResponse;
+
+export interface SearchJobState {
+  id: string;
+  status: SearchJobStatus;
+  progress: number;
+  totalResults: number;
+  pagesScanned: number;
+  errorMessage: string | null;
+  durationMs: number | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface SearchJobResponse {
+  job: SearchJobState;
+  results: SearchResult[];
 }
