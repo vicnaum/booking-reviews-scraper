@@ -795,8 +795,8 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           continue;
         }
 
-        // Skip if no reviews available
-        if (!entry.reviews.file || (entry.reviews.status !== 'fetched' && entry.reviews.status !== 'partial')) {
+        // Skip if no reviews available or review count is 0
+        if (!entry.reviews.file || (entry.reviews.status !== 'fetched' && entry.reviews.status !== 'partial') || entry.reviews.count === 0) {
           console.log(`${prefix} \u2014 ai-reviews \u2298 skip (no reviews)`);
           platformResult.aiReviews.skipped++;
           entry.aiReviews = { status: 'skipped', reason: 'no reviews' };

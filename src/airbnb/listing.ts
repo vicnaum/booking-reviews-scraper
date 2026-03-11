@@ -10,6 +10,7 @@
 import 'dotenv/config';
 import * as fs from 'fs';
 import * as path from 'path';
+import fetch from 'node-fetch';
 import { getApiKey, makeRequest } from './scraper.js';
 import { getSectionsApiUrl, getListingHash, isStaleHash, refreshHashesViaPlaywright, invalidateSessionCache } from './hash-manager.js';
 const OUTPUT_DIR = 'data/airbnb/output';
@@ -678,8 +679,12 @@ export async function downloadPhotos(
     const filePath = path.join(photosDir, filename);
 
     try {
-      const response = await makeRequest(photo.url, {});
-      fs.writeFileSync(filePath, Buffer.from(response.data, 'binary'));
+      // Use fetch + arrayBuffer directly for binary-safe download
+      // (makeRequest uses response.text() which corrupts binary data via UTF-8 decoding)
+      // Photo CDN (muscache.com) is public — no proxy needed
+      const response = await fetch(photo.url, { redirect: 'follow' });
+      const buffer = await response.arrayBuffer();
+      fs.writeFileSync(filePath, Buffer.from(buffer));
       process.stdout.write(`  [${i + 1}/${photos.length}] ${filename}\n`);
     } catch (error: any) {
       console.error(`  Failed to download photo ${i + 1}: ${error.message}`);
