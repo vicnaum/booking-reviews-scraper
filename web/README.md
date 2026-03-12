@@ -44,5 +44,10 @@ npm run dev
 ```bash
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/stayreviewr?schema=public
 REDIS_URL=redis://127.0.0.1:6379
-USE_PROXY=false
 ```
+
+Proxy settings come from the shared CLI config:
+- repo-root `.env`
+- `~/.config/reviewr/.env` created by `reviewr auth`
+
+So you do not need to duplicate `PROXY_*` values in `web/.env.local`.

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { searchAirbnb } from '@cli/airbnb/search.js';
 import { searchBooking } from '@cli/booking/search.js';
+import { bootstrapRuntimeProxyEnv } from '@cli/config.js';
 import type { AirbnbSearchParams, BookingSearchParams } from '@cli/search/types.js';
 import type { QuickSearchRequest } from '@/types';
 
@@ -11,6 +12,8 @@ function log(msg: string) {
 }
 
 export async function POST(request: NextRequest) {
+  bootstrapRuntimeProxyEnv();
+
   let body: QuickSearchRequest;
   try {
     body = await request.json();

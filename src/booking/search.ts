@@ -5,6 +5,7 @@
 // Fallback: SSR via Playwright DOM extraction
 
 import fetch from 'node-fetch';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { createSearchGrid, subdivideBbox } from '../search/geo.js';
 import type {
   BookingSearchParams,
@@ -14,7 +15,6 @@ import type {
   ProgressCallback,
 } from '../search/types.js';
 
-const GRAPHQL_URL = 'https://www.booking.com/dml/graphql?lang=en-gb';
 const FULL_SEARCH_HASH = '8cea877c71f083895aa316412e85ffe818b503bb5331babba34a1602977d8b99';
 const MAP_MARKERS_HASH = 'f6d2e861c5149589bf368582c31f74d58399004da319fac65f2c88313cf15c16';
 const PAGE_DELAY_MS = 300;
@@ -28,6 +28,9 @@ interface BookingSession {
   cookies: string;
   headers: Record<string, string>;
   destId: number | null;
+  graphqlUrl: string;
+  refererUrl: string;
+  mapMarkersTemplate?: any;
 }
 
 // In-memory session cache to avoid re-bootstrapping Playwright on every call.
@@ -36,13 +39,43 @@ let cachedSession: BookingSession | null = null;
 let cachedSessionTime = 0;
 const SESSION_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+function getProxyUrlFromEnv(): string | null {
+  if (process.env.USE_PROXY === 'false' || !process.env.PROXY_HOST) {
+    return null;
+  }
+
+  const username = encodeURIComponent(process.env.PROXY_USERNAME || '');
+  const password = encodeURIComponent(process.env.PROXY_PASSWORD || '');
+  const port = process.env.PROXY_PORT || '';
+  const auth = username || password ? `${username}:${password}@` : '';
+
+  return `http://${auth}${process.env.PROXY_HOST}${port ? `:${port}` : ''}`;
+}
+
+function buildPlaywrightLaunchOptions(): Record<string, unknown> {
+  const launchOptions: Record<string, unknown> = { headless: true };
+  const proxyUrl = getProxyUrlFromEnv();
+
+  if (proxyUrl) {
+    const parsed = new URL(proxyUrl);
+    const proxy: Record<string, string> = {
+      server: `${parsed.protocol}//${parsed.host}`,
+    };
+    if (parsed.username) proxy.username = decodeURIComponent(parsed.username);
+    if (parsed.password) proxy.password = decodeURIComponent(parsed.password);
+    launchOptions.proxy = proxy;
+  }
+
+  return launchOptions;
+}
+
 async function bootstrapSession(
   params: BookingSearchParams,
 ): Promise<BookingSession> {
   const { chromium } = await import('playwright');
 
   console.log('🔑 Bootstrapping Booking.com session via Playwright...');
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(buildPlaywrightLaunchOptions());
 
   try {
     const context = await browser.newContext({
@@ -58,27 +91,48 @@ async function bootstrapSession(
       ? { ...params, destId: '-2601889', location: undefined } as BookingSearchParams  // London
       : params;
     const searchUrl = buildSearchUrl(bootstrapParams);
-    console.log(`  Navigating to: ${searchUrl}`);
+    const shouldOpenMap = !!params.boundingBox && !params.location && !params.destId;
+    const bootstrapUrl = shouldOpenMap ? `${searchUrl}#map_opened` : searchUrl;
+    console.log(`  Navigating to: ${bootstrapUrl}`);
 
-    // Intercept first GraphQL request to capture headers
+    // Intercept GraphQL requests to capture auth headers and the session-specific endpoint URL.
     let capturedHeaders: Record<string, string> = {};
+    let capturedGraphqlUrl = '';
+    let capturedMapMarkersTemplate: any;
 
     await page.route('**/dml/graphql*', async (route) => {
       try {
         const request = route.request();
-        if (Object.keys(capturedHeaders).length === 0) {
-          capturedHeaders = await request.allHeaders();
-          const postData = request.postData();
-          if (postData) {
-            const body = JSON.parse(postData);
-            console.log(`  Intercepted first GraphQL: ${body.operationName}`);
+        const nextHeaders = await request.allHeaders();
+
+        const postData = request.postData();
+        if (postData) {
+          const body = JSON.parse(postData);
+          const operationName = body.operationName;
+          const isSearchOperation = operationName === 'MapMarkersDesktop' || operationName === 'FullSearch';
+
+          if (!capturedGraphqlUrl || isSearchOperation) {
+            capturedGraphqlUrl = request.url();
+          }
+          if (Object.keys(capturedHeaders).length === 0 || isSearchOperation) {
+            capturedHeaders = { ...capturedHeaders, ...nextHeaders };
+          }
+          if (operationName === 'MapMarkersDesktop' && !capturedMapMarkersTemplate) {
+            capturedMapMarkersTemplate = body;
+          }
+
+          console.log(`  Intercepted GraphQL: ${operationName}`);
+        } else if (!capturedGraphqlUrl) {
+          capturedGraphqlUrl = request.url();
+          if (Object.keys(capturedHeaders).length === 0) {
+            capturedHeaders = nextHeaders;
           }
         }
       } catch { /* ignore parsing errors */ }
       await route.continue();
     });
 
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.goto(bootstrapUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
     // Handle WAF challenge
     let html = await page.content();
@@ -98,7 +152,27 @@ async function bootstrapSession(
     } catch {
       await page.waitForTimeout(5000);
     }
-    await page.waitForTimeout(3000); // Let GraphQL requests fire
+
+    if (shouldOpenMap) {
+      try {
+        await page.waitForResponse((response) => {
+          if (!response.url().includes('/dml/graphql')) return false;
+          const postData = response.request().postData();
+          if (!postData) return false;
+          try {
+            const body = JSON.parse(postData);
+            return body.operationName === 'MapMarkersDesktop';
+          } catch {
+            return false;
+          }
+        }, { timeout: 15000 });
+      } catch {
+        console.log('  ⚠️  MapMarkersDesktop did not fire during bootstrap');
+      }
+      await page.waitForTimeout(1000);
+    } else {
+      await page.waitForTimeout(3000); // Let GraphQL requests fire
+    }
 
     // Capture cookies
     const cookies = await context.cookies('https://www.booking.com');
@@ -132,10 +206,17 @@ async function bootstrapSession(
     await page.close();
     await context.close();
 
+    const effectiveParams = destId
+      ? { ...bootstrapParams, destId: String(destId), location: undefined }
+      : bootstrapParams;
+
     return {
       cookies: cookieString,
       headers: capturedHeaders,
       destId,
+      graphqlUrl: capturedGraphqlUrl || buildGraphQLUrl(effectiveParams, destId),
+      refererUrl: buildSearchUrl(effectiveParams),
+      mapMarkersTemplate: capturedMapMarkersTemplate,
     };
   } finally {
     await browser.close();
@@ -162,6 +243,57 @@ function buildSearchUrl(params: BookingSearchParams): string {
   if (filters) url.searchParams.set('nflt', filters);
 
   return url.toString();
+}
+
+function buildRawQueryForSession(
+  params: BookingSearchParams,
+  destId: number | null,
+): string {
+  const effectiveParams = destId
+    ? { ...params, destId: String(destId), location: undefined }
+    : params;
+  const searchUrl = new URL(buildSearchUrl(effectiveParams));
+  return `${searchUrl.pathname}${searchUrl.search}`;
+}
+
+function buildGraphQLUrl(
+  params: BookingSearchParams,
+  destId: number | null,
+): string {
+  const effectiveParams = destId
+    ? { ...params, destId: String(destId), location: undefined }
+    : params;
+  const searchUrl = new URL(buildSearchUrl(effectiveParams));
+  const graphqlUrl = new URL('https://www.booking.com/dml/graphql');
+
+  for (const [key, value] of searchUrl.searchParams.entries()) {
+    graphqlUrl.searchParams.set(key, value);
+  }
+  graphqlUrl.searchParams.set('lang', 'en-gb');
+
+  return graphqlUrl.toString();
+}
+
+function buildMapSession(session: BookingSession): BookingSession {
+  const baseTopic =
+    session.headers['x-booking-topic']?.split(',')[0]?.trim()
+    || 'capla_browser_b-search-web-searchresults';
+
+  return {
+    ...session,
+    headers: {
+      ...session.headers,
+      'x-booking-context-action': 'markers_on_map-search_results',
+      'x-booking-original-sli-identifier-suffix': 'SearchResults',
+      'x-booking-timeout-budget-ms': '200000',
+      'x-booking-timeout-ms': '200000',
+      'x-booking-topic': `${baseTopic}, markers_on_map-search_results`,
+    },
+  };
+}
+
+function cloneBodyTemplate<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function buildFilterString(params: BookingSearchParams): string {
@@ -237,7 +369,7 @@ function buildFullSearchBody(params: BookingSearchParams, session: BookingSessio
         needsRoomsMatch: false,
         optionalFeatures: { forceArpExperiments: true, testProperties: false },
         pagination: { rowsPerPage: 25, offset },
-        rawQueryForSession: `/searchresults.en-gb.html?dest_id=${destId}&dest_type=city&checkin=${checkin}&checkout=${checkout}&group_adults=${params.adults}&no_rooms=1&nflt=${encodeURIComponent(filters)}`,
+        rawQueryForSession: buildRawQueryForSession(params, destId),
         referrerBlock: null,
         sbCalendarOpen: false,
         sorters: { selectedSorter: null, referenceGeoId: null, tripTypeIntentId: null },
@@ -262,6 +394,79 @@ function buildMapMarkersBody(
   bbox: BoundingBox,
   offset: number = 0,
 ): any {
+  if (session.mapMarkersTemplate?.variables?.input) {
+    const template = cloneBodyTemplate(session.mapMarkersTemplate);
+    const filters = buildFilterString(params);
+    const destId = session.destId || -1;
+    const checkin = params.checkin || '';
+    const checkout = params.checkout || '';
+    const input = template.variables.input;
+
+    input.dates = { checkin, checkout };
+    input.filters = { ...(input.filters || {}), selectedFilters: filters };
+    if (input.flexibleDatesConfig?.dateRangeCalendar) {
+      input.flexibleDatesConfig.dateRangeCalendar = {
+        checkin: [checkin],
+        checkout: [checkout],
+      };
+    }
+    input.location = {
+      ...(input.location || {}),
+      destType: 'BOUNDING_BOX',
+      boundingBox: {
+        neLat: bbox.neLat,
+        neLon: bbox.neLng,
+        swLat: bbox.swLat,
+        swLon: bbox.swLng,
+        precision: 1,
+      },
+      hotelIds: Array.isArray(input.location?.hotelIds) ? input.location.hotelIds : [],
+      initialDestination: { destType: 'CITY', destId },
+    };
+    input.nbRooms = 1;
+    input.nbAdults = params.adults;
+    input.pagination = {
+      ...(input.pagination || {}),
+      rowsPerPage: 100,
+      offset,
+    };
+    input.rawQueryForSession = buildRawQueryForSession(params, destId);
+    input.webSearchContext = {
+      reason: 'CLIENT_SIDE_UPDATE',
+      source: 'SEARCH_RESULTS_MAP',
+      outcome: 'SEARCH_RESULTS_MAP',
+    };
+    input.clientSideRequestId = Math.random().toString(16).substring(2, 18);
+    input.hasUserAppliedFilters = true;
+
+    template.variables.includeBundle = false;
+    template.variables.markersInput = {
+      ...(template.variables.markersInput || {}),
+      actionType: 'SEARCH_RESULTS',
+      boundingBox: {
+        northEast: { latitude: bbox.neLat, longitude: bbox.neLng },
+        southWest: { latitude: bbox.swLat, longitude: bbox.swLng },
+        precision: 1,
+      },
+    };
+    template.variables.airportsInput = template.variables.airportsInput || { count: 20, searchStrategy: {} };
+    template.variables.citiesInput = template.variables.citiesInput || { count: 20, searchStrategy: {} };
+    template.variables.landmarksInput = template.variables.landmarksInput || { count: 1, searchStrategy: {} };
+    template.variables.beachesInput = template.variables.beachesInput || { count: 100, searchStrategy: {} };
+    template.variables.skiResortsInput = {
+      ...(template.variables.skiResortsInput || {}),
+      count: 10,
+      searchStrategy: { nearbyUfi: destId },
+    };
+    template.variables.includeBeachMarkers = false;
+    template.variables.includeSkiMarkers = false;
+    template.variables.includeCityMarkers = true;
+    template.variables.includeAirportMarkers = true;
+    template.variables.includeLandmarkMarkers = false;
+
+    return template;
+  }
+
   const filters = buildFilterString(params);
   const destId = session.destId || -1;
   const checkin = params.checkin || '';
@@ -304,7 +509,7 @@ function buildMapMarkersBody(
         needsRoomsMatch: false,
         optionalFeatures: { forceArpExperiments: true, testProperties: false },
         pagination: { rowsPerPage: 100, offset },
-        rawQueryForSession: `/searchresults.en-gb.html?dest_id=${destId}&dest_type=city&checkin=${checkin}&checkout=${checkout}&group_adults=${params.adults}&no_rooms=1&nflt=${encodeURIComponent(filters)}`,
+        rawQueryForSession: buildRawQueryForSession(params, destId),
         referrerBlock: null,
         sbCalendarOpen: false,
         sorters: { selectedSorter: null, referenceGeoId: null, tripTypeIntentId: null },
@@ -348,11 +553,15 @@ async function fetchGraphQL(session: BookingSession, body: any): Promise<any> {
   const reqHeaders: Record<string, string> = {
     'content-type': 'application/json',
     'origin': 'https://www.booking.com',
-    'referer': 'https://www.booking.com/searchresults.en-gb.html',
+    'referer': session.refererUrl,
     'user-agent': session.headers['user-agent'] || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
     'accept': '*/*',
     'accept-language': 'en-US,en;q=0.9',
     'cookie': session.cookies,
+    'apollographql-client-name': session.headers['apollographql-client-name'] || 'b-search-web-searchresults',
+    'x-booking-context-action-name': session.headers['x-booking-context-action-name'] || 'searchresults_irene',
+    'x-booking-context-aid': session.headers['x-booking-context-aid'] || '304142',
+    'x-booking-site-type-id': session.headers['x-booking-site-type-id'] || '1',
   };
 
   // Copy x-booking-* and apollographql-* headers
@@ -362,10 +571,12 @@ async function fetchGraphQL(session: BookingSession, body: any): Promise<any> {
     }
   }
 
-  const response = await fetch(GRAPHQL_URL, {
+  const proxyUrl = getProxyUrlFromEnv();
+  const response = await fetch(session.graphqlUrl, {
     method: 'POST',
     headers: reqHeaders,
     body: JSON.stringify(body),
+    agent: proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined,
   });
 
   if (response.status === 403) {
@@ -482,7 +693,7 @@ async function searchBookingSSR(
   const { chromium } = await import('playwright');
 
   console.log('  📄 Falling back to SSR extraction via Playwright...');
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(buildPlaywrightLaunchOptions());
   const results: SearchResult[] = [];
 
   try {
@@ -735,14 +946,7 @@ export async function searchBooking(
     while (true) {
       try {
         const body = buildMapMarkersBody(params, session, bbox, offset);
-        const mapSession = { ...session };
-        mapSession.headers = {
-          ...session.headers,
-          'x-booking-context-action': 'markers_on_map-search_results',
-          'x-booking-topic': 'capla_browser_b-search-web-searchresults, markers_on_map-search_results',
-        };
-
-        const data = await fetchGraphQL(mapSession, body);
+        const data = await fetchGraphQL(buildMapSession(session), body);
         const page = parseMapMarkersResponse(data, params, pageIndex);
 
         const newResults: SearchResult[] = [];
@@ -804,16 +1008,7 @@ export async function searchBooking(
       while (true) {
         try {
           const body = buildMapMarkersBody(params, session, cell, offset);
-
-          // Add MapMarkers-specific headers
-          const mapSession = { ...session };
-          mapSession.headers = {
-            ...session.headers,
-            'x-booking-context-action': 'markers_on_map-search_results',
-            'x-booking-topic': 'capla_browser_b-search-web-searchresults, markers_on_map-search_results',
-          };
-
-          const data = await fetchGraphQL(mapSession, body);
+          const data = await fetchGraphQL(buildMapSession(session), body);
           const page = parseMapMarkersResponse(data, params, pageIndex);
 
           const newResults: SearchResult[] = [];

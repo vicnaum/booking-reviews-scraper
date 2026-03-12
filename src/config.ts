@@ -95,6 +95,28 @@ export interface ResolvedProxy {
   source: 'cli' | 'env' | 'local-env' | 'global-config' | 'none';
 }
 
+export interface ResolveProxyOptions {
+  localEnvPaths?: string[];
+}
+
+function getAncestorEnvPaths(startDir: string = process.cwd()): string[] {
+  const envPaths: string[] = [];
+  let currentDir = path.resolve(startDir);
+
+  while (true) {
+    envPaths.push(path.join(currentDir, '.env'));
+    const parentDir = path.dirname(currentDir);
+    if (parentDir === currentDir) break;
+    currentDir = parentDir;
+  }
+
+  return envPaths;
+}
+
+function uniquePaths(paths: string[]): string[] {
+  return [...new Set(paths.filter(Boolean).map((value) => path.resolve(value)))];
+}
+
 /**
  * Resolve proxy config from multiple sources (priority order):
  * 1. CLI --proxy flag
@@ -103,7 +125,10 @@ export interface ResolvedProxy {
  * 4. Global config (~/.config/reviewr/.env)
  * 5. No proxy
  */
-export function resolveProxy(cliProxyUrl?: string): ResolvedProxy {
+export function resolveProxy(
+  cliProxyUrl?: string,
+  options: ResolveProxyOptions = {},
+): ResolvedProxy {
   // 1. CLI flag
   if (cliProxyUrl) {
     const config = parseProxyUrl(cliProxyUrl);
@@ -126,19 +151,21 @@ export function resolveProxy(cliProxyUrl?: string): ResolvedProxy {
     }
   }
 
-  // 3. Local .env file
-  const localEnv = loadEnvFile('.env');
-  if (localEnv.PROXY_HOST) {
-    const config: ProxyConfig = {
-      host: localEnv.PROXY_HOST,
-      port: parseInt(localEnv.PROXY_PORT || '0'),
-      username: localEnv.PROXY_USERNAME || '',
-      password: localEnv.PROXY_PASSWORD || '',
-    };
-    const useProxy = localEnv.USE_PROXY !== 'false';
-    if (useProxy) {
-      const url = `http://${config.username}:${config.password}@${config.host}:${config.port}`;
-      return { useProxy: true, proxyUrl: url, proxyConfig: config, source: 'local-env' };
+  // 3. Local .env file(s)
+  for (const envPath of uniquePaths([...(options.localEnvPaths || []), ...getAncestorEnvPaths()])) {
+    const localEnv = loadEnvFile(envPath);
+    if (localEnv.PROXY_HOST) {
+      const config: ProxyConfig = {
+        host: localEnv.PROXY_HOST,
+        port: parseInt(localEnv.PROXY_PORT || '0'),
+        username: localEnv.PROXY_USERNAME || '',
+        password: localEnv.PROXY_PASSWORD || '',
+      };
+      const useProxy = localEnv.USE_PROXY !== 'false';
+      if (useProxy) {
+        const url = `http://${config.username}:${config.password}@${config.host}:${config.port}`;
+        return { useProxy: true, proxyUrl: url, proxyConfig: config, source: 'local-env' };
+      }
     }
   }
 
@@ -204,4 +231,17 @@ export function applyProxyToEnv(resolved: ResolvedProxy): void {
   } else {
     process.env.USE_PROXY = 'false';
   }
+}
+
+/**
+ * Initialize proxy env vars for web routes/workers that import scraper modules directly.
+ */
+export function bootstrapRuntimeProxyEnv(
+  options: ResolveProxyOptions = {},
+): ResolvedProxy {
+  const resolved = resolveProxy(undefined, options);
+  if (resolved.useProxy) {
+    applyProxyToEnv(resolved);
+  }
+  return resolved;
 }

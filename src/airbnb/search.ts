@@ -4,7 +4,7 @@
 // Primary: v2 explore_tabs (40 results/page, API key only)
 // Fallback: SSR HTML parsing (18-20 results/page, no auth)
 
-import { makeRequest, getApiKey, BROWSER_HEADERS } from './scraper.js';
+import { makeRequest, getApiKey, BROWSER_HEADERS, API_HEADERS } from './scraper.js';
 import { createSearchGrid, subdivideBbox, createPriceRanges } from '../search/geo.js';
 import type {
   AirbnbSearchParams,
@@ -22,6 +22,13 @@ const MAX_CONSECUTIVE_ERRORS = 5;
 const ERROR_THRESHOLD_FOR_KEY_REFRESH = 3;
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+interface AirbnbCellSearchOutput {
+  results: SearchResult[];
+  apiKey: string;
+  sawRateLimit: boolean;
+  encounteredFatalError: boolean;
+}
 
 // --- v2 explore_tabs (primary) ---
 
@@ -167,19 +174,27 @@ async function searchAirbnbCell(
   seenIds: Set<string>,
   maxResults?: number,
   onProgress?: ProgressCallback,
-): Promise<{ results: SearchResult[]; apiKey: string }> {
+): Promise<AirbnbCellSearchOutput> {
   const results: SearchResult[] = [];
   let offset = 0;
   let pageIndex = 0;
   let currentKey = apiKey;
   let consecutiveErrors = 0;
+  let sawRateLimit = false;
+  let encounteredFatalError = false;
 
   while (true) {
     const url = buildExploreUrl(currentKey, params, bbox, offset);
 
     try {
       const response = await makeRequest(url, {
-        headers: { 'X-Airbnb-API-Key': currentKey },
+        headers: {
+          ...BROWSER_HEADERS,
+          ...API_HEADERS,
+          referer: `${AIRBNB_BASE_URL}/`,
+          'X-Airbnb-API-Key': currentKey,
+          'x-airbnb-api-key': currentKey,
+        },
       });
 
       const data = JSON.parse(response.data);
@@ -209,6 +224,10 @@ async function searchAirbnbCell(
       pageIndex++;
       await sleep(PAGE_DELAY_MS);
     } catch (error: any) {
+      encounteredFatalError = true;
+      if (error?.message?.includes('429')) {
+        sawRateLimit = true;
+      }
       consecutiveErrors++;
       console.log(`  ❌ Page ${pageIndex} error: ${error.message}`);
 
@@ -232,7 +251,7 @@ async function searchAirbnbCell(
     }
   }
 
-  return { results, apiKey: currentKey };
+  return { results, apiKey: currentKey, sawRateLimit, encounteredFatalError };
 }
 
 // --- SSR fallback ---
@@ -399,6 +418,7 @@ export async function searchAirbnb(
   const seenIds = new Set<string>();
   const allResults: SearchResult[] = [];
   let pagesScanned = 0;
+  let shouldFallbackToSSR = false;
 
   // Try v2 explore_tabs first
   let apiKey: string;
@@ -418,11 +438,12 @@ export async function searchAirbnb(
   if (!params.exhaustive) {
     // Quick mode: search the bbox directly
     console.log(`🔍 Quick search: paginating bbox directly (max ${params.maxResults || 'unlimited'} results)...`);
-    const { results, apiKey: updatedKey } = await searchAirbnbCell(
+    const { results, apiKey: updatedKey, sawRateLimit, encounteredFatalError } = await searchAirbnbCell(
       params, bbox, apiKey, seenIds, params.maxResults, progressTracker,
     );
     allResults.push(...results);
     apiKey = updatedKey;
+    shouldFallbackToSSR = allResults.length === 0 && (sawRateLimit || encounteredFatalError);
   } else {
     // Exhaustive mode: grid subdivision + price pivoting
     console.log('🔍 Exhaustive search: subdividing bbox into grid cells...');
@@ -435,12 +456,15 @@ export async function searchAirbnb(
       const cell = cells[i];
       console.log(`  📍 Cell ${i + 1}/${cells.length}`);
 
-      const { results, apiKey: updatedKey } = await searchAirbnbCell(
+      const { results, apiKey: updatedKey, sawRateLimit, encounteredFatalError } = await searchAirbnbCell(
         params, cell, currentKey, seenIds, undefined, progressTracker,
       );
       currentKey = updatedKey;
 
       allResults.push(...results);
+      if (allResults.length === 0 && (sawRateLimit || encounteredFatalError)) {
+        shouldFallbackToSSR = true;
+      }
 
       // If cell returned many results (~40+), subdivide and try with price pivoting
       if (results.length >= 40) {
@@ -465,6 +489,12 @@ export async function searchAirbnb(
 
       await sleep(CELL_DELAY_MS);
     }
+  }
+
+  if (allResults.length === 0 && shouldFallbackToSSR) {
+    console.log('⚠️  Airbnb API search was blocked or rate limited, falling back to SSR map parsing');
+    const ssrResults = await searchAirbnbSSR(params, bbox, seenIds, params.maxResults, progressTracker);
+    allResults.push(...ssrResults);
   }
 
   console.log(`✅ Airbnb search complete: ${allResults.length} unique results, ${pagesScanned} pages scanned`);

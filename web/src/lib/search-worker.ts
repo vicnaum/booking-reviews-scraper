@@ -1,6 +1,7 @@
 import 'dotenv/config';
 
 import { Worker } from 'bullmq';
+import { bootstrapRuntimeProxyEnv } from '../../../src/config.js';
 import { prisma } from './prisma.js';
 import { getRedisConnectionOptions } from './redis.js';
 import {
@@ -13,6 +14,8 @@ import {
 } from './searchJobs.js';
 import { searchAirbnb } from '../../../src/airbnb/search.js';
 import { searchBooking } from '../../../src/booking/search.js';
+
+bootstrapRuntimeProxyEnv();
 
 async function runSearchJob(searchJobId: string) {
   const jobRecord = await prisma.searchJob.findUnique({
