@@ -43,6 +43,7 @@ interface SearchStore {
   searchError: string | null;
   lastSearchMs: number | null;
   activeJobId: string | null;
+  completedJobId: string | null;
   jobStatus: SearchJobStatus | null;
   jobProgress: number;
   jobPagesScanned: number;
@@ -129,6 +130,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
         clearJobPolling();
         set({
           activeJobId: null,
+          completedJobId: data.job.id,
           jobStatus: data.job.status,
           jobProgress: 1,
           jobPagesScanned: data.job.pagesScanned,
@@ -145,6 +147,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
         clearJobPolling();
         set({
           activeJobId: null,
+          completedJobId: null,
           jobStatus: data.job.status,
           jobProgress: 0,
           jobPagesScanned: data.job.pagesScanned,
@@ -157,6 +160,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
 
       set({
         activeJobId: data.job.id,
+        completedJobId: null,
         jobStatus: data.job.status,
         jobProgress: data.job.progress,
         jobPagesScanned: data.job.pagesScanned,
@@ -173,6 +177,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
       clearJobPolling();
       set({
         activeJobId: null,
+        completedJobId: null,
         jobStatus: 'failed',
         jobProgress: 0,
         jobPagesScanned: 0,
@@ -208,6 +213,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
     searchError: null,
     lastSearchMs: null,
     activeJobId: null,
+    completedJobId: null,
     jobStatus: null,
     jobProgress: 0,
     jobPagesScanned: 0,
@@ -220,6 +226,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
         results: [],
         selectedId: null,
         searchError: null,
+        completedJobId: null,
         airbnbFilters: {},
         bookingFilters: {},
       });
@@ -243,7 +250,12 @@ export const useSearchStore = create<SearchStore>((set, get) => {
     setUserBbox: (bbox) => set({ userBbox: bbox }),
 
     setActiveJob: (jobId, progress = 0, status = null) =>
-      set({ activeJobId: jobId, jobProgress: progress, jobStatus: status }),
+      set({
+        activeJobId: jobId,
+        completedJobId: null,
+        jobProgress: progress,
+        jobStatus: status,
+      }),
 
     triggerQuickSearch: async () => {
       const state = get();
@@ -260,7 +272,11 @@ export const useSearchStore = create<SearchStore>((set, get) => {
       const abortController = new AbortController();
       currentAbortController = abortController;
 
-      set({ isLoading: true, searchError: null });
+      set({
+        isLoading: true,
+        searchError: null,
+        completedJobId: null,
+      });
 
       try {
         const body: QuickSearchRequest = buildSearchRequest(state, bbox);
@@ -278,6 +294,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
           const data = await res.json();
           set({
             isLoading: false,
+            completedJobId: null,
             jobStatus: null,
             searchError: data.error || 'Search failed',
           });
@@ -289,6 +306,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
           results: data.results,
           isLoading: false,
           lastSearchMs: data.durationMs,
+          completedJobId: null,
           searchError: null,
         });
       } catch (err: unknown) {
@@ -296,6 +314,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
 
         set({
           isLoading: false,
+          completedJobId: null,
           searchError: err instanceof Error ? err.message : 'Search failed',
         });
       }
@@ -319,6 +338,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
         isLoading: false,
         searchError: null,
         activeJobId: null,
+        completedJobId: null,
         jobStatus: 'pending',
         jobProgress: 0,
         jobPagesScanned: 0,
@@ -338,6 +358,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
           const data = await res.json();
           set({
             isLoading: false,
+            completedJobId: null,
             jobStatus: 'failed',
             searchError: data.error || 'Failed to start full search',
           });
@@ -347,6 +368,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
         const data: StartSearchResponse = await res.json();
         set({
           activeJobId: data.jobId,
+          completedJobId: null,
           jobStatus: data.status,
           jobProgress: 0,
           jobPagesScanned: 0,
@@ -360,6 +382,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
         clearJobPolling();
         set({
           activeJobId: null,
+          completedJobId: null,
           jobStatus: 'failed',
           jobProgress: 0,
           jobPagesScanned: 0,

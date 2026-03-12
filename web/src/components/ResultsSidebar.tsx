@@ -1,7 +1,8 @@
 'use client';
 
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef, useEffect, useCallback, useState } from 'react';
 import { useSearchStore } from '@/hooks/useSearchStore';
+import type { ExportSearchRequest } from '@/types';
 import ResultCard from './ResultCard';
 
 export default function ResultsSidebar() {
@@ -14,10 +15,13 @@ export default function ResultsSidebar() {
   const platform = useSearchStore((s) => s.platform);
   const zoom = useSearchStore((s) => s.zoom);
   const activeJobId = useSearchStore((s) => s.activeJobId);
+  const completedJobId = useSearchStore((s) => s.completedJobId);
   const jobProgress = useSearchStore((s) => s.jobProgress);
 
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const listRef = useRef<HTMLDivElement>(null);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   // Scroll to selected card when marker is clicked
   useEffect(() => {
@@ -37,6 +41,45 @@ export default function ResultsSidebar() {
     [],
   );
 
+  const handleExport = useCallback(async () => {
+    if (!completedJobId) return;
+
+    setIsExporting(true);
+    setExportError(null);
+
+    try {
+      const body: ExportSearchRequest = { jobId: completedJobId };
+      const res = await fetch('/api/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error || 'Failed to export URLs');
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const contentDisposition = res.headers.get('content-disposition');
+      const filenameMatch = contentDisposition?.match(/filename="([^"]+)"/);
+      link.href = url;
+      link.download = filenameMatch?.[1] || 'stayreviewr-urls.txt';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      setExportError(
+        error instanceof Error ? error.message : 'Failed to export URLs',
+      );
+    } finally {
+      setIsExporting(false);
+    }
+  }, [completedJobId]);
+
   return (
     <aside className="hidden w-80 flex-shrink-0 flex-col border-r border-neutral-800 bg-neutral-950 md:flex">
       {/* Header */}
@@ -52,11 +95,24 @@ export default function ResultsSidebar() {
             <div className="h-3 w-3 animate-spin rounded-full border border-neutral-600 border-t-neutral-300" />
           )}
         </div>
-        {lastSearchMs != null && !isLoading && (
-          <span className="text-xs text-neutral-600">
-            {(lastSearchMs / 1000).toFixed(1)}s
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {completedJobId && results.length > 0 && !activeJobId && (
+            <button
+              onClick={() => {
+                void handleExport();
+              }}
+              disabled={isExporting}
+              className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isExporting ? 'Exporting…' : 'Export URLs'}
+            </button>
+          )}
+          {lastSearchMs != null && !isLoading && (
+            <span className="text-xs text-neutral-600">
+              {(lastSearchMs / 1000).toFixed(1)}s
+            </span>
+          )}
+        </div>
       </div>
 
       {activeJobId && (
@@ -79,6 +135,12 @@ export default function ResultsSidebar() {
         {searchError && (
           <div className="rounded-lg bg-red-950/50 p-3 text-xs text-red-400">
             {searchError}
+          </div>
+        )}
+
+        {exportError && (
+          <div className="rounded-lg bg-red-950/50 p-3 text-xs text-red-400">
+            {exportError}
           </div>
         )}
 

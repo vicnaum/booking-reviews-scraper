@@ -82,6 +82,10 @@ export interface StartSearchResponse {
 
 export type CreateSearchJobResponse = StartSearchResponse;
 
+export interface ExportSearchRequest {
+  jobId: string;
+}
+
 export interface SearchJobState {
   id: string;
   status: SearchJobStatus;
