@@ -5,12 +5,14 @@ import type {
 } from '@prisma/client';
 import type {
   BoundingBox,
+  CircleFilter,
   FullSearchRequest,
   SearchJobState,
   SearchResult,
 } from '../types.js';
 
 export interface PersistedSearchFilters {
+  circle?: CircleFilter;
   exhaustive?: boolean;
   minRating?: number;
   minBedrooms?: number;
@@ -59,6 +61,30 @@ function asBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
 
+function asCircleFilter(value: unknown): CircleFilter | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const circle = value as Record<string, unknown>;
+  const center =
+    circle.center && typeof circle.center === 'object' && !Array.isArray(circle.center)
+      ? (circle.center as Record<string, unknown>)
+      : null;
+  const lat = center ? asNumber(center.lat) : undefined;
+  const lng = center ? asNumber(center.lng) : undefined;
+  const radiusMeters = asNumber(circle.radiusMeters);
+
+  if (lat == null || lng == null || radiusMeters == null) {
+    return undefined;
+  }
+
+  return {
+    center: { lat, lng },
+    radiusMeters,
+  };
+}
+
 export function buildSearchFilters(
   request: FullSearchRequest,
 ): Prisma.InputJsonValue {
@@ -66,6 +92,7 @@ export function buildSearchFilters(
     exhaustive: request.exhaustive ?? true,
   };
 
+  if (request.circle) filters.circle = request.circle;
   if (request.minRating != null) filters.minRating = request.minRating;
   if (request.minBedrooms != null) filters.minBedrooms = request.minBedrooms;
   if (request.minBeds != null) filters.minBeds = request.minBeds;
@@ -91,6 +118,7 @@ export function parseSearchFilters(
 
   const filters = value as Record<string, unknown>;
   return {
+    circle: asCircleFilter(filters.circle),
     exhaustive: asBoolean(filters.exhaustive),
     minRating: asNumber(filters.minRating),
     minBedrooms: asNumber(filters.minBedrooms),
@@ -132,6 +160,7 @@ export function buildCliSearchParams(job: SearchJobModel) {
   const common = {
     location: job.location ?? undefined,
     boundingBox: parseStoredBoundingBox(job.boundingBox),
+    circle: filters.circle,
     checkin: job.checkin ?? undefined,
     checkout: job.checkout ?? undefined,
     adults: job.adults,

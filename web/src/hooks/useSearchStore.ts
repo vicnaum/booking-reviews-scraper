@@ -3,8 +3,10 @@
 import { create } from 'zustand';
 import type {
   BoundingBox,
+  CircleFilter,
   FullSearchRequest,
   GeocodeResult,
+  MapPoint,
   Platform,
   QuickSearchRequest,
   SearchJobStatus,
@@ -44,9 +46,11 @@ interface SearchStore {
   // Map state
   viewportBbox: BoundingBox | null;
   userBbox: BoundingBox | null;
-  drawMode: 'rectangle' | null;
+  circleFilter: CircleFilter | null;
+  poi: MapPoint | null;
+  drawMode: 'rectangle' | 'circle' | 'poi' | null;
   zoom: number;
-  mapCenter: { lat: number; lng: number } | null;
+  mapCenter: MapPoint | null;
   mapFocusId: number;
   hasInitializedSearch: boolean;
   autoUpdate: boolean;
@@ -70,9 +74,9 @@ interface SearchStore {
   setPlatform: (p: Platform) => void;
   setFilter: (key: string, value: unknown) => void;
   setUseLocationSearch: (enabled: boolean) => void;
-  setDrawMode: (mode: 'rectangle' | null) => void;
+  setDrawMode: (mode: 'rectangle' | 'circle' | 'poi' | null) => void;
   setViewport: (bbox: BoundingBox, zoom: number) => void;
-  setMapCenter: (center: { lat: number; lng: number }) => void;
+  setMapCenter: (center: MapPoint) => void;
   setAutoUpdate: (enabled: boolean) => void;
   setPendingViewportSearch: (pending: boolean) => void;
   setPendingProgrammaticSearch: (pending: boolean) => void;
@@ -80,6 +84,8 @@ interface SearchStore {
   setIsLoading: (loading: boolean) => void;
   selectResult: (id: string | null) => void;
   setUserBbox: (bbox: BoundingBox | null) => void;
+  setCircleFilter: (circle: CircleFilter | null) => void;
+  setPoi: (point: MapPoint | null) => void;
   initializeLocationSearch: (
     location: GeocodeResult,
     query: string,
@@ -98,6 +104,7 @@ type SearchRequestState = Pick<
   | 'locationQuery'
   | 'useLocationSearch'
   | 'platform'
+  | 'circleFilter'
   | 'checkin'
   | 'checkout'
   | 'adults'
@@ -129,6 +136,7 @@ function buildSearchRequest(
   return {
     platform: state.platform,
     boundingBox: bbox,
+    circle: state.circleFilter ?? undefined,
     location:
       state.useLocationSearch && state.locationQuery
         ? state.locationQuery
@@ -244,6 +252,8 @@ export const useSearchStore = create<SearchStore>((set, get) => {
 
     viewportBbox: null,
     userBbox: null,
+    circleFilter: null,
+    poi: null,
     drawMode: null,
     zoom: 3,
     mapCenter: null,
@@ -317,6 +327,14 @@ export const useSearchStore = create<SearchStore>((set, get) => {
         drawMode: bbox ? null : get().drawMode,
       }),
 
+    setCircleFilter: (circle) => set({ circleFilter: circle }),
+
+    setPoi: (point) =>
+      set({
+        poi: point,
+        drawMode: point ? null : get().drawMode,
+      }),
+
     initializeLocationSearch: async (location, query) => {
       if (currentAbortController) {
         currentAbortController.abort();
@@ -333,6 +351,8 @@ export const useSearchStore = create<SearchStore>((set, get) => {
         mapFocusId: get().mapFocusId + 1,
         viewportBbox: null,
         userBbox: null,
+        circleFilter: null,
+        drawMode: null,
         results: [],
         selectedId: null,
         completedJobId: null,
@@ -357,7 +377,10 @@ export const useSearchStore = create<SearchStore>((set, get) => {
       if (
         state.activeJobId ||
         !bbox ||
-        (!options.force && state.zoom < MIN_SEARCH_ZOOM)
+        (!options.force &&
+          !options.bbox &&
+          !state.userBbox &&
+          state.zoom < MIN_SEARCH_ZOOM)
       ) {
         return;
       }
@@ -425,7 +448,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
       if (
         !state.hasInitializedSearch ||
         !bbox ||
-        state.zoom < MIN_SEARCH_ZOOM ||
+        (state.userBbox == null && state.zoom < MIN_SEARCH_ZOOM) ||
         state.activeJobId
       ) {
         return;

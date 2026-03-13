@@ -8,6 +8,16 @@ export interface BoundingBox {
   swLng: number;
 }
 
+export interface MapPoint {
+  lat: number;
+  lng: number;
+}
+
+export interface CircleFilter {
+  center: MapPoint;
+  radiusMeters: number;
+}
+
 export type Platform = 'airbnb' | 'booking';
 
 export type SearchJobStatus =
@@ -43,12 +53,13 @@ export interface SearchResult {
 export interface GeocodeResult {
   boundingBox: BoundingBox;
   displayName: string;
-  center: { lat: number; lng: number };
+  center: MapPoint;
 }
 
 export interface QuickSearchRequest {
   platform: Platform;
   boundingBox: BoundingBox;
+  circle?: CircleFilter;
   location?: string;
   checkin?: string;
   checkout?: string;

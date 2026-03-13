@@ -9,10 +9,21 @@ export interface BoundingBox {
   swLng: number;
 }
 
+export interface MapPoint {
+  lat: number;
+  lng: number;
+}
+
+export interface CircleFilter {
+  center: MapPoint;
+  radiusMeters: number;
+}
+
 export interface SearchParams {
   platform: 'airbnb' | 'booking';
   location?: string;
   boundingBox?: BoundingBox;
+  circle?: CircleFilter;
   checkin?: string;
   checkout?: string;
   adults: number;

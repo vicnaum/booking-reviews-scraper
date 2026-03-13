@@ -28,6 +28,8 @@ export default function FilterPanel() {
   const hasInitializedSearch = useSearchStore((s) => s.hasInitializedSearch);
   const autoUpdate = useSearchStore((s) => s.autoUpdate);
   const drawMode = useSearchStore((s) => s.drawMode);
+  const circleFilter = useSearchStore((s) => s.circleFilter);
+  const poi = useSearchStore((s) => s.poi);
   const pendingViewportSearch = useSearchStore((s) => s.pendingViewportSearch);
   const airbnbFilters = useSearchStore((s) => s.airbnbFilters);
   const bookingFilters = useSearchStore((s) => s.bookingFilters);
@@ -41,6 +43,8 @@ export default function FilterPanel() {
   const setDrawMode = useSearchStore((s) => s.setDrawMode);
   const setUseLocationSearch = useSearchStore((s) => s.setUseLocationSearch);
   const setUserBbox = useSearchStore((s) => s.setUserBbox);
+  const setCircleFilter = useSearchStore((s) => s.setCircleFilter);
+  const setPoi = useSearchStore((s) => s.setPoi);
   const setPendingViewportSearch = useSearchStore(
     (s) => s.setPendingViewportSearch,
   );
@@ -53,7 +57,8 @@ export default function FilterPanel() {
     !!fullSearchBbox &&
     (userBbox !== null || zoom >= 12) &&
     !activeJobId;
-  const canDrawRectangle = hasInitializedSearch && !activeJobId;
+  const canDrawArea = hasInitializedSearch && !activeJobId;
+  const canTogglePoi = hasInitializedSearch;
 
   // Immediate update + search (for selects, checkboxes, buttons)
   const update = useCallback(
@@ -311,10 +316,8 @@ export default function FilterPanel() {
 
       <div className="ml-auto flex items-center gap-2">
         <button
-          onClick={() =>
-            setDrawMode(drawMode === 'rectangle' ? null : 'rectangle')
-          }
-          disabled={!canDrawRectangle}
+          onClick={() => setDrawMode(drawMode === 'rectangle' ? null : 'rectangle')}
+          disabled={!canDrawArea}
           className={`rounded border px-3 py-1.5 text-xs font-medium transition ${
             drawMode === 'rectangle'
               ? 'border-amber-600 bg-amber-900/40 text-amber-100 hover:bg-amber-900/60'
@@ -323,11 +326,42 @@ export default function FilterPanel() {
         >
           {drawMode === 'rectangle' ? 'Cancel rectangle' : 'Draw rectangle'}
         </button>
-        {userBbox && (
+        <button
+          onClick={() => setDrawMode(drawMode === 'circle' ? null : 'circle')}
+          disabled={!canDrawArea}
+          className={`rounded border px-3 py-1.5 text-xs font-medium transition ${
+            drawMode === 'circle'
+              ? 'border-sky-600 bg-sky-900/40 text-sky-100 hover:bg-sky-900/60'
+              : 'border-neutral-700 bg-neutral-900 text-neutral-300 hover:border-neutral-500 hover:text-white'
+          } disabled:cursor-not-allowed disabled:border-neutral-800 disabled:bg-neutral-900 disabled:text-neutral-600`}
+        >
+          {drawMode === 'circle' ? 'Cancel circle' : 'Draw circle'}
+        </button>
+        <button
+          onClick={() => {
+            if (drawMode === 'poi' || poi) {
+              setDrawMode(null);
+              setPoi(null);
+              return;
+            }
+
+            setDrawMode('poi');
+          }}
+          disabled={!canTogglePoi}
+          className={`rounded border px-3 py-1.5 text-xs font-medium transition ${
+            drawMode === 'poi' || poi
+              ? 'border-orange-600 bg-orange-900/40 text-orange-100 hover:bg-orange-900/60'
+              : 'border-neutral-700 bg-neutral-900 text-neutral-300 hover:border-neutral-500 hover:text-white'
+          } disabled:cursor-not-allowed disabled:border-neutral-800 disabled:bg-neutral-900 disabled:text-neutral-600`}
+        >
+          {drawMode === 'poi' || poi ? 'Clear POI' : 'Set POI'}
+        </button>
+        {(userBbox || circleFilter) && (
           <button
             onClick={() => {
               setDrawMode(null);
               setUseLocationSearch(false);
+              setCircleFilter(null);
               setUserBbox(null);
               setPendingViewportSearch(false);
               void triggerQuickSearch({ force: true });
