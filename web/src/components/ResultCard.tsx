@@ -53,9 +53,22 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
           )}
 
           <div className="min-w-0 flex-1">
-            <h3 className="truncate text-sm font-semibold text-stone-100">
-              {result.name}
-            </h3>
+            <div className="flex items-start justify-between gap-2">
+              <h3 className="min-w-0 truncate text-sm font-semibold text-stone-100">
+                {result.name}
+              </h3>
+              <a
+                href={result.url}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(event) => event.stopPropagation()}
+                className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-xs text-stone-300 transition hover:border-white/20 hover:bg-white/[0.08] hover:text-white"
+                aria-label={`Open ${result.name} in a new tab`}
+                title="Open listing"
+              >
+                ↗
+              </a>
+            </div>
 
             <div className="mt-1.5 flex items-center gap-2 text-xs text-stone-400">
               {formatRating(result) && (

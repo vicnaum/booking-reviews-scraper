@@ -65,19 +65,21 @@ function getComparablePriceAmount(
   checkin?: string,
   checkout?: string,
 ): number | null {
-  const nights = getNightCount(checkin, checkout);
-
   if (mode === 'total') {
     if (result.totalPrice) {
       return result.totalPrice.amount;
     }
 
     if (result.price) {
-      return nights ? result.price.amount * nights : result.price.amount;
+      // Airbnb often omits an explicit total. In those cases, use the returned
+      // amount as the best comparable shown price instead of assuming it is nightly.
+      return result.price.amount;
     }
 
     return null;
   }
+
+  const nights = getNightCount(checkin, checkout);
 
   if (result.price) {
     return result.price.amount;

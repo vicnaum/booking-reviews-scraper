@@ -101,7 +101,7 @@ export default function FilterPanel() {
   const update = useCallback(
     (key: string, value: unknown) => {
       setFilter(key, value);
-      triggerQuickSearch();
+      triggerQuickSearch({ force: true });
     },
     [setFilter, triggerQuickSearch],
   );
@@ -112,7 +112,7 @@ export default function FilterPanel() {
     }
 
     commitTimeoutRef.current = setTimeout(() => {
-      void triggerQuickSearch();
+      void triggerQuickSearch({ force: true });
     }, FILTER_INPUT_DEBOUNCE_MS);
   }, [triggerQuickSearch]);
 
@@ -129,7 +129,7 @@ export default function FilterPanel() {
       clearTimeout(commitTimeoutRef.current);
       commitTimeoutRef.current = null;
     }
-    triggerQuickSearch();
+    triggerQuickSearch({ force: true });
   }, [triggerQuickSearch]);
 
   useEffect(() => {
@@ -143,7 +143,7 @@ export default function FilterPanel() {
   const onEnter = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === 'Enter') {
-        triggerQuickSearch();
+        triggerQuickSearch({ force: true });
       }
     },
     [triggerQuickSearch],
@@ -152,7 +152,7 @@ export default function FilterPanel() {
   const updateAirbnb = useCallback(
     (key: string, value: unknown) => {
       setFilter('airbnbFilters', { ...airbnbFilters, [key]: value });
-      triggerQuickSearch();
+      triggerQuickSearch({ force: true });
     },
     [airbnbFilters, setFilter, triggerQuickSearch],
   );
@@ -160,7 +160,7 @@ export default function FilterPanel() {
   const updateBooking = useCallback(
     (key: string, value: unknown) => {
       setFilter('bookingFilters', { ...bookingFilters, [key]: value });
-      triggerQuickSearch();
+      triggerQuickSearch({ force: true });
     },
     [bookingFilters, setFilter, triggerQuickSearch],
   );

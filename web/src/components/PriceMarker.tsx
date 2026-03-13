@@ -47,8 +47,12 @@ function formatMarkerPrice(
     checkout,
   }).primary;
 
-  if (primary.endsWith(' est. total')) {
-    return `~${primary.replace(' est. total', '')}`;
+  if (primary.endsWith(' shown price')) {
+    return primary.replace(' shown price', '');
+  }
+
+  if (primary.endsWith(' est. per night')) {
+    return `~${primary.replace(' est. per night', '')}`;
   }
 
   return primary.replace(' per night', '');

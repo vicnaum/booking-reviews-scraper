@@ -77,9 +77,9 @@ export function getPriceDisplayInfo(
     ? formatAmount(result.totalPrice.amount, result.totalPrice.currency)
     : null;
   const nights = getNightCount(options.checkin, options.checkout);
-  const estimatedTotal =
-    !total && result.price && nights
-      ? formatAmount(result.price.amount * nights, result.price.currency)
+  const estimatedNightly =
+    !nightly && result.totalPrice && nights
+      ? formatAmount(result.totalPrice.amount / nights, result.totalPrice.currency)
       : null;
 
   if (mode === 'total') {
@@ -90,16 +90,9 @@ export function getPriceDisplayInfo(
       };
     }
 
-    if (estimatedTotal) {
-      return {
-        primary: `${estimatedTotal} est. total`,
-        secondary: nightly ? `${nightly} per night` : null,
-      };
-    }
-
     if (nightly) {
       return {
-        primary: `${nightly} per night`,
+        primary: `${nightly} shown price`,
         secondary: null,
       };
     }
@@ -110,16 +103,19 @@ export function getPriceDisplayInfo(
   if (nightly) {
     return {
       primary: `${nightly} per night`,
-      secondary: total ?? (estimatedTotal ? `${estimatedTotal} est. total` : null),
+      secondary: total,
+    };
+  }
+
+  if (estimatedNightly) {
+    return {
+      primary: `${estimatedNightly} est. per night`,
+      secondary: total,
     };
   }
 
   if (total) {
     return { primary: total, secondary: null };
-  }
-
-  if (estimatedTotal) {
-    return { primary: `${estimatedTotal} est. total`, secondary: null };
   }
 
   return { primary: '?', secondary: null };
