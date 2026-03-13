@@ -27,6 +27,7 @@ export default function FilterPanel() {
   const priceDisplay = useSearchStore((s) => s.priceDisplay);
   const hasInitializedSearch = useSearchStore((s) => s.hasInitializedSearch);
   const autoUpdate = useSearchStore((s) => s.autoUpdate);
+  const drawMode = useSearchStore((s) => s.drawMode);
   const pendingViewportSearch = useSearchStore((s) => s.pendingViewportSearch);
   const airbnbFilters = useSearchStore((s) => s.airbnbFilters);
   const bookingFilters = useSearchStore((s) => s.bookingFilters);
@@ -37,6 +38,12 @@ export default function FilterPanel() {
   const jobProgress = useSearchStore((s) => s.jobProgress);
   const setFilter = useSearchStore((s) => s.setFilter);
   const setAutoUpdate = useSearchStore((s) => s.setAutoUpdate);
+  const setDrawMode = useSearchStore((s) => s.setDrawMode);
+  const setUseLocationSearch = useSearchStore((s) => s.setUseLocationSearch);
+  const setUserBbox = useSearchStore((s) => s.setUserBbox);
+  const setPendingViewportSearch = useSearchStore(
+    (s) => s.setPendingViewportSearch,
+  );
   const triggerQuickSearch = useSearchStore((s) => s.triggerQuickSearch);
   const startFullSearch = useSearchStore((s) => s.startFullSearch);
 
@@ -46,6 +53,7 @@ export default function FilterPanel() {
     !!fullSearchBbox &&
     (userBbox !== null || zoom >= 12) &&
     !activeJobId;
+  const canDrawRectangle = hasInitializedSearch && !activeJobId;
 
   // Immediate update + search (for selects, checkboxes, buttons)
   const update = useCallback(
@@ -302,6 +310,34 @@ export default function FilterPanel() {
       )}
 
       <div className="ml-auto flex items-center gap-2">
+        <button
+          onClick={() =>
+            setDrawMode(drawMode === 'rectangle' ? null : 'rectangle')
+          }
+          disabled={!canDrawRectangle}
+          className={`rounded border px-3 py-1.5 text-xs font-medium transition ${
+            drawMode === 'rectangle'
+              ? 'border-amber-600 bg-amber-900/40 text-amber-100 hover:bg-amber-900/60'
+              : 'border-neutral-700 bg-neutral-900 text-neutral-300 hover:border-neutral-500 hover:text-white'
+          } disabled:cursor-not-allowed disabled:border-neutral-800 disabled:bg-neutral-900 disabled:text-neutral-600`}
+        >
+          {drawMode === 'rectangle' ? 'Cancel rectangle' : 'Draw rectangle'}
+        </button>
+        {userBbox && (
+          <button
+            onClick={() => {
+              setDrawMode(null);
+              setUseLocationSearch(false);
+              setUserBbox(null);
+              setPendingViewportSearch(false);
+              void triggerQuickSearch({ force: true });
+            }}
+            disabled={!hasInitializedSearch || !!activeJobId}
+            className="rounded border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-300 transition hover:border-neutral-500 hover:text-white disabled:cursor-not-allowed disabled:border-neutral-800 disabled:bg-neutral-900 disabled:text-neutral-600"
+          >
+            Clear area
+          </button>
+        )}
         <label className="flex items-center gap-1.5 text-xs text-neutral-400 cursor-pointer">
           <input
             type="checkbox"

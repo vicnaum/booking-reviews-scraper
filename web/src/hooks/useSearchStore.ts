@@ -44,6 +44,7 @@ interface SearchStore {
   // Map state
   viewportBbox: BoundingBox | null;
   userBbox: BoundingBox | null;
+  drawMode: 'rectangle' | null;
   zoom: number;
   mapCenter: { lat: number; lng: number } | null;
   mapFocusId: number;
@@ -69,6 +70,7 @@ interface SearchStore {
   setPlatform: (p: Platform) => void;
   setFilter: (key: string, value: unknown) => void;
   setUseLocationSearch: (enabled: boolean) => void;
+  setDrawMode: (mode: 'rectangle' | null) => void;
   setViewport: (bbox: BoundingBox, zoom: number) => void;
   setMapCenter: (center: { lat: number; lng: number }) => void;
   setAutoUpdate: (enabled: boolean) => void;
@@ -242,6 +244,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
 
     viewportBbox: null,
     userBbox: null,
+    drawMode: null,
     zoom: 3,
     mapCenter: null,
     mapFocusId: 0,
@@ -283,6 +286,8 @@ export const useSearchStore = create<SearchStore>((set, get) => {
 
     setUseLocationSearch: (enabled) => set({ useLocationSearch: enabled }),
 
+    setDrawMode: (mode) => set({ drawMode: mode }),
+
     setViewport: (bbox, zoom) => set({ viewportBbox: bbox, zoom }),
 
     setMapCenter: (center) => set({ mapCenter: center }),
@@ -306,7 +311,11 @@ export const useSearchStore = create<SearchStore>((set, get) => {
 
     selectResult: (id) => set({ selectedId: id }),
 
-    setUserBbox: (bbox) => set({ userBbox: bbox }),
+    setUserBbox: (bbox) =>
+      set({
+        userBbox: bbox,
+        drawMode: bbox ? null : get().drawMode,
+      }),
 
     initializeLocationSearch: async (location, query) => {
       if (currentAbortController) {
