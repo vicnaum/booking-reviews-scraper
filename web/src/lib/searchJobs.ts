@@ -13,6 +13,7 @@ import type {
 export interface PersistedSearchFilters {
   exhaustive?: boolean;
   minRating?: number;
+  minBedrooms?: number;
   priceMin?: number;
   priceMax?: number;
   propertyType?: string;
@@ -64,6 +65,7 @@ export function buildSearchFilters(
   };
 
   if (request.minRating != null) filters.minRating = request.minRating;
+  if (request.minBedrooms != null) filters.minBedrooms = request.minBedrooms;
   if (request.priceMin != null) filters.priceMin = request.priceMin;
   if (request.priceMax != null) filters.priceMax = request.priceMax;
   if (request.propertyType) filters.propertyType = request.propertyType;
@@ -88,6 +90,7 @@ export function parseSearchFilters(
   return {
     exhaustive: asBoolean(filters.exhaustive),
     minRating: asNumber(filters.minRating),
+    minBedrooms: asNumber(filters.minBedrooms),
     priceMin: asNumber(filters.priceMin),
     priceMax: asNumber(filters.priceMax),
     propertyType: asString(filters.propertyType),
@@ -130,6 +133,7 @@ export function buildCliSearchParams(job: SearchJobModel) {
     adults: job.adults,
     currency: job.currency,
     minRating: filters.minRating,
+    minBedrooms: filters.minBedrooms,
     priceMin: filters.priceMin,
     priceMax: filters.priceMax,
     propertyType: filters.propertyType,

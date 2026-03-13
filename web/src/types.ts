@@ -56,6 +56,7 @@ export interface QuickSearchRequest {
   priceMin?: number;
   priceMax?: number;
   minRating?: number;
+  minBedrooms?: number;
   propertyType?: string;
   superhost?: boolean;
   instantBook?: boolean;

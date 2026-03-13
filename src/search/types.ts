@@ -19,6 +19,7 @@ export interface SearchParams {
   children?: number;
   currency: string;
   minRating?: number;
+  minBedrooms?: number;
   priceMin?: number;
   priceMax?: number;
   propertyType?: string;

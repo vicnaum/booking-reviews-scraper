@@ -6,6 +6,7 @@
 
 import { makeRequest, getApiKey, BROWSER_HEADERS, API_HEADERS } from './scraper.js';
 import { createSearchGrid, subdivideBbox, createPriceRanges } from '../search/geo.js';
+import { filterSearchResults } from '../search/filters.js';
 import type {
   AirbnbSearchParams,
   SearchResult,
@@ -69,6 +70,9 @@ function buildExploreUrl(
   // Filters
   if (params.priceMin != null) url.searchParams.set('price_min', String(params.priceMin));
   if (params.priceMax != null) url.searchParams.set('price_max', String(params.priceMax));
+  if (params.minBedrooms != null) {
+    url.searchParams.set('min_bedrooms', String(params.minBedrooms));
+  }
 
   if (params.propertyType) {
     const typeMap: Record<string, string> = {
@@ -199,10 +203,11 @@ async function searchAirbnbCell(
 
       const data = JSON.parse(response.data);
       const page = parseExplorePage(data, params, pageIndex);
+      const filteredPageResults = filterSearchResults(page.results, params);
 
       // Deduplicate
       const newResults: SearchResult[] = [];
-      for (const r of page.results) {
+      for (const r of filteredPageResults) {
         if (!seenIds.has(r.id)) {
           seenIds.add(r.id);
           newResults.push(r);
@@ -284,6 +289,9 @@ async function searchAirbnbSSR(
     if (params.adults) url.searchParams.set('adults', String(params.adults));
     if (params.priceMin != null) url.searchParams.set('price_min', String(params.priceMin));
     if (params.priceMax != null) url.searchParams.set('price_max', String(params.priceMax));
+    if (params.minBedrooms != null) {
+      url.searchParams.set('min_bedrooms', String(params.minBedrooms));
+    }
 
     if (cursor) url.searchParams.set('cursor', cursor);
 
@@ -364,6 +372,19 @@ async function searchAirbnbSSR(
           reviewCount = parseInt(ratingMatch[2]);
         }
 
+        let bedrooms: number | undefined;
+        const primaryLine = item?.structuredContent?.primaryLine;
+        if (Array.isArray(primaryLine)) {
+          for (const entry of primaryLine) {
+            const body = typeof entry?.body === 'string' ? entry.body : '';
+            const bedroomMatch = body.match(/(\d+)\s+bedroom/i);
+            if (bedroomMatch) {
+              bedrooms = parseInt(bedroomMatch[1], 10);
+              break;
+            }
+          }
+        }
+
         pageResults.push({
           id,
           platform: 'airbnb',
@@ -376,15 +397,17 @@ async function searchAirbnbSSR(
           coordinates: coord ? { lat: coord.latitude, lng: coord.longitude } : null,
           propertyType: listing?.roomType ?? null,
           photoUrl: item?.contextualPictures?.[0]?.picture || null,
+          bedrooms,
           superhost: isSuperhost || undefined,
         });
       }
 
-      results.push(...pageResults);
+      const filteredPageResults = filterSearchResults(pageResults, params);
+      results.push(...filteredPageResults);
 
       if (onProgress) {
         onProgress({
-          results: pageResults,
+          results: filteredPageResults,
           hasNextPage: !!searchData?.results?.paginationInfo?.nextPageCursor,
           pageIndex,
         });

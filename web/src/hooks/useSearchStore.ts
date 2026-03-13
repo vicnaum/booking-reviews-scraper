@@ -26,6 +26,7 @@ interface SearchStore {
   priceMin: number | null;
   priceMax: number | null;
   minRating: number | null;
+  minBedrooms: number | null;
   propertyType: string | null;
   priceDisplay: PriceDisplay;
   airbnbFilters: { superhost?: boolean; instantBook?: boolean };
@@ -78,6 +79,7 @@ type SearchRequestState = Pick<
   | 'priceMin'
   | 'priceMax'
   | 'minRating'
+  | 'minBedrooms'
   | 'propertyType'
   | 'airbnbFilters'
   | 'bookingFilters'
@@ -107,6 +109,7 @@ function buildSearchRequest(
     priceMin: state.priceMin ?? undefined,
     priceMax: state.priceMax ?? undefined,
     minRating: state.minRating ?? undefined,
+    minBedrooms: state.minBedrooms ?? undefined,
     propertyType: state.propertyType ?? undefined,
     exhaustive: true,
     ...(state.platform === 'airbnb' ? state.airbnbFilters : {}),
@@ -198,6 +201,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
     priceMin: null,
     priceMax: null,
     minRating: null,
+    minBedrooms: null,
     propertyType: null,
     priceDisplay: 'perNight' as PriceDisplay,
     airbnbFilters: {},

@@ -322,6 +322,9 @@ function buildFilterString(params: BookingSearchParams): string {
   }
 
   if (params.freeCancellation) parts.push('fc=2');
+  if (params.minBedrooms != null) {
+    parts.push(`entire_place_bedroom_count=${params.minBedrooms}`);
+  }
 
   if (params.priceMin != null || params.priceMax != null) {
     const min = params.priceMin ?? 'min';
