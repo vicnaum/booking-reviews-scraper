@@ -81,18 +81,17 @@ export default function ResultsSidebar() {
   }, [completedJobId]);
 
   return (
-    <aside className="hidden w-80 flex-shrink-0 flex-col border-r border-neutral-800 bg-neutral-950 md:flex">
-      {/* Header */}
-      <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
+    <aside className="hidden w-[360px] flex-shrink-0 flex-col border-r border-white/10 bg-[linear-gradient(180deg,rgba(20,16,13,0.94),rgba(14,12,10,0.92))] md:flex">
+      <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
         <div className="flex items-center gap-2">
-          <span className="text-sm text-neutral-300">
+          <span className="text-sm font-semibold text-stone-100">
             Results
             {results.length > 0 && (
-              <span className="ml-1 text-neutral-500">({results.length})</span>
+              <span className="ml-1 text-stone-500">({results.length})</span>
             )}
           </span>
           {isLoading && (
-            <div className="h-3 w-3 animate-spin rounded-full border border-neutral-600 border-t-neutral-300" />
+            <div className="h-3 w-3 animate-spin rounded-full border border-stone-600 border-t-stone-200" />
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -102,13 +101,13 @@ export default function ResultsSidebar() {
                 void handleExport();
               }}
               disabled={isExporting}
-              className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-xl border border-white/10 bg-white/[0.05] px-3 py-1.5 text-xs font-semibold text-stone-200 transition-colors hover:bg-white/[0.1] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isExporting ? 'Exporting…' : 'Export URLs'}
             </button>
           )}
           {lastSearchMs != null && !isLoading && (
-            <span className="text-xs text-neutral-600">
+            <span className="text-xs font-medium text-stone-500">
               {(lastSearchMs / 1000).toFixed(1)}s
             </span>
           )}
@@ -116,30 +115,29 @@ export default function ResultsSidebar() {
       </div>
 
       {activeJobId && (
-        <div className="border-b border-neutral-800 px-4 py-3">
-          <div className="flex items-center justify-between text-xs text-neutral-400">
+        <div className="border-b border-white/10 px-5 py-4">
+          <div className="flex items-center justify-between text-xs font-medium text-stone-400">
             <span>Full search job running</span>
             <span>{Math.round(jobProgress * 100)}%</span>
           </div>
-          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-neutral-800">
+          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/[0.08]">
             <div
-              className="h-full rounded-full bg-emerald-500 transition-all"
+              className="h-full rounded-full bg-[linear-gradient(90deg,#3bcf93,#88e2bc)] transition-all"
               style={{ width: `${Math.max(4, Math.round(jobProgress * 100))}%` }}
             />
           </div>
         </div>
       )}
 
-      {/* Results list */}
-      <div ref={listRef} className="flex-1 overflow-y-auto p-2 space-y-2">
+      <div ref={listRef} className="flex-1 space-y-3 overflow-y-auto p-3">
         {searchError && (
-          <div className="rounded-lg bg-red-950/50 p-3 text-xs text-red-400">
+          <div className="rounded-2xl border border-rose-400/20 bg-rose-950/40 p-4 text-xs text-rose-200">
             {searchError}
           </div>
         )}
 
         {exportError && (
-          <div className="rounded-lg bg-red-950/50 p-3 text-xs text-red-400">
+          <div className="rounded-2xl border border-rose-400/20 bg-rose-950/40 p-4 text-xs text-rose-200">
             {exportError}
           </div>
         )}
@@ -156,10 +154,10 @@ export default function ResultsSidebar() {
           ))
         ) : !isLoading && !searchError ? (
           <div className="flex flex-col items-center justify-center py-16 text-center">
-            <div className="text-2xl mb-2">
+            <div className="mb-3 text-3xl">
               {platform === 'airbnb' ? '🏠' : '🏨'}
             </div>
-            <p className="text-sm text-neutral-500">
+            <p className="max-w-[18rem] text-sm leading-6 text-stone-500">
               {zoom < 12
                 ? 'Zoom in to search for listings'
                 : 'No results in this area'}

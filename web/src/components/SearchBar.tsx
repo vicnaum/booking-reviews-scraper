@@ -40,18 +40,18 @@ export default function SearchBar() {
   };
 
   return (
-    <div className="flex items-center gap-2">
-      <div className="relative flex-1">
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+      <div className="relative flex-1 overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] transition focus-within:border-[#ff6b5f]/40 focus-within:bg-black/30">
         <input
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="Search a city to begin..."
-          className="w-full rounded-lg border border-neutral-700 bg-neutral-900 px-4 py-2.5 pl-10 text-sm text-white placeholder-neutral-500 outline-none transition focus:border-neutral-500 focus:ring-1 focus:ring-neutral-500"
+          className="w-full bg-transparent px-4 py-3 pl-11 text-sm font-medium text-white outline-none"
         />
         <svg
-          className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500"
+          className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-stone-500"
           width="16"
           height="16"
           viewBox="0 0 24 24"
@@ -68,12 +68,12 @@ export default function SearchBar() {
       <button
         onClick={handleSearch}
         disabled={isSearching || !query.trim()}
-        className="rounded-lg bg-neutral-700 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-neutral-600 disabled:opacity-40 disabled:cursor-not-allowed"
+        className="rounded-2xl border border-[#ff8d81]/40 bg-[linear-gradient(135deg,#ff6b5f,#ff8e64)] px-5 py-3 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(255,107,95,0.28)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:border-white/[0.05] disabled:bg-white/[0.06] disabled:text-stone-500 disabled:shadow-none"
       >
         {isSearching ? 'Searching...' : 'Search'}
       </button>
       {error && (
-        <span className="text-xs text-red-400">{error}</span>
+        <span className="text-xs text-rose-300">{error}</span>
       )}
     </div>
   );

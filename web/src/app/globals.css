@@ -1,40 +1,109 @@
 @import "tailwindcss";
 
 :root {
-  --color-background: #0a0a0a;
-  --color-foreground: #ededed;
-  --color-airbnb: #ff5a5f;
-  --color-booking: #003580;
-  --color-muted: #888;
+  --surface-0: #120f0b;
+  --surface-1: #181410;
+  --surface-2: #211c17;
+  --surface-3: #2b231d;
+  --text-primary: #f4eee7;
+  --text-muted: #aea39a;
+  --line-soft: rgba(255, 255, 255, 0.09);
+  --line-strong: rgba(255, 255, 255, 0.16);
+  --accent-airbnb: #ff6b5f;
+  --accent-booking: #2870ff;
+  --accent-gold: #f4b56a;
+  --shadow-panel:
+    0 24px 60px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
 }
 
 body {
-  background: var(--color-background);
-  color: var(--color-foreground);
-  font-family: system-ui, -apple-system, sans-serif;
+  margin: 0;
+  color: var(--text-primary);
+  font-family: var(--font-sans), sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(255, 107, 95, 0.18), transparent 26%),
+    radial-gradient(circle at top right, rgba(40, 112, 255, 0.12), transparent 22%),
+    linear-gradient(180deg, #120f0b 0%, #0e0d0c 48%, #0b0b0b 100%);
 }
 
-/* Leaflet overrides for dark theme */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--font-display), sans-serif;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(255, 107, 95, 0.28);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: rgba(219, 211, 202, 0.42);
+}
+
+select {
+  color-scheme: dark;
+}
+
 .leaflet-container {
-  background: #1a1a2e;
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.08), transparent 34%),
+    #18120f;
 }
 
 .leaflet-control-zoom a {
-  background: #1e1e2e !important;
-  color: #ccc !important;
-  border-color: #333 !important;
+  background: rgba(18, 15, 11, 0.92) !important;
+  color: #d7ccc3 !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
 }
 
 .leaflet-control-attribution {
-  background: rgba(0, 0, 0, 0.6) !important;
-  color: #888 !important;
+  background: rgba(18, 15, 11, 0.82) !important;
+  color: #9b9189 !important;
 }
 
 .leaflet-control-attribution a {
-  color: #aaa !important;
+  color: #d0b28d !important;
 }
 
-/* Price marker: prevent Leaflet from clipping the pill */
 .leaflet-marker-icon {
   overflow: visible !important;
 }

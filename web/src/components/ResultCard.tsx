@@ -14,8 +14,12 @@ interface ResultCardProps {
 const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
   function ResultCard({ result, isSelected, onClick }, ref) {
     const priceDisplay = useSearchStore((s) => s.priceDisplay);
-    const borderColor = result.platform === 'airbnb' ? 'border-red-500/50' : 'border-blue-700/50';
-    const selectedBorder = result.platform === 'airbnb' ? 'border-red-500' : 'border-blue-600';
+    const hoverBorder =
+      result.platform === 'airbnb'
+        ? 'hover:border-red-500/50'
+        : 'hover:border-blue-700/50';
+    const selectedBorder =
+      result.platform === 'airbnb' ? 'border-red-500' : 'border-blue-600';
 
     // Show the "other" price as secondary
     const altMode = priceDisplay === 'perNight' ? 'total' : 'perNight';
@@ -29,36 +33,36 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
       <div
         ref={ref}
         onClick={onClick}
-        className={`cursor-pointer rounded-lg border p-3 transition-colors ${
+        className={`cursor-pointer rounded-[22px] border p-3.5 transition-all ${
           isSelected
-            ? `${selectedBorder} bg-neutral-800/80`
-            : `border-neutral-800 bg-neutral-900 hover:${borderColor} hover:bg-neutral-800/50`
+            ? `${selectedBorder} bg-white/[0.08] shadow-[0_14px_34px_rgba(0,0,0,0.18)]`
+            : `border-white/[0.08] bg-white/[0.03] ${hoverBorder} hover:bg-white/[0.06]`
         }`}
       >
         <div className="flex gap-3">
-          {/* Photo */}
           {result.photoUrl ? (
             <img
               src={result.photoUrl}
               alt={result.name}
-              className="h-20 w-20 flex-shrink-0 rounded-md object-cover"
+              className="h-24 w-24 flex-shrink-0 rounded-2xl object-cover"
               loading="lazy"
             />
           ) : (
-            <div className="flex h-20 w-20 flex-shrink-0 items-center justify-center rounded-md bg-neutral-800 text-neutral-600 text-xs">
+            <div className="flex h-24 w-24 flex-shrink-0 items-center justify-center rounded-2xl bg-black/30 text-xs text-stone-600">
               No photo
             </div>
           )}
 
-          {/* Info */}
           <div className="min-w-0 flex-1">
-            <h3 className="truncate text-sm font-medium text-neutral-200">
+            <h3 className="truncate text-sm font-semibold text-stone-100">
               {result.name}
             </h3>
 
-            <div className="mt-1 flex items-center gap-2 text-xs text-neutral-400">
+            <div className="mt-1.5 flex items-center gap-2 text-xs text-stone-400">
               {formatRating(result) && (
-                <span className="text-yellow-400">{formatRating(result)}</span>
+                <span className="font-semibold text-[#f4c06b]">
+                  {formatRating(result)}
+                </span>
               )}
               {result.reviewCount > 0 && (
                 <span>({result.reviewCount})</span>
@@ -68,20 +72,22 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
               )}
             </div>
 
-            <div className="mt-1 flex items-center gap-2 text-xs text-neutral-500">
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-stone-500">
               {result.bedrooms != null && <span>{result.bedrooms}bd</span>}
               {result.beds != null && <span>{result.beds}bed</span>}
               {result.bathrooms != null && <span>{result.bathrooms}ba</span>}
               {result.maxGuests != null && <span>{result.maxGuests}g</span>}
               {result.superhost && (
-                <span className="text-pink-400">Superhost</span>
+                <span className="rounded-full bg-[#ff6b5f]/15 px-2 py-0.5 text-[#ffb4ad]">
+                  Superhost
+                </span>
               )}
             </div>
 
-            <div className="mt-1.5 text-sm font-semibold text-white">
+            <div className="mt-3 text-sm font-semibold text-white">
               {formatPriceLabel(result, priceDisplay)}
               {hasAlt && (
-                <span className="ml-1 text-xs font-normal text-neutral-500">
+                <span className="ml-1 text-xs font-medium text-stone-500">
                   ({formatPrice(result, altMode)} {altLabel})
                 </span>
               )}

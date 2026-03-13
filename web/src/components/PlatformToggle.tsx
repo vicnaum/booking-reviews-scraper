@@ -13,15 +13,22 @@ export default function PlatformToggle() {
   ];
 
   return (
-    <div className="flex rounded-lg border border-neutral-700 overflow-hidden">
+    <div className="inline-flex rounded-2xl border border-white/10 bg-white/[0.04] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
       {options.map((opt) => (
         <button
           key={opt.value}
           onClick={() => setPlatform(opt.value)}
-          className="px-3 py-1.5 text-xs font-medium transition-colors"
+          className="rounded-xl px-4 py-2 text-sm font-semibold transition-all"
           style={{
-            background: platform === opt.value ? opt.color : 'transparent',
-            color: platform === opt.value ? '#fff' : '#999',
+            background:
+              platform === opt.value
+                ? `linear-gradient(135deg, ${opt.color}, ${opt.color}cc)`
+                : 'transparent',
+            color: platform === opt.value ? '#fff' : '#a8a29e',
+            boxShadow:
+              platform === opt.value
+                ? '0 10px 22px rgba(0,0,0,0.25)'
+                : 'none',
           }}
         >
           {opt.label}

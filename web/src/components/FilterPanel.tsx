@@ -12,6 +12,15 @@ const PROPERTY_TYPES = [
   { value: 'shared', label: 'Shared room' },
 ];
 
+const fieldClassName =
+  'h-10 rounded-xl border border-white/10 bg-white/[0.04] px-3 text-xs font-medium text-stone-100 outline-none transition placeholder:text-stone-500 focus:border-[#ff6b5f]/35 focus:bg-black/30';
+
+const groupClassName =
+  'flex flex-wrap items-center gap-2 rounded-2xl border border-white/[0.08] bg-black/[0.18] p-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]';
+
+const smallButtonClassName =
+  'flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-xs font-semibold text-stone-300 transition hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-30';
+
 export default function FilterPanel() {
   const checkin = useSearchStore((s) => s.checkin);
   const checkout = useSearchStore((s) => s.checkout);
@@ -106,234 +115,224 @@ export default function FilterPanel() {
   );
 
   return (
-    <div className="flex flex-wrap items-center gap-2 border-b border-neutral-800 bg-neutral-950 px-4 py-2">
-      {/* Dates — search on blur/Enter, not every keystroke */}
-      <input
-        type="date"
-        value={checkin ?? ''}
-        onChange={(e) => updateSilent('checkin', e.target.value || null)}
-        onBlur={commitSearch}
-        onKeyDown={onEnter}
-        className="h-8 rounded border border-neutral-700 bg-neutral-900 px-2 text-xs text-neutral-300 outline-none focus:border-neutral-500"
-      />
-      <input
-        type="date"
-        value={checkout ?? ''}
-        onChange={(e) => updateSilent('checkout', e.target.value || null)}
-        onBlur={commitSearch}
-        onKeyDown={onEnter}
-        className="h-8 rounded border border-neutral-700 bg-neutral-900 px-2 text-xs text-neutral-300 outline-none focus:border-neutral-500"
-      />
+    <div className="rounded-[28px] border border-white/10 bg-black/[0.24] p-3 shadow-[0_22px_60px_rgba(0,0,0,0.28)] backdrop-blur-xl">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className={groupClassName}>
+          <input
+            type="date"
+            value={checkin ?? ''}
+            onChange={(e) => updateSilent('checkin', e.target.value || null)}
+            onBlur={commitSearch}
+            onKeyDown={onEnter}
+            className={`${fieldClassName} w-[9.5rem]`}
+          />
+          <input
+            type="date"
+            value={checkout ?? ''}
+            onChange={(e) => updateSilent('checkout', e.target.value || null)}
+            onBlur={commitSearch}
+            onKeyDown={onEnter}
+            className={`${fieldClassName} w-[9.5rem]`}
+          />
+          <div className="mx-1 hidden h-7 w-px bg-white/[0.08] xl:block" />
+          <div className="flex items-center gap-1 rounded-xl bg-black/[0.18] px-1 py-1">
+            <button
+              onClick={() => update('adults', Math.max(1, adults - 1))}
+              className={smallButtonClassName}
+              disabled={adults <= 1}
+            >
+              -
+            </button>
+            <span className="min-w-16 text-center text-xs font-semibold text-stone-200">
+              {adults} {adults === 1 ? 'guest' : 'guests'}
+            </span>
+            <button
+              onClick={() => update('adults', Math.min(16, adults + 1))}
+              className={smallButtonClassName}
+            >
+              +
+            </button>
+          </div>
+        </div>
 
-      <div className="h-5 w-px bg-neutral-700" />
+        <div className={groupClassName}>
+          <input
+            type="number"
+            min={0}
+            value={minBedrooms ?? ''}
+            onChange={(e) =>
+              updateSilent(
+                'minBedrooms',
+                e.target.value ? Number(e.target.value) : null,
+              )
+            }
+            onBlur={commitSearch}
+            onKeyDown={onEnter}
+            placeholder="Bedrooms"
+            className={`${fieldClassName} w-28`}
+          />
+          <input
+            type="number"
+            min={0}
+            value={minBeds ?? ''}
+            onChange={(e) =>
+              updateSilent('minBeds', e.target.value ? Number(e.target.value) : null)
+            }
+            onBlur={commitSearch}
+            onKeyDown={onEnter}
+            placeholder="Beds"
+            className={`${fieldClassName} w-24`}
+          />
+          <input
+            type="number"
+            value={priceMin ?? ''}
+            onChange={(e) =>
+              updateSilent('priceMin', e.target.value ? Number(e.target.value) : null)
+            }
+            onBlur={commitSearch}
+            onKeyDown={onEnter}
+            placeholder={`Min ${currency === 'EUR' ? '\u20AC' : '$'}`}
+            className={`${fieldClassName} w-24`}
+          />
+          <input
+            type="number"
+            value={priceMax ?? ''}
+            onChange={(e) =>
+              updateSilent('priceMax', e.target.value ? Number(e.target.value) : null)
+            }
+            onBlur={commitSearch}
+            onKeyDown={onEnter}
+            placeholder={`Max ${currency === 'EUR' ? '\u20AC' : '$'}`}
+            className={`${fieldClassName} w-24`}
+          />
+        </div>
 
-      {/* Guests — immediate search (button clicks) */}
-      <div className="flex items-center gap-1">
-        <button
-          onClick={() => update('adults', Math.max(1, adults - 1))}
-          className="flex h-7 w-7 items-center justify-center rounded border border-neutral-700 bg-neutral-900 text-xs text-neutral-400 hover:bg-neutral-800 disabled:opacity-30"
-          disabled={adults <= 1}
-        >
-          -
-        </button>
-        <span className="w-12 text-center text-xs text-neutral-300">
-          {adults} {adults === 1 ? 'guest' : 'guests'}
-        </span>
-        <button
-          onClick={() => update('adults', Math.min(16, adults + 1))}
-          className="flex h-7 w-7 items-center justify-center rounded border border-neutral-700 bg-neutral-900 text-xs text-neutral-400 hover:bg-neutral-800"
-        >
-          +
-        </button>
-      </div>
-
-      <div className="h-5 w-px bg-neutral-700" />
-
-      {/* Bedrooms — search on blur/Enter */}
-      <input
-        type="number"
-        min={0}
-        value={minBedrooms ?? ''}
-        onChange={(e) =>
-          updateSilent('minBedrooms', e.target.value ? Number(e.target.value) : null)
-        }
-        onBlur={commitSearch}
-        onKeyDown={onEnter}
-        placeholder="Bedrooms"
-        className="h-8 w-24 rounded border border-neutral-700 bg-neutral-900 px-2 text-xs text-neutral-300 outline-none focus:border-neutral-500"
-      />
-
-      <input
-        type="number"
-        min={0}
-        value={minBeds ?? ''}
-        onChange={(e) =>
-          updateSilent('minBeds', e.target.value ? Number(e.target.value) : null)
-        }
-        onBlur={commitSearch}
-        onKeyDown={onEnter}
-        placeholder="Beds"
-        className="h-8 w-20 rounded border border-neutral-700 bg-neutral-900 px-2 text-xs text-neutral-300 outline-none focus:border-neutral-500"
-      />
-
-      <div className="h-5 w-px bg-neutral-700" />
-
-      {/* Price range — search on blur/Enter */}
-      <div className="flex items-center gap-1">
-        <input
-          type="number"
-          value={priceMin ?? ''}
-          onChange={(e) =>
-            updateSilent('priceMin', e.target.value ? Number(e.target.value) : null)
-          }
-          onBlur={commitSearch}
-          onKeyDown={onEnter}
-          placeholder={`Min ${currency === 'EUR' ? '\u20AC' : '$'}`}
-          className="h-8 w-20 rounded border border-neutral-700 bg-neutral-900 px-2 text-xs text-neutral-300 outline-none focus:border-neutral-500"
-        />
-        <span className="text-xs text-neutral-600">-</span>
-        <input
-          type="number"
-          value={priceMax ?? ''}
-          onChange={(e) =>
-            updateSilent('priceMax', e.target.value ? Number(e.target.value) : null)
-          }
-          onBlur={commitSearch}
-          onKeyDown={onEnter}
-          placeholder={`Max ${currency === 'EUR' ? '\u20AC' : '$'}`}
-          className="h-8 w-20 rounded border border-neutral-700 bg-neutral-900 px-2 text-xs text-neutral-300 outline-none focus:border-neutral-500"
-        />
-      </div>
-
-      <div className="h-5 w-px bg-neutral-700" />
-
-      {/* Rating — immediate (select) */}
-      <select
-        value={minRating ?? ''}
-        onChange={(e) =>
-          update('minRating', e.target.value ? Number(e.target.value) : null)
-        }
-        className="h-8 rounded border border-neutral-700 bg-neutral-900 px-2 text-xs text-neutral-300 outline-none focus:border-neutral-500"
-      >
-        <option value="">Any rating</option>
-        {platform === 'airbnb' ? (
-          <>
-            <option value="4.5">4.5+</option>
-            <option value="4.7">4.7+</option>
-            <option value="4.9">4.9+</option>
-          </>
-        ) : (
-          <>
-            <option value="7">7+</option>
-            <option value="8">8+</option>
-            <option value="9">9+</option>
-          </>
-        )}
-      </select>
-
-      {/* Property type — immediate (select) */}
-      <select
-        value={propertyType ?? ''}
-        onChange={(e) => update('propertyType', e.target.value || null)}
-        className="h-8 rounded border border-neutral-700 bg-neutral-900 px-2 text-xs text-neutral-300 outline-none focus:border-neutral-500"
-      >
-        {PROPERTY_TYPES.map((t) => (
-          <option key={t.value} value={t.value}>
-            {t.label}
-          </option>
-        ))}
-      </select>
-
-      {/* Currency — immediate (select) */}
-      <select
-        value={currency}
-        onChange={(e) => update('currency', e.target.value)}
-        className="h-8 rounded border border-neutral-700 bg-neutral-900 px-2 text-xs text-neutral-300 outline-none focus:border-neutral-500"
-      >
-        <option value="USD">USD</option>
-        <option value="EUR">EUR</option>
-        <option value="GBP">GBP</option>
-      </select>
-
-      {/* Price display toggle — no search needed, just re-render */}
-      <div className="flex rounded border border-neutral-700 overflow-hidden">
-        {(['perNight', 'total'] as PriceDisplay[]).map((mode) => (
-          <button
-            key={mode}
-            onClick={() => setFilter('priceDisplay', mode)}
-            className={`px-2 py-1 text-xs transition-colors ${
-              priceDisplay === mode
-                ? 'bg-neutral-700 text-white'
-                : 'bg-neutral-900 text-neutral-500 hover:text-neutral-300'
-            }`}
+        <div className={groupClassName}>
+          <select
+            value={minRating ?? ''}
+            onChange={(e) =>
+              update('minRating', e.target.value ? Number(e.target.value) : null)
+            }
+            className={`${fieldClassName} w-28`}
           >
-            {mode === 'perNight' ? '/night' : 'total'}
-          </button>
-        ))}
-      </div>
+            <option value="">Any rating</option>
+            {platform === 'airbnb' ? (
+              <>
+                <option value="4.5">4.5+</option>
+                <option value="4.7">4.7+</option>
+                <option value="4.9">4.9+</option>
+              </>
+            ) : (
+              <>
+                <option value="7">7+</option>
+                <option value="8">8+</option>
+                <option value="9">9+</option>
+              </>
+            )}
+          </select>
 
-      {/* Platform-specific filters — immediate (checkboxes) */}
-      {platform === 'airbnb' && (
-        <>
-          <div className="h-5 w-px bg-neutral-700" />
-          <label className="flex items-center gap-1.5 text-xs text-neutral-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={airbnbFilters.superhost ?? false}
-              onChange={(e) => updateAirbnb('superhost', e.target.checked || undefined)}
-              className="accent-red-500"
-            />
-            Superhost
-          </label>
-          <label className="flex items-center gap-1.5 text-xs text-neutral-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={airbnbFilters.instantBook ?? false}
-              onChange={(e) => updateAirbnb('instantBook', e.target.checked || undefined)}
-              className="accent-red-500"
-            />
-            Instant Book
-          </label>
-        </>
-      )}
+          <select
+            value={propertyType ?? ''}
+            onChange={(e) => update('propertyType', e.target.value || null)}
+            className={`${fieldClassName} w-32`}
+          >
+            {PROPERTY_TYPES.map((t) => (
+              <option key={t.value} value={t.value}>
+                {t.label}
+              </option>
+            ))}
+          </select>
 
-      {platform === 'booking' && (
-        <>
-          <div className="h-5 w-px bg-neutral-700" />
-          <label className="flex items-center gap-1.5 text-xs text-neutral-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={bookingFilters.freeCancellation ?? false}
-              onChange={(e) =>
-                updateBooking('freeCancellation', e.target.checked || undefined)
-              }
-              className="accent-blue-500"
-            />
-            Free cancellation
-          </label>
-        </>
-      )}
+          <select
+            value={currency}
+            onChange={(e) => update('currency', e.target.value)}
+            className={`${fieldClassName} w-20`}
+          >
+            <option value="USD">USD</option>
+            <option value="EUR">EUR</option>
+            <option value="GBP">GBP</option>
+          </select>
 
-      <div className="ml-auto flex items-center gap-2">
+          <div className="flex rounded-xl border border-white/10 bg-black/20 p-1">
+            {(['perNight', 'total'] as PriceDisplay[]).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => setFilter('priceDisplay', mode)}
+                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                  priceDisplay === mode
+                    ? 'bg-white text-neutral-950 shadow-sm'
+                    : 'text-stone-400 hover:text-stone-200'
+                }`}
+              >
+                {mode === 'perNight' ? '/night' : 'total'}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className={groupClassName}>
+          {platform === 'airbnb' && (
+            <>
+              <label className="flex items-center gap-2 rounded-xl px-2 py-1 text-xs font-medium text-stone-300">
+                <input
+                  type="checkbox"
+                  checked={airbnbFilters.superhost ?? false}
+                  onChange={(e) =>
+                    updateAirbnb('superhost', e.target.checked || undefined)
+                  }
+                  className="accent-[#ff6b5f]"
+                />
+                Superhost
+              </label>
+              <label className="flex items-center gap-2 rounded-xl px-2 py-1 text-xs font-medium text-stone-300">
+                <input
+                  type="checkbox"
+                  checked={airbnbFilters.instantBook ?? false}
+                  onChange={(e) =>
+                    updateAirbnb('instantBook', e.target.checked || undefined)
+                  }
+                  className="accent-[#ff6b5f]"
+                />
+                Instant Book
+              </label>
+            </>
+          )}
+
+          {platform === 'booking' && (
+            <label className="flex items-center gap-2 rounded-xl px-2 py-1 text-xs font-medium text-stone-300">
+              <input
+                type="checkbox"
+                checked={bookingFilters.freeCancellation ?? false}
+                onChange={(e) =>
+                  updateBooking('freeCancellation', e.target.checked || undefined)
+                }
+                className="accent-[#2870ff]"
+              />
+              Free cancellation
+            </label>
+          )}
+        </div>
+
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
         <button
           onClick={() => setDrawMode(drawMode === 'rectangle' ? null : 'rectangle')}
           disabled={!canDrawArea}
-          className={`rounded border px-3 py-1.5 text-xs font-medium transition ${
+          className={`rounded-2xl border px-4 py-2.5 text-xs font-semibold transition ${
             drawMode === 'rectangle'
-              ? 'border-amber-600 bg-amber-900/40 text-amber-100 hover:bg-amber-900/60'
-              : 'border-neutral-700 bg-neutral-900 text-neutral-300 hover:border-neutral-500 hover:text-white'
-          } disabled:cursor-not-allowed disabled:border-neutral-800 disabled:bg-neutral-900 disabled:text-neutral-600`}
+              ? 'border-[#f4b56a]/60 bg-[#3b2914] text-[#ffe3bc]'
+              : 'border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08] hover:text-white'
+          } disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:bg-white/[0.03] disabled:text-stone-600`}
         >
           {drawMode === 'rectangle' ? 'Cancel rectangle' : 'Draw rectangle'}
         </button>
         <button
           onClick={() => setDrawMode(drawMode === 'circle' ? null : 'circle')}
           disabled={!canDrawArea}
-          className={`rounded border px-3 py-1.5 text-xs font-medium transition ${
+          className={`rounded-2xl border px-4 py-2.5 text-xs font-semibold transition ${
             drawMode === 'circle'
-              ? 'border-sky-600 bg-sky-900/40 text-sky-100 hover:bg-sky-900/60'
-              : 'border-neutral-700 bg-neutral-900 text-neutral-300 hover:border-neutral-500 hover:text-white'
-          } disabled:cursor-not-allowed disabled:border-neutral-800 disabled:bg-neutral-900 disabled:text-neutral-600`}
+              ? 'border-sky-400/50 bg-sky-950/60 text-sky-100'
+              : 'border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08] hover:text-white'
+          } disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:bg-white/[0.03] disabled:text-stone-600`}
         >
           {drawMode === 'circle' ? 'Cancel circle' : 'Draw circle'}
         </button>
@@ -348,11 +347,11 @@ export default function FilterPanel() {
             setDrawMode('poi');
           }}
           disabled={!canTogglePoi}
-          className={`rounded border px-3 py-1.5 text-xs font-medium transition ${
+          className={`rounded-2xl border px-4 py-2.5 text-xs font-semibold transition ${
             drawMode === 'poi' || poi
-              ? 'border-orange-600 bg-orange-900/40 text-orange-100 hover:bg-orange-900/60'
-              : 'border-neutral-700 bg-neutral-900 text-neutral-300 hover:border-neutral-500 hover:text-white'
-          } disabled:cursor-not-allowed disabled:border-neutral-800 disabled:bg-neutral-900 disabled:text-neutral-600`}
+              ? 'border-orange-400/50 bg-orange-950/60 text-orange-100'
+              : 'border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08] hover:text-white'
+          } disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:bg-white/[0.03] disabled:text-stone-600`}
         >
           {drawMode === 'poi' || poi ? 'Clear POI' : 'Set POI'}
         </button>
@@ -367,17 +366,17 @@ export default function FilterPanel() {
               void triggerQuickSearch({ force: true });
             }}
             disabled={!hasInitializedSearch || !!activeJobId}
-            className="rounded border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-300 transition hover:border-neutral-500 hover:text-white disabled:cursor-not-allowed disabled:border-neutral-800 disabled:bg-neutral-900 disabled:text-neutral-600"
+            className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-xs font-semibold text-stone-300 transition hover:bg-white/[0.08] hover:text-white disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:bg-white/[0.03] disabled:text-stone-600"
           >
             Clear area
           </button>
         )}
-        <label className="flex items-center gap-1.5 text-xs text-neutral-400 cursor-pointer">
+        <label className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-xs font-semibold text-stone-300">
           <input
             type="checkbox"
             checked={autoUpdate}
             onChange={(e) => setAutoUpdate(e.target.checked)}
-            className="accent-neutral-400"
+            className="accent-[#ff6b5f]"
           />
           Auto-update
         </label>
@@ -392,13 +391,13 @@ export default function FilterPanel() {
               !!activeJobId ||
               !fullSearchBbox
             }
-            className="rounded border border-amber-700 bg-amber-900/30 px-3 py-1.5 text-xs font-medium text-amber-100 transition hover:bg-amber-900/50 disabled:cursor-not-allowed disabled:border-neutral-800 disabled:bg-neutral-900 disabled:text-neutral-600"
+            className="rounded-2xl border border-[#f4b56a]/30 bg-[#3a2917] px-4 py-2.5 text-xs font-semibold text-[#ffe0b0] transition hover:brightness-110 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:bg-white/[0.03] disabled:text-stone-600"
           >
             {pendingViewportSearch ? 'Update map' : 'Map up to date'}
           </button>
         )}
         {activeJobId && (
-          <span className="text-xs text-neutral-500">
+          <span className="text-xs font-medium text-stone-500">
             Full search {Math.round(jobProgress * 100)}%
           </span>
         )}
@@ -407,11 +406,12 @@ export default function FilterPanel() {
             void startFullSearch();
           }}
           disabled={!canStartFullSearch}
-          className="rounded border border-emerald-700 bg-emerald-900/40 px-3 py-1.5 text-xs font-medium text-emerald-200 transition hover:bg-emerald-900/60 disabled:cursor-not-allowed disabled:border-neutral-800 disabled:bg-neutral-900 disabled:text-neutral-600"
+          className="rounded-2xl border border-emerald-300/20 bg-[linear-gradient(135deg,rgba(15,76,52,0.95),rgba(28,108,76,0.95))] px-4 py-2.5 text-xs font-semibold text-emerald-100 shadow-[0_12px_30px_rgba(8,56,37,0.28)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:bg-white/[0.03] disabled:text-stone-600 disabled:shadow-none"
         >
           {activeJobId ? 'Full search running...' : 'Full search this area'}
         </button>
       </div>
+    </div>
     </div>
   );
 }
