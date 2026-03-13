@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:stack": "./scripts/dev-stack.sh",
     "build": "next build",
     "start": "next start",
     "worker": "dotenv -e .env.local -- tsx src/lib/search-worker.ts",

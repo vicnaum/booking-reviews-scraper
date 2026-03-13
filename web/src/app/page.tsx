@@ -3,6 +3,7 @@
 import dynamic from 'next/dynamic';
 import SearchBar from '@/components/SearchBar';
 import PlatformToggle from '@/components/PlatformToggle';
+import LandingFilters from '@/components/LandingFilters';
 import FilterPanel from '@/components/FilterPanel';
 import ResultsSidebar from '@/components/ResultsSidebar';
 import { useSearchStore } from '@/hooks/useSearchStore';
@@ -23,8 +24,8 @@ export default function HomePage() {
     return (
       <main className="relative flex min-h-screen items-center justify-center overflow-hidden px-6 py-10">
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,107,95,0.16),transparent_36%),radial-gradient(circle_at_bottom_right,rgba(40,112,255,0.12),transparent_28%)]" />
-        <div className="relative w-full max-w-2xl rounded-[36px] border border-white/10 bg-black/[0.28] p-8 shadow-[0_28px_90px_rgba(0,0,0,0.42)] backdrop-blur-xl sm:p-10">
-          <div className="mx-auto flex max-w-xl flex-col items-center text-center">
+        <div className="relative w-full max-w-5xl rounded-[36px] border border-white/10 bg-black/[0.28] p-8 shadow-[0_28px_90px_rgba(0,0,0,0.42)] backdrop-blur-xl sm:p-10">
+          <div className="mx-auto flex max-w-4xl flex-col items-center text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] text-base font-semibold text-[#f7c992] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
               SR
             </div>
@@ -47,8 +48,11 @@ export default function HomePage() {
               <SearchBar />
             </div>
 
+            <LandingFilters />
+
             <p className="mt-4 text-sm text-stone-500">
-              Enter a city like London, Lisbon, or Rome.
+              Enter a city like London, Lisbon, or Rome, then open the map with
+              your filters already in place.
             </p>
           </div>
         </div>

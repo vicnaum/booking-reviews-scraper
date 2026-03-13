@@ -24,6 +24,10 @@ interface QuickSearchOptions {
   bbox?: BoundingBox;
 }
 
+interface BuildSearchRequestOptions {
+  circle?: CircleFilter | null;
+}
+
 interface SearchStore {
   // Platform & filters
   platform: Platform;
@@ -50,10 +54,12 @@ interface SearchStore {
   poi: MapPoint | null;
   drawMode: 'rectangle' | 'circle' | 'poi' | null;
   zoom: number;
+  mapBounds: BoundingBox | null;
   mapCenter: MapPoint | null;
   mapFocusId: number;
   hasInitializedSearch: boolean;
   autoUpdate: boolean;
+  fullSearchMode: 'window' | 'rectangle' | 'circle';
   pendingViewportSearch: boolean;
   pendingProgrammaticSearch: boolean;
 
@@ -77,6 +83,7 @@ interface SearchStore {
   setDrawMode: (mode: 'rectangle' | 'circle' | 'poi' | null) => void;
   setViewport: (bbox: BoundingBox, zoom: number) => void;
   setMapCenter: (center: MapPoint) => void;
+  setFullSearchMode: (mode: 'window' | 'rectangle' | 'circle') => void;
   setAutoUpdate: (enabled: boolean) => void;
   setPendingViewportSearch: (pending: boolean) => void;
   setPendingProgrammaticSearch: (pending: boolean) => void;
@@ -132,11 +139,15 @@ function clearJobPolling() {
 function buildSearchRequest(
   state: SearchRequestState,
   bbox: BoundingBox,
+  options: BuildSearchRequestOptions = {},
 ): FullSearchRequest {
   return {
     platform: state.platform,
     boundingBox: bbox,
-    circle: state.circleFilter ?? undefined,
+    circle:
+      options.circle !== undefined
+        ? options.circle ?? undefined
+        : state.circleFilter ?? undefined,
     location:
       state.useLocationSearch && state.locationQuery
         ? state.locationQuery
@@ -246,7 +257,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
     minBedrooms: null,
     minBeds: null,
     propertyType: null,
-    priceDisplay: 'perNight' as PriceDisplay,
+    priceDisplay: 'total' as PriceDisplay,
     airbnbFilters: {},
     bookingFilters: {},
 
@@ -256,10 +267,12 @@ export const useSearchStore = create<SearchStore>((set, get) => {
     poi: null,
     drawMode: null,
     zoom: 3,
+    mapBounds: null,
     mapCenter: null,
     mapFocusId: 0,
     hasInitializedSearch: false,
     autoUpdate: true,
+    fullSearchMode: 'window',
     pendingViewportSearch: false,
     pendingProgrammaticSearch: false,
 
@@ -301,6 +314,8 @@ export const useSearchStore = create<SearchStore>((set, get) => {
     setViewport: (bbox, zoom) => set({ viewportBbox: bbox, zoom }),
 
     setMapCenter: (center) => set({ mapCenter: center }),
+
+    setFullSearchMode: (mode) => set({ fullSearchMode: mode }),
 
     setAutoUpdate: (enabled) => {
       set({ autoUpdate: enabled });
@@ -347,12 +362,15 @@ export const useSearchStore = create<SearchStore>((set, get) => {
         hasInitializedSearch: true,
         locationQuery: query,
         useLocationSearch: true,
+        mapBounds: location.boundingBox,
         mapCenter: location.center,
         mapFocusId: get().mapFocusId + 1,
         viewportBbox: null,
         userBbox: null,
         circleFilter: null,
+        poi: null,
         drawMode: null,
+        fullSearchMode: 'window',
         results: [],
         selectedId: null,
         completedJobId: null,
@@ -443,12 +461,23 @@ export const useSearchStore = create<SearchStore>((set, get) => {
 
     startFullSearch: async () => {
       const state = get();
-      const bbox = state.userBbox ?? state.viewportBbox;
+      const rectangleBbox =
+        state.userBbox && !state.circleFilter ? state.userBbox : null;
+      const circleBbox =
+        state.userBbox && state.circleFilter ? state.userBbox : null;
+      const bbox =
+        state.fullSearchMode === 'window'
+          ? state.viewportBbox
+          : state.fullSearchMode === 'rectangle'
+            ? rectangleBbox
+            : circleBbox;
+      const circle =
+        state.fullSearchMode === 'circle' ? state.circleFilter : null;
 
       if (
         !state.hasInitializedSearch ||
         !bbox ||
-        (state.userBbox == null && state.zoom < MIN_SEARCH_ZOOM) ||
+        (state.fullSearchMode === 'window' && state.zoom < MIN_SEARCH_ZOOM) ||
         state.activeJobId
       ) {
         return;
@@ -472,7 +501,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
       });
 
       try {
-        const body = buildSearchRequest(state, bbox);
+        const body = buildSearchRequest(state, bbox, { circle });
 
         const res = await fetch('/api/search', {
           method: 'POST',

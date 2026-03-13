@@ -23,7 +23,7 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
 
     // Show the "other" price as secondary
     const altMode = priceDisplay === 'perNight' ? 'total' : 'perNight';
-    const altLabel = priceDisplay === 'perNight' ? 'total' : '/night';
+    const altLabel = priceDisplay === 'perNight' ? 'total' : 'per night';
     const hasAlt =
       priceDisplay === 'perNight'
         ? result.totalPrice != null

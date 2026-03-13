@@ -1,16 +1,21 @@
 'use client';
 
-import { useState, useCallback, type KeyboardEvent } from 'react';
+import { useState, useEffect, useCallback, type KeyboardEvent } from 'react';
 import { useSearchStore } from '@/hooks/useSearchStore';
 import type { GeocodeResult } from '@/types';
 
 export default function SearchBar() {
-  const [query, setQuery] = useState('');
+  const locationQuery = useSearchStore((s) => s.locationQuery);
+  const [query, setQuery] = useState(locationQuery ?? '');
   const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const initializeLocationSearch = useSearchStore(
     (s) => s.initializeLocationSearch,
   );
+
+  useEffect(() => {
+    setQuery(locationQuery ?? '');
+  }, [locationQuery]);
 
   const handleSearch = useCallback(async () => {
     const q = query.trim();

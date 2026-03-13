@@ -28,7 +28,7 @@ export function formatPriceLabel(
 ): string {
   const price = formatPrice(result, mode);
   if (price === '?') return price;
-  return mode === 'total' ? price : `${price}/n`;
+  return mode === 'total' ? price : `${price} per night`;
 }
 
 export function formatRating(result: SearchResult): string {

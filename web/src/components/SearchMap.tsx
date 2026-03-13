@@ -227,6 +227,7 @@ function DrawingTools({
   const setCircleFilter = useSearchStore((s) => s.setCircleFilter);
   const setPoi = useSearchStore((s) => s.setPoi);
   const setUseLocationSearch = useSearchStore((s) => s.setUseLocationSearch);
+  const setFullSearchMode = useSearchStore((s) => s.setFullSearchMode);
   const setPendingViewportSearch = useSearchStore(
     (s) => s.setPendingViewportSearch,
   );
@@ -375,6 +376,7 @@ function DrawingTools({
         setUseLocationSearch(false);
         setCircleFilter(null);
         setUserBbox(nextBbox);
+        setFullSearchMode('rectangle');
         finalizeAreaSearch(nextBbox);
         return;
       }
@@ -400,6 +402,7 @@ function DrawingTools({
         setUseLocationSearch(false);
         setCircleFilter(nextCircle);
         setUserBbox(nextBbox);
+        setFullSearchMode('circle');
         finalizeAreaSearch(nextBbox);
       }
     },
@@ -501,19 +504,39 @@ function FlyToLocation({
   skipNextAutoSearchRef: MutableRefObject<boolean>;
 }) {
   const map = useMap();
+  const mapBounds = useSearchStore((s) => s.mapBounds);
   const mapCenter = useSearchStore((s) => s.mapCenter);
   const mapFocusId = useSearchStore((s) => s.mapFocusId);
   const previousFocusId = useRef(0);
 
   useEffect(() => {
-    if (!mapCenter || mapFocusId === previousFocusId.current) {
+    if (mapFocusId === previousFocusId.current) {
       return;
     }
 
     previousFocusId.current = mapFocusId;
     skipNextAutoSearchRef.current = true;
-    map.flyTo([mapCenter.lat, mapCenter.lng], 13, { duration: 1.1 });
-  }, [map, mapCenter, mapFocusId, skipNextAutoSearchRef]);
+
+    if (mapBounds) {
+      map.fitBounds(
+        [
+          [mapBounds.swLat, mapBounds.swLng],
+          [mapBounds.neLat, mapBounds.neLng],
+        ],
+        {
+          animate: true,
+          duration: 1.1,
+          padding: [40, 40],
+          maxZoom: 13,
+        },
+      );
+      return;
+    }
+
+    if (mapCenter) {
+      map.flyTo([mapCenter.lat, mapCenter.lng], 13, { duration: 1.1 });
+    }
+  }, [map, mapBounds, mapCenter, mapFocusId, skipNextAutoSearchRef]);
 
   return null;
 }
