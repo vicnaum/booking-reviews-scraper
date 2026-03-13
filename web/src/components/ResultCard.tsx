@@ -3,6 +3,7 @@
 import { forwardRef } from 'react';
 import type { SearchResult } from '@/types';
 import { getPriceDisplayInfo, formatRating } from '@/lib/format';
+import { buildListingUrl } from '@/lib/listingLinks';
 import { useSearchStore } from '@/hooks/useSearchStore';
 
 interface ResultCardProps {
@@ -16,6 +17,7 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
     const priceDisplay = useSearchStore((s) => s.priceDisplay);
     const checkin = useSearchStore((s) => s.checkin);
     const checkout = useSearchStore((s) => s.checkout);
+    const adults = useSearchStore((s) => s.adults);
     const hoverBorder =
       result.platform === 'airbnb'
         ? 'hover:border-red-500/50'
@@ -26,6 +28,11 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
     const priceInfo = getPriceDisplayInfo(result, priceDisplay, {
       checkin,
       checkout,
+    });
+    const listingUrl = buildListingUrl(result.url, result.platform, {
+      checkin,
+      checkout,
+      adults,
     });
 
     return (
@@ -58,7 +65,7 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
                 {result.name}
               </h3>
               <a
-                href={result.url}
+                href={listingUrl}
                 target="_blank"
                 rel="noreferrer"
                 onClick={(event) => event.stopPropagation()}
