@@ -2,7 +2,7 @@
 
 import { forwardRef } from 'react';
 import type { SearchResult } from '@/types';
-import { formatPriceLabel, formatPrice, formatRating } from '@/lib/format';
+import { getPriceDisplayInfo, formatRating } from '@/lib/format';
 import { useSearchStore } from '@/hooks/useSearchStore';
 
 interface ResultCardProps {
@@ -14,6 +14,8 @@ interface ResultCardProps {
 const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
   function ResultCard({ result, isSelected, onClick }, ref) {
     const priceDisplay = useSearchStore((s) => s.priceDisplay);
+    const checkin = useSearchStore((s) => s.checkin);
+    const checkout = useSearchStore((s) => s.checkout);
     const hoverBorder =
       result.platform === 'airbnb'
         ? 'hover:border-red-500/50'
@@ -21,13 +23,10 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
     const selectedBorder =
       result.platform === 'airbnb' ? 'border-red-500' : 'border-blue-600';
 
-    // Show the "other" price as secondary
-    const altMode = priceDisplay === 'perNight' ? 'total' : 'perNight';
-    const altLabel = priceDisplay === 'perNight' ? 'total' : 'per night';
-    const hasAlt =
-      priceDisplay === 'perNight'
-        ? result.totalPrice != null
-        : result.price != null;
+    const priceInfo = getPriceDisplayInfo(result, priceDisplay, {
+      checkin,
+      checkout,
+    });
 
     return (
       <div
@@ -85,10 +84,10 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
             </div>
 
             <div className="mt-3 text-sm font-semibold text-white">
-              {formatPriceLabel(result, priceDisplay)}
-              {hasAlt && (
+              {priceInfo.primary}
+              {priceInfo.secondary && (
                 <span className="ml-1 text-xs font-medium text-stone-500">
-                  ({formatPrice(result, altMode)} {altLabel})
+                  ({priceInfo.secondary})
                 </span>
               )}
             </div>

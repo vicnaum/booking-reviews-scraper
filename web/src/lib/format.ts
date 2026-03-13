@@ -2,6 +2,16 @@ import type { SearchResult } from '@/types';
 
 export type PriceDisplay = 'perNight' | 'total';
 
+interface PriceDisplayInfoOptions {
+  checkin?: string | null;
+  checkout?: string | null;
+}
+
+export interface PriceDisplayInfo {
+  primary: string;
+  secondary: string | null;
+}
+
 function currencySymbol(code: string): string {
   if (code === 'USD') return '$';
   if (code === 'EUR') return '\u20AC';
@@ -9,15 +19,39 @@ function currencySymbol(code: string): string {
   return code + '\u00A0';
 }
 
+function formatAmount(amount: number, currency: string): string {
+  return `${currencySymbol(currency)}${Math.round(amount)}`;
+}
+
+function getNightCount(
+  checkin?: string | null,
+  checkout?: string | null,
+): number | null {
+  if (!checkin || !checkout) {
+    return null;
+  }
+
+  const start = new Date(`${checkin}T00:00:00Z`);
+  const end = new Date(`${checkout}T00:00:00Z`);
+  const diffMs = end.getTime() - start.getTime();
+
+  if (!Number.isFinite(diffMs) || diffMs <= 0) {
+    return null;
+  }
+
+  const nights = Math.round(diffMs / 86400000);
+  return nights > 0 ? nights : null;
+}
+
 export function formatPrice(
   result: SearchResult,
   mode: PriceDisplay,
 ): string {
   if (mode === 'total' && result.totalPrice) {
-    return `${currencySymbol(result.totalPrice.currency)}${Math.round(result.totalPrice.amount)}`;
+    return formatAmount(result.totalPrice.amount, result.totalPrice.currency);
   }
   if (result.price) {
-    return `${currencySymbol(result.price.currency)}${Math.round(result.price.amount)}`;
+    return formatAmount(result.price.amount, result.price.currency);
   }
   return '?';
 }
@@ -29,6 +63,66 @@ export function formatPriceLabel(
   const price = formatPrice(result, mode);
   if (price === '?') return price;
   return mode === 'total' ? price : `${price} per night`;
+}
+
+export function getPriceDisplayInfo(
+  result: SearchResult,
+  mode: PriceDisplay,
+  options: PriceDisplayInfoOptions = {},
+): PriceDisplayInfo {
+  const nightly = result.price
+    ? formatAmount(result.price.amount, result.price.currency)
+    : null;
+  const total = result.totalPrice
+    ? formatAmount(result.totalPrice.amount, result.totalPrice.currency)
+    : null;
+  const nights = getNightCount(options.checkin, options.checkout);
+  const estimatedTotal =
+    !total && result.price && nights
+      ? formatAmount(result.price.amount * nights, result.price.currency)
+      : null;
+
+  if (mode === 'total') {
+    if (total) {
+      return {
+        primary: total,
+        secondary: nightly ? `${nightly} per night` : null,
+      };
+    }
+
+    if (estimatedTotal) {
+      return {
+        primary: `${estimatedTotal} est. total`,
+        secondary: nightly ? `${nightly} per night` : null,
+      };
+    }
+
+    if (nightly) {
+      return {
+        primary: `${nightly} per night`,
+        secondary: null,
+      };
+    }
+
+    return { primary: '?', secondary: null };
+  }
+
+  if (nightly) {
+    return {
+      primary: `${nightly} per night`,
+      secondary: total ?? (estimatedTotal ? `${estimatedTotal} est. total` : null),
+    };
+  }
+
+  if (total) {
+    return { primary: total, secondary: null };
+  }
+
+  if (estimatedTotal) {
+    return { primary: `${estimatedTotal} est. total`, secondary: null };
+  }
+
+  return { primary: '?', secondary: null };
 }
 
 export function formatRating(result: SearchResult): string {
