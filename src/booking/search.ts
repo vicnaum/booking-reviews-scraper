@@ -7,6 +7,7 @@
 import fetch from 'node-fetch';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { createSearchGrid, subdivideBbox } from '../search/geo.js';
+import { filterSearchResults } from '../search/filters.js';
 import type {
   BookingSearchParams,
   SearchResult,
@@ -21,6 +22,38 @@ const PAGE_DELAY_MS = 300;
 const CELL_DELAY_MS = 500;
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function getMatchingUnitConfigurations(result: any): any[] {
+  const matching = result?.matchingUnitConfigurations;
+  if (!matching || typeof matching !== 'object') {
+    return [];
+  }
+
+  const configurations: any[] = [];
+  if (matching.commonConfiguration) {
+    configurations.push(matching.commonConfiguration);
+  }
+  if (Array.isArray(matching.unitConfigurations)) {
+    configurations.push(...matching.unitConfigurations);
+  }
+
+  return configurations;
+}
 
 // --- Session management ---
 
@@ -322,9 +355,6 @@ function buildFilterString(params: BookingSearchParams): string {
   }
 
   if (params.freeCancellation) parts.push('fc=2');
-  if (params.minBedrooms != null) {
-    parts.push(`entire_place_bedroom_count=${params.minBedrooms}`);
-  }
 
   if (params.priceMin != null || params.priceMax != null) {
     const min = params.priceMin ?? 'min';
@@ -626,6 +656,16 @@ function parseSearchResult(r: any, params: BookingSearchParams): SearchResult | 
 
   const reviewScore = r?.basicPropertyData?.reviewScore;
   const location = r?.basicPropertyData?.location;
+  const unitConfigurations = getMatchingUnitConfigurations(r);
+  const bedroomCounts = unitConfigurations
+    .map((config: any) => toFiniteNumber(config?.nbBedrooms ?? config?.bedrooms))
+    .filter((value: number | null): value is number => value != null);
+  const bedCounts = unitConfigurations
+    .map((config: any) => toFiniteNumber(config?.nbAllBeds ?? config?.beds))
+    .filter((value: number | null): value is number => value != null);
+  const bathroomCounts = unitConfigurations
+    .map((config: any) => toFiniteNumber(config?.nbBathrooms ?? config?.bathrooms))
+    .filter((value: number | null): value is number => value != null);
 
   return {
     id: String(hotelId),
@@ -645,6 +685,9 @@ function parseSearchResult(r: any, params: BookingSearchParams): SearchResult | 
     photoUrl: r?.basicPropertyData?.photos?.main?.highResUrl?.relativeUrl
       ? `https://cf.bstatic.com${r.basicPropertyData.photos.main.highResUrl.relativeUrl}`
       : null,
+    bedrooms: bedroomCounts.length > 0 ? Math.max(...bedroomCounts) : undefined,
+    beds: bedCounts.length > 0 ? Math.max(...bedCounts) : undefined,
+    bathrooms: bathroomCounts.length > 0 ? Math.max(...bathroomCounts) : undefined,
     stars: r?.basicPropertyData?.starRating?.value ?? undefined,
     freeCancellation: r?.policies?.showFreeCancellation ?? undefined,
   };
@@ -659,9 +702,10 @@ function parseFullSearchResponse(data: any, params: BookingSearchParams, pageInd
     const result = parseSearchResult(r, params);
     if (result) parsed.push(result);
   }
+  const filtered = filterSearchResults(parsed, params);
 
   return {
-    results: parsed,
+    results: filtered,
     hasNextPage: parsed.length > 0 && (pageIndex + 1) * 25 < total,
     pageIndex,
   };
@@ -676,9 +720,10 @@ function parseMapMarkersResponse(data: any, params: BookingSearchParams, pageInd
     const result = parseSearchResult(r, params);
     if (result) parsed.push(result);
   }
+  const filtered = filterSearchResults(parsed, params);
 
   return {
-    results: parsed,
+    results: filtered,
     hasNextPage: parsed.length > 0 && (pageIndex + 1) * 100 < total,
     pageIndex,
   };
@@ -803,11 +848,12 @@ async function searchBookingSSR(
         });
       }
 
-      results.push(...pageResults);
+      const filteredPageResults = filterSearchResults(pageResults, params);
+      results.push(...filteredPageResults);
 
       if (onProgress) {
         onProgress({
-          results: pageResults,
+          results: filteredPageResults,
           hasNextPage: pageResults.length > 0,
           pageIndex,
         });

@@ -30,6 +30,7 @@ export interface SearchResult {
   propertyType: string | null;
   photoUrl: string | null;
   bedrooms?: number;
+  beds?: number;
   bathrooms?: number;
   maxGuests?: number;
   superhost?: boolean;
@@ -57,6 +58,7 @@ export interface QuickSearchRequest {
   priceMax?: number;
   minRating?: number;
   minBedrooms?: number;
+  minBeds?: number;
   propertyType?: string;
   superhost?: boolean;
   instantBook?: boolean;

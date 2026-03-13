@@ -73,6 +73,9 @@ function buildExploreUrl(
   if (params.minBedrooms != null) {
     url.searchParams.set('min_bedrooms', String(params.minBedrooms));
   }
+  if (params.minBeds != null) {
+    url.searchParams.set('min_beds', String(params.minBeds));
+  }
 
   if (params.propertyType) {
     const typeMap: Record<string, string> = {
@@ -142,6 +145,7 @@ function parseExploreListing(item: any, params: AirbnbSearchParams): SearchResul
     propertyType: listing.room_type ?? listing.room_type_category ?? null,
     photoUrl: listing.picture_url ?? listing.picture?.url ?? null,
     bedrooms: listing.bedrooms ?? undefined,
+    beds: listing.beds ?? undefined,
     bathrooms: listing.bathrooms ?? undefined,
     maxGuests: listing.person_capacity ?? listing.guest_label ? parseInt(listing.guest_label) || undefined : undefined,
     superhost: listing.is_superhost ?? undefined,
@@ -292,6 +296,9 @@ async function searchAirbnbSSR(
     if (params.minBedrooms != null) {
       url.searchParams.set('min_bedrooms', String(params.minBedrooms));
     }
+    if (params.minBeds != null) {
+      url.searchParams.set('min_beds', String(params.minBeds));
+    }
 
     if (cursor) url.searchParams.set('cursor', cursor);
 
@@ -373,6 +380,7 @@ async function searchAirbnbSSR(
         }
 
         let bedrooms: number | undefined;
+        let beds: number | undefined;
         const primaryLine = item?.structuredContent?.primaryLine;
         if (Array.isArray(primaryLine)) {
           for (const entry of primaryLine) {
@@ -380,7 +388,10 @@ async function searchAirbnbSSR(
             const bedroomMatch = body.match(/(\d+)\s+bedroom/i);
             if (bedroomMatch) {
               bedrooms = parseInt(bedroomMatch[1], 10);
-              break;
+            }
+            const bedMatch = body.match(/(\d+)\s+beds?/i);
+            if (bedMatch) {
+              beds = parseInt(bedMatch[1], 10);
             }
           }
         }
@@ -398,6 +409,7 @@ async function searchAirbnbSSR(
           propertyType: listing?.roomType ?? null,
           photoUrl: item?.contextualPictures?.[0]?.picture || null,
           bedrooms,
+          beds,
           superhost: isSuperhost || undefined,
         });
       }

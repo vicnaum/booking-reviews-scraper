@@ -20,6 +20,7 @@ export default function FilterPanel() {
   const priceMax = useSearchStore((s) => s.priceMax);
   const minRating = useSearchStore((s) => s.minRating);
   const minBedrooms = useSearchStore((s) => s.minBedrooms);
+  const minBeds = useSearchStore((s) => s.minBeds);
   const propertyType = useSearchStore((s) => s.propertyType);
   const currency = useSearchStore((s) => s.currency);
   const platform = useSearchStore((s) => s.platform);
@@ -142,6 +143,19 @@ export default function FilterPanel() {
         onKeyDown={onEnter}
         placeholder="Bedrooms"
         className="h-8 w-24 rounded border border-neutral-700 bg-neutral-900 px-2 text-xs text-neutral-300 outline-none focus:border-neutral-500"
+      />
+
+      <input
+        type="number"
+        min={0}
+        value={minBeds ?? ''}
+        onChange={(e) =>
+          updateSilent('minBeds', e.target.value ? Number(e.target.value) : null)
+        }
+        onBlur={commitSearch}
+        onKeyDown={onEnter}
+        placeholder="Beds"
+        className="h-8 w-20 rounded border border-neutral-700 bg-neutral-900 px-2 text-xs text-neutral-300 outline-none focus:border-neutral-500"
       />
 
       <div className="h-5 w-px bg-neutral-700" />

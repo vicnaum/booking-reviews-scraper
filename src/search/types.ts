@@ -20,6 +20,7 @@ export interface SearchParams {
   currency: string;
   minRating?: number;
   minBedrooms?: number;
+  minBeds?: number;
   priceMin?: number;
   priceMax?: number;
   propertyType?: string;
@@ -55,6 +56,7 @@ export interface SearchResult {
   propertyType: string | null;
   photoUrl: string | null;
   bedrooms?: number;
+  beds?: number;
   bathrooms?: number;
   maxGuests?: number;
   // Airbnb-specific

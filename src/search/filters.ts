@@ -1,6 +1,6 @@
 import type { SearchParams, SearchResult } from './types.js';
 
-type SearchResultFilterParams = Pick<SearchParams, 'minBedrooms'>;
+type SearchResultFilterParams = Pick<SearchParams, 'minBedrooms' | 'minBeds'>;
 
 export function matchesSearchResultFilters(
   result: SearchResult,
@@ -8,6 +8,12 @@ export function matchesSearchResultFilters(
 ): boolean {
   if (params.minBedrooms != null) {
     if (result.bedrooms == null || result.bedrooms < params.minBedrooms) {
+      return false;
+    }
+  }
+
+  if (params.minBeds != null) {
+    if (result.beds == null || result.beds < params.minBeds) {
       return false;
     }
   }

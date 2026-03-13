@@ -61,6 +61,7 @@ model SearchResult {
   propertyType     String?
   photoUrl         String?
   bedrooms         Int?
+  beds             Int?
   bathrooms        Int?
   maxGuests        Int?
   superhost        Boolean?

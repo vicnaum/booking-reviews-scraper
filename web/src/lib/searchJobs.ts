@@ -14,6 +14,7 @@ export interface PersistedSearchFilters {
   exhaustive?: boolean;
   minRating?: number;
   minBedrooms?: number;
+  minBeds?: number;
   priceMin?: number;
   priceMax?: number;
   propertyType?: string;
@@ -36,6 +37,7 @@ interface PersistableSearchResult {
   propertyType: string | null;
   photoUrl: string | null;
   bedrooms?: number;
+  beds?: number;
   bathrooms?: number;
   maxGuests?: number;
   superhost?: boolean;
@@ -66,6 +68,7 @@ export function buildSearchFilters(
 
   if (request.minRating != null) filters.minRating = request.minRating;
   if (request.minBedrooms != null) filters.minBedrooms = request.minBedrooms;
+  if (request.minBeds != null) filters.minBeds = request.minBeds;
   if (request.priceMin != null) filters.priceMin = request.priceMin;
   if (request.priceMax != null) filters.priceMax = request.priceMax;
   if (request.propertyType) filters.propertyType = request.propertyType;
@@ -91,6 +94,7 @@ export function parseSearchFilters(
     exhaustive: asBoolean(filters.exhaustive),
     minRating: asNumber(filters.minRating),
     minBedrooms: asNumber(filters.minBedrooms),
+    minBeds: asNumber(filters.minBeds),
     priceMin: asNumber(filters.priceMin),
     priceMax: asNumber(filters.priceMax),
     propertyType: asString(filters.propertyType),
@@ -134,6 +138,7 @@ export function buildCliSearchParams(job: SearchJobModel) {
     currency: job.currency,
     minRating: filters.minRating,
     minBedrooms: filters.minBedrooms,
+    minBeds: filters.minBeds,
     priceMin: filters.priceMin,
     priceMax: filters.priceMax,
     propertyType: filters.propertyType,
@@ -178,6 +183,7 @@ export function toSearchResultRecord(
     propertyType: result.propertyType,
     photoUrl: result.photoUrl,
     bedrooms: result.bedrooms ?? null,
+    beds: result.beds ?? null,
     bathrooms: result.bathrooms ?? null,
     maxGuests: result.maxGuests ?? null,
     superhost: result.superhost ?? null,
@@ -218,6 +224,7 @@ export function toWebSearchResult(row: SearchResultModel): SearchResult {
     propertyType: row.propertyType,
     photoUrl: row.photoUrl,
     bedrooms: row.bedrooms ?? undefined,
+    beds: row.beds ?? undefined,
     bathrooms: row.bathrooms ?? undefined,
     maxGuests: row.maxGuests ?? undefined,
     superhost: row.superhost ?? undefined,

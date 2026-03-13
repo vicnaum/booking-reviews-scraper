@@ -70,6 +70,7 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
 
             <div className="mt-1 flex items-center gap-2 text-xs text-neutral-500">
               {result.bedrooms != null && <span>{result.bedrooms}bd</span>}
+              {result.beds != null && <span>{result.beds}bed</span>}
               {result.bathrooms != null && <span>{result.bathrooms}ba</span>}
               {result.maxGuests != null && <span>{result.maxGuests}g</span>}
               {result.superhost && (
