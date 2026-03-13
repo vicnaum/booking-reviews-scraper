@@ -116,6 +116,7 @@ type SearchRequestState = Pick<
   | 'checkout'
   | 'adults'
   | 'currency'
+  | 'priceDisplay'
   | 'priceMin'
   | 'priceMax'
   | 'minRating'
@@ -156,6 +157,7 @@ function buildSearchRequest(
     checkout: state.checkout ?? undefined,
     adults: state.adults,
     currency: state.currency,
+    priceDisplay: state.priceDisplay,
     priceMin: state.priceMin ?? undefined,
     priceMax: state.priceMax ?? undefined,
     minRating: state.minRating ?? undefined,

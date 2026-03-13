@@ -10,10 +10,12 @@ import {
 } from './search-queue.js';
 import {
   buildCliSearchParams,
+  parseSearchFilters,
   toSearchResultRecord,
 } from './searchJobs.js';
 import { searchAirbnb } from '../../../src/airbnb/search.js';
 import { searchBooking } from '../../../src/booking/search.js';
+import { filterResultsForRequest } from './resultFilters.js';
 
 bootstrapRuntimeProxyEnv();
 
@@ -41,6 +43,7 @@ async function runSearchJob(searchJobId: string) {
 
   try {
     const params = buildCliSearchParams(jobRecord);
+    const storedFilters = parseSearchFilters(jobRecord.filters);
     const onProgress = () => {
       pagesScanned += 1;
       void prisma.searchJob
@@ -64,7 +67,18 @@ async function runSearchJob(searchJobId: string) {
         ? await searchAirbnb(params, onProgress)
         : await searchBooking(params, onProgress);
 
-    const rows = output.results.map((result) =>
+    const filteredResults = filterResultsForRequest(output.results, {
+      circle: storedFilters.circle,
+      checkin: jobRecord.checkin ?? undefined,
+      checkout: jobRecord.checkout ?? undefined,
+      priceDisplay: storedFilters.priceDisplay,
+      priceMin: storedFilters.priceMin,
+      priceMax: storedFilters.priceMax,
+      minBedrooms: storedFilters.minBedrooms,
+      minBeds: storedFilters.minBeds,
+    });
+
+    const rows = filteredResults.map((result) =>
       toSearchResultRecord(searchJobId, result),
     );
     const completedAt = new Date();
@@ -82,7 +96,7 @@ async function runSearchJob(searchJobId: string) {
         where: { id: searchJobId },
         data: {
           status: 'completed',
-          totalResults: output.results.length,
+          totalResults: filteredResults.length,
           pagesScanned: output.pagesScanned || pagesScanned,
           progress: 1,
           completedAt,
@@ -92,7 +106,7 @@ async function runSearchJob(searchJobId: string) {
     });
 
     console.log(
-      `[search-worker] completed ${searchJobId} with ${output.results.length} results`,
+      `[search-worker] completed ${searchJobId} with ${filteredResults.length} results`,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Search failed';

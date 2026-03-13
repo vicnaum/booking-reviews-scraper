@@ -18,6 +18,8 @@ export interface CircleFilter {
   radiusMeters: number;
 }
 
+export type PriceDisplayMode = 'perNight' | 'total';
+
 export type Platform = 'airbnb' | 'booking';
 
 export type SearchJobStatus =
@@ -65,6 +67,7 @@ export interface QuickSearchRequest {
   checkout?: string;
   adults?: number;
   currency?: string;
+  priceDisplay?: PriceDisplayMode;
   priceMin?: number;
   priceMax?: number;
   minRating?: number;

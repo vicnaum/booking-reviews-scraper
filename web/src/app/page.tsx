@@ -99,10 +99,15 @@ export default function HomePage() {
       </div>
 
       <div className="relative z-10 flex flex-1 px-4 pb-4 pt-3 md:px-5">
-        <div className="mx-auto flex w-full max-w-[1600px] overflow-hidden rounded-[30px] border border-white/10 bg-black/[0.24] shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl">
+        <div className="mx-auto grid h-[calc(100vh-13.75rem)] w-full max-w-[1600px] min-h-[32rem] grid-cols-1 overflow-hidden rounded-[30px] border border-white/10 bg-black/[0.24] shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl md:grid-cols-[360px_minmax(0,1fr)]">
           <ResultsSidebar />
-          <main className="relative flex-1 overflow-hidden">
-            <SearchMap />
+          <main className="relative flex min-h-0 items-center justify-center overflow-hidden bg-black/[0.08] p-3 md:p-5">
+            <div
+              className="relative aspect-square max-w-full overflow-hidden rounded-[26px] border border-white/10 bg-black/[0.18]"
+              style={{ width: 'min(100%, calc(100vh - 13.75rem))' }}
+            >
+              <SearchMap />
+            </div>
           </main>
         </div>
       </div>

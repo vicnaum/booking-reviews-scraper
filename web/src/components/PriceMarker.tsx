@@ -4,7 +4,7 @@ import { Marker, Tooltip } from 'react-leaflet';
 import L from 'leaflet';
 import type { SearchResult, Platform } from '@/types';
 import type { PriceDisplay } from '@/lib/format';
-import { formatPrice, formatRating } from '@/lib/format';
+import { getPriceDisplayInfo, formatRating } from '@/lib/format';
 import { useSearchStore } from '@/hooks/useSearchStore';
 
 function createPriceIcon(price: string, platform: Platform, isSelected: boolean) {
@@ -36,8 +36,22 @@ function createPriceIcon(price: string, platform: Platform, isSelected: boolean)
   });
 }
 
-function formatMarkerPrice(result: SearchResult, mode: PriceDisplay): string {
-  return formatPrice(result, mode);
+function formatMarkerPrice(
+  result: SearchResult,
+  mode: PriceDisplay,
+  checkin: string | null,
+  checkout: string | null,
+): string {
+  const primary = getPriceDisplayInfo(result, mode, {
+    checkin,
+    checkout,
+  }).primary;
+
+  if (primary.endsWith(' est. total')) {
+    return `~${primary.replace(' est. total', '')}`;
+  }
+
+  return primary.replace(' per night', '');
 }
 
 interface PriceMarkerProps {
@@ -48,11 +62,13 @@ interface PriceMarkerProps {
 
 export default function PriceMarker({ result, isSelected, onClick }: PriceMarkerProps) {
   const priceDisplay = useSearchStore((s) => s.priceDisplay);
+  const checkin = useSearchStore((s) => s.checkin);
+  const checkout = useSearchStore((s) => s.checkout);
 
   if (!result.coordinates) return null;
 
   const icon = createPriceIcon(
-    formatMarkerPrice(result, priceDisplay),
+    formatMarkerPrice(result, priceDisplay, checkin, checkout),
     result.platform,
     isSelected,
   );
@@ -61,6 +77,7 @@ export default function PriceMarker({ result, isSelected, onClick }: PriceMarker
     <Marker
       position={[result.coordinates.lat, result.coordinates.lng]}
       icon={icon}
+      zIndexOffset={isSelected ? 200 : 0}
       eventHandlers={{
         click: () => onClick(result.id),
       }}

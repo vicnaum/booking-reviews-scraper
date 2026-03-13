@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useRef, type KeyboardEvent } from 'react';
 import { useSearchStore } from '@/hooks/useSearchStore';
 import type { PriceDisplay } from '@/lib/format';
 
@@ -23,6 +23,11 @@ const smallButtonClassName =
 
 const modeButtonClassName =
   'rounded-xl px-3 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-35';
+
+const fieldLabelClassName =
+  'px-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500';
+
+const FILTER_INPUT_DEBOUNCE_MS = 450;
 
 export default function FilterPanel() {
   const checkin = useSearchStore((s) => s.checkin);
@@ -64,6 +69,7 @@ export default function FilterPanel() {
   const setFullSearchMode = useSearchStore((s) => s.setFullSearchMode);
   const triggerQuickSearch = useSearchStore((s) => s.triggerQuickSearch);
   const startFullSearch = useSearchStore((s) => s.startFullSearch);
+  const commitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const hasRectangleArea = !!userBbox && !circleFilter;
   const hasCircleArea = !!circleFilter && !!userBbox;
@@ -100,16 +106,39 @@ export default function FilterPanel() {
     [setFilter, triggerQuickSearch],
   );
 
-  const updateSilent = useCallback(
+  const scheduleCommit = useCallback(() => {
+    if (commitTimeoutRef.current) {
+      clearTimeout(commitTimeoutRef.current);
+    }
+
+    commitTimeoutRef.current = setTimeout(() => {
+      void triggerQuickSearch();
+    }, FILTER_INPUT_DEBOUNCE_MS);
+  }, [triggerQuickSearch]);
+
+  const updateDebounced = useCallback(
     (key: string, value: unknown) => {
       setFilter(key, value);
+      scheduleCommit();
     },
-    [setFilter],
+    [scheduleCommit, setFilter],
   );
 
   const commitSearch = useCallback(() => {
+    if (commitTimeoutRef.current) {
+      clearTimeout(commitTimeoutRef.current);
+      commitTimeoutRef.current = null;
+    }
     triggerQuickSearch();
   }, [triggerQuickSearch]);
+
+  useEffect(() => {
+    return () => {
+      if (commitTimeoutRef.current) {
+        clearTimeout(commitTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const onEnter = useCallback(
     (e: KeyboardEvent) => {
@@ -144,7 +173,7 @@ export default function FilterPanel() {
             <input
               type="date"
               value={checkin ?? ''}
-              onChange={(e) => updateSilent('checkin', e.target.value || null)}
+              onChange={(e) => updateDebounced('checkin', e.target.value || null)}
               onBlur={commitSearch}
               onKeyDown={onEnter}
               className={`${fieldClassName} w-[11rem]`}
@@ -152,7 +181,7 @@ export default function FilterPanel() {
             <input
               type="date"
               value={checkout ?? ''}
-              onChange={(e) => updateSilent('checkout', e.target.value || null)}
+              onChange={(e) => updateDebounced('checkout', e.target.value || null)}
               onBlur={commitSearch}
               onKeyDown={onEnter}
               className={`${fieldClassName} w-[11rem]`}
@@ -179,64 +208,88 @@ export default function FilterPanel() {
           </div>
 
           <div className={groupClassName}>
-            <input
-              type="number"
-              min={0}
-              value={minBedrooms ?? ''}
-              onChange={(e) =>
-                updateSilent(
-                  'minBedrooms',
-                  e.target.value ? Number(e.target.value) : null,
-                )
-              }
-              onBlur={commitSearch}
-              onKeyDown={onEnter}
-              placeholder="Min bedrooms"
-              className={`${fieldClassName} w-36`}
-            />
-            <input
-              type="number"
-              min={0}
-              value={minBeds ?? ''}
-              onChange={(e) =>
-                updateSilent(
-                  'minBeds',
-                  e.target.value ? Number(e.target.value) : null,
-                )
-              }
-              onBlur={commitSearch}
-              onKeyDown={onEnter}
-              placeholder="Min beds"
-              className={`${fieldClassName} w-32`}
-            />
-            <input
-              type="number"
-              value={priceMin ?? ''}
-              onChange={(e) =>
-                updateSilent(
-                  'priceMin',
-                  e.target.value ? Number(e.target.value) : null,
-                )
-              }
-              onBlur={commitSearch}
-              onKeyDown={onEnter}
-              placeholder={`Min ${currency === 'EUR' ? '\u20AC' : currency === 'GBP' ? '\u00A3' : '$'}`}
-              className={`${fieldClassName} w-[7.5rem]`}
-            />
-            <input
-              type="number"
-              value={priceMax ?? ''}
-              onChange={(e) =>
-                updateSilent(
-                  'priceMax',
-                  e.target.value ? Number(e.target.value) : null,
-                )
-              }
-              onBlur={commitSearch}
-              onKeyDown={onEnter}
-              placeholder={`Max ${currency === 'EUR' ? '\u20AC' : currency === 'GBP' ? '\u00A3' : '$'}`}
-              className={`${fieldClassName} w-[7.5rem]`}
-            />
+            <div className="flex flex-col gap-1">
+              <label htmlFor="map-min-bedrooms" className={fieldLabelClassName}>
+                Min bedrooms
+              </label>
+              <input
+                id="map-min-bedrooms"
+                type="number"
+                min={0}
+                value={minBedrooms ?? ''}
+                onChange={(e) =>
+                  updateDebounced(
+                    'minBedrooms',
+                    e.target.value ? Number(e.target.value) : null,
+                  )
+                }
+                onBlur={commitSearch}
+                onKeyDown={onEnter}
+                placeholder="0"
+                className={`${fieldClassName} w-36`}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="map-min-beds" className={fieldLabelClassName}>
+                Min beds
+              </label>
+              <input
+                id="map-min-beds"
+                type="number"
+                min={0}
+                value={minBeds ?? ''}
+                onChange={(e) =>
+                  updateDebounced(
+                    'minBeds',
+                    e.target.value ? Number(e.target.value) : null,
+                  )
+                }
+                onBlur={commitSearch}
+                onKeyDown={onEnter}
+                placeholder="0"
+                className={`${fieldClassName} w-32`}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="map-price-min" className={fieldLabelClassName}>
+                {priceDisplay === 'total' ? 'Min total' : 'Min nightly'}
+              </label>
+              <input
+                id="map-price-min"
+                type="number"
+                value={priceMin ?? ''}
+                onChange={(e) =>
+                  updateDebounced(
+                    'priceMin',
+                    e.target.value ? Number(e.target.value) : null,
+                  )
+                }
+                onBlur={commitSearch}
+                onKeyDown={onEnter}
+                placeholder="0"
+                className={`${fieldClassName} w-[7.5rem]`}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="map-price-max" className={fieldLabelClassName}>
+                {priceDisplay === 'total' ? 'Max total' : 'Max nightly'}
+              </label>
+              <input
+                id="map-price-max"
+                type="number"
+                value={priceMax ?? ''}
+                onChange={(e) =>
+                  updateDebounced(
+                    'priceMax',
+                    e.target.value ? Number(e.target.value) : null,
+                  )
+                }
+                onBlur={commitSearch}
+                onKeyDown={onEnter}
+                placeholder="Any"
+                className={`${fieldClassName} w-[7.5rem]`}
+              />
+            </div>
           </div>
 
           <div className={groupClassName}>

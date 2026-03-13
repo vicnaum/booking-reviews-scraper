@@ -7,6 +7,7 @@ import type {
   BoundingBox,
   CircleFilter,
   FullSearchRequest,
+  PriceDisplayMode,
   SearchJobState,
   SearchResult,
 } from '../types.js';
@@ -17,6 +18,7 @@ export interface PersistedSearchFilters {
   minRating?: number;
   minBedrooms?: number;
   minBeds?: number;
+  priceDisplay?: PriceDisplayMode;
   priceMin?: number;
   priceMax?: number;
   propertyType?: string;
@@ -96,6 +98,7 @@ export function buildSearchFilters(
   if (request.minRating != null) filters.minRating = request.minRating;
   if (request.minBedrooms != null) filters.minBedrooms = request.minBedrooms;
   if (request.minBeds != null) filters.minBeds = request.minBeds;
+  if (request.priceDisplay) filters.priceDisplay = request.priceDisplay;
   if (request.priceMin != null) filters.priceMin = request.priceMin;
   if (request.priceMax != null) filters.priceMax = request.priceMax;
   if (request.propertyType) filters.propertyType = request.propertyType;
@@ -123,6 +126,10 @@ export function parseSearchFilters(
     minRating: asNumber(filters.minRating),
     minBedrooms: asNumber(filters.minBedrooms),
     minBeds: asNumber(filters.minBeds),
+    priceDisplay:
+      filters.priceDisplay === 'perNight' || filters.priceDisplay === 'total'
+        ? filters.priceDisplay
+        : undefined,
     priceMin: asNumber(filters.priceMin),
     priceMax: asNumber(filters.priceMax),
     propertyType: asString(filters.propertyType),
@@ -165,11 +172,14 @@ export function buildCliSearchParams(job: SearchJobModel) {
     checkout: job.checkout ?? undefined,
     adults: job.adults,
     currency: job.currency,
+    priceDisplay: filters.priceDisplay,
     minRating: filters.minRating,
     minBedrooms: filters.minBedrooms,
     minBeds: filters.minBeds,
-    priceMin: filters.priceMin,
-    priceMax: filters.priceMax,
+    priceMin:
+      filters.priceDisplay === 'total' ? undefined : filters.priceMin,
+    priceMax:
+      filters.priceDisplay === 'total' ? undefined : filters.priceMax,
     propertyType: filters.propertyType,
     exhaustive: filters.exhaustive ?? true,
   };

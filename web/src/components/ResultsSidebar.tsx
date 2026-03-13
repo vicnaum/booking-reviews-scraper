@@ -81,7 +81,7 @@ export default function ResultsSidebar() {
   }, [completedJobId]);
 
   return (
-    <aside className="hidden w-[360px] flex-shrink-0 flex-col border-r border-white/10 bg-[linear-gradient(180deg,rgba(20,16,13,0.94),rgba(14,12,10,0.92))] md:flex">
+    <aside className="hidden h-full min-h-0 w-[360px] flex-shrink-0 flex-col border-r border-white/10 bg-[linear-gradient(180deg,rgba(20,16,13,0.94),rgba(14,12,10,0.92))] md:flex">
       <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-stone-100">
@@ -129,7 +129,7 @@ export default function ResultsSidebar() {
         </div>
       )}
 
-      <div ref={listRef} className="flex-1 space-y-3 overflow-y-auto p-3">
+      <div ref={listRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
         {searchError && (
           <div className="rounded-2xl border border-rose-400/20 bg-rose-950/40 p-4 text-xs text-rose-200">
             {searchError}

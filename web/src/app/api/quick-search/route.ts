@@ -4,6 +4,7 @@ import { searchBooking } from '@cli/booking/search.js';
 import { bootstrapRuntimeProxyEnv } from '@cli/config.js';
 import type { AirbnbSearchParams, BookingSearchParams } from '@cli/search/types.js';
 import type { QuickSearchRequest } from '@/types';
+import { filterResultsForRequest } from '@/lib/resultFilters';
 
 export const maxDuration = 60;
 
@@ -40,8 +41,8 @@ export async function POST(request: NextRequest) {
         checkout: body.checkout,
         adults: body.adults ?? 2,
         currency: body.currency ?? 'USD',
-        priceMin: body.priceMin,
-        priceMax: body.priceMax,
+        priceMin: body.priceDisplay === 'total' ? undefined : body.priceMin,
+        priceMax: body.priceDisplay === 'total' ? undefined : body.priceMax,
         minRating: body.minRating,
         minBedrooms: body.minBedrooms,
         minBeds: body.minBeds,
@@ -52,7 +53,9 @@ export async function POST(request: NextRequest) {
         exhaustive: false,
       };
 
-      const { results, pagesScanned } = await searchAirbnb(params);
+      const output = await searchAirbnb(params);
+      const results = filterResultsForRequest(output.results, body);
+      const pagesScanned = output.pagesScanned;
       const durationMs = Date.now() - start;
       log(`airbnb done: ${results.length} results, ${pagesScanned} pages, ${durationMs}ms`);
 
@@ -75,8 +78,8 @@ export async function POST(request: NextRequest) {
         checkout: body.checkout,
         adults: body.adults ?? 2,
         currency: body.currency ?? 'USD',
-        priceMin: body.priceMin,
-        priceMax: body.priceMax,
+        priceMin: body.priceDisplay === 'total' ? undefined : body.priceMin,
+        priceMax: body.priceDisplay === 'total' ? undefined : body.priceMax,
         minRating: body.minRating,
         minBedrooms: body.minBedrooms,
         minBeds: body.minBeds,
@@ -88,7 +91,9 @@ export async function POST(request: NextRequest) {
       };
 
       log('booking: calling searchBooking (may bootstrap Playwright ~10s first time)...');
-      const { results, pagesScanned } = await searchBooking(params);
+      const output = await searchBooking(params);
+      const results = filterResultsForRequest(output.results, body);
+      const pagesScanned = output.pagesScanned;
       const durationMs = Date.now() - start;
       log(`booking done: ${results.length} results, ${pagesScanned} pages, ${durationMs}ms`);
 
