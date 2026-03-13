@@ -4,6 +4,7 @@ import { create } from 'zustand';
 import type {
   BoundingBox,
   FullSearchRequest,
+  GeocodeResult,
   Platform,
   QuickSearchRequest,
   SearchJobStatus,
@@ -16,9 +17,16 @@ import type { PriceDisplay } from '@/lib/format';
 const MIN_SEARCH_ZOOM = 12;
 const JOB_POLL_INTERVAL_MS = 2000;
 
+interface QuickSearchOptions {
+  force?: boolean;
+  bbox?: BoundingBox;
+}
+
 interface SearchStore {
   // Platform & filters
   platform: Platform;
+  locationQuery: string | null;
+  useLocationSearch: boolean;
   checkin: string | null;
   checkout: string | null;
   adults: number;
@@ -38,6 +46,11 @@ interface SearchStore {
   userBbox: BoundingBox | null;
   zoom: number;
   mapCenter: { lat: number; lng: number } | null;
+  mapFocusId: number;
+  hasInitializedSearch: boolean;
+  autoUpdate: boolean;
+  pendingViewportSearch: boolean;
+  pendingProgrammaticSearch: boolean;
 
   // Results
   results: SearchResult[];
@@ -55,23 +68,33 @@ interface SearchStore {
   // Actions
   setPlatform: (p: Platform) => void;
   setFilter: (key: string, value: unknown) => void;
+  setUseLocationSearch: (enabled: boolean) => void;
   setViewport: (bbox: BoundingBox, zoom: number) => void;
   setMapCenter: (center: { lat: number; lng: number }) => void;
+  setAutoUpdate: (enabled: boolean) => void;
+  setPendingViewportSearch: (pending: boolean) => void;
+  setPendingProgrammaticSearch: (pending: boolean) => void;
   setResults: (results: SearchResult[]) => void;
   setIsLoading: (loading: boolean) => void;
   selectResult: (id: string | null) => void;
   setUserBbox: (bbox: BoundingBox | null) => void;
+  initializeLocationSearch: (
+    location: GeocodeResult,
+    query: string,
+  ) => Promise<void>;
   setActiveJob: (
     jobId: string | null,
     progress?: number,
     status?: SearchJobStatus | null,
   ) => void;
-  triggerQuickSearch: () => Promise<void>;
+  triggerQuickSearch: (options?: QuickSearchOptions) => Promise<void>;
   startFullSearch: () => Promise<void>;
 }
 
 type SearchRequestState = Pick<
   SearchStore,
+  | 'locationQuery'
+  | 'useLocationSearch'
   | 'platform'
   | 'checkin'
   | 'checkout'
@@ -104,6 +127,10 @@ function buildSearchRequest(
   return {
     platform: state.platform,
     boundingBox: bbox,
+    location:
+      state.useLocationSearch && state.locationQuery
+        ? state.locationQuery
+        : undefined,
     checkin: state.checkin ?? undefined,
     checkout: state.checkout ?? undefined,
     adults: state.adults,
@@ -197,6 +224,8 @@ export const useSearchStore = create<SearchStore>((set, get) => {
 
   return {
     platform: 'airbnb',
+    locationQuery: null,
+    useLocationSearch: false,
     checkin: null,
     checkout: null,
     adults: 2,
@@ -215,6 +244,11 @@ export const useSearchStore = create<SearchStore>((set, get) => {
     userBbox: null,
     zoom: 3,
     mapCenter: null,
+    mapFocusId: 0,
+    hasInitializedSearch: false,
+    autoUpdate: true,
+    pendingViewportSearch: false,
+    pendingProgrammaticSearch: false,
 
     results: [],
     isLoading: false,
@@ -238,16 +272,33 @@ export const useSearchStore = create<SearchStore>((set, get) => {
         airbnbFilters: {},
         bookingFilters: {},
       });
-      void get().triggerQuickSearch();
+      if (get().hasInitializedSearch) {
+        void get().triggerQuickSearch({ force: true });
+      }
     },
 
     setFilter: (key, value) => {
       set((state) => ({ ...state, [key]: value }));
     },
 
+    setUseLocationSearch: (enabled) => set({ useLocationSearch: enabled }),
+
     setViewport: (bbox, zoom) => set({ viewportBbox: bbox, zoom }),
 
     setMapCenter: (center) => set({ mapCenter: center }),
+
+    setAutoUpdate: (enabled) => {
+      set({ autoUpdate: enabled });
+      if (enabled && get().pendingViewportSearch) {
+        void get().triggerQuickSearch({ force: true });
+      }
+    },
+
+    setPendingViewportSearch: (pending) =>
+      set({ pendingViewportSearch: pending }),
+
+    setPendingProgrammaticSearch: (pending) =>
+      set({ pendingProgrammaticSearch: pending }),
 
     setResults: (results) => set({ results, isLoading: false }),
 
@@ -257,6 +308,31 @@ export const useSearchStore = create<SearchStore>((set, get) => {
 
     setUserBbox: (bbox) => set({ userBbox: bbox }),
 
+    initializeLocationSearch: async (location, query) => {
+      if (currentAbortController) {
+        currentAbortController.abort();
+        currentAbortController = null;
+      }
+
+      clearJobPolling();
+
+      set({
+        hasInitializedSearch: true,
+        locationQuery: query,
+        useLocationSearch: true,
+        mapCenter: location.center,
+        mapFocusId: get().mapFocusId + 1,
+        viewportBbox: null,
+        userBbox: null,
+        results: [],
+        selectedId: null,
+        completedJobId: null,
+        searchError: null,
+        pendingViewportSearch: false,
+        pendingProgrammaticSearch: true,
+      });
+    },
+
     setActiveJob: (jobId, progress = 0, status = null) =>
       set({
         activeJobId: jobId,
@@ -265,11 +341,15 @@ export const useSearchStore = create<SearchStore>((set, get) => {
         jobStatus: status,
       }),
 
-    triggerQuickSearch: async () => {
+    triggerQuickSearch: async (options = {}) => {
       const state = get();
-      const bbox = state.userBbox ?? state.viewportBbox;
+      const bbox = options.bbox ?? state.userBbox ?? state.viewportBbox;
 
-      if (state.activeJobId || !bbox || state.zoom < MIN_SEARCH_ZOOM) {
+      if (
+        state.activeJobId ||
+        !bbox ||
+        (!options.force && state.zoom < MIN_SEARCH_ZOOM)
+      ) {
         return;
       }
 
@@ -284,6 +364,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
         isLoading: true,
         searchError: null,
         completedJobId: null,
+        pendingViewportSearch: false,
       });
 
       try {
@@ -332,7 +413,12 @@ export const useSearchStore = create<SearchStore>((set, get) => {
       const state = get();
       const bbox = state.userBbox ?? state.viewportBbox;
 
-      if (!bbox || state.zoom < MIN_SEARCH_ZOOM || state.activeJobId) {
+      if (
+        !state.hasInitializedSearch ||
+        !bbox ||
+        state.zoom < MIN_SEARCH_ZOOM ||
+        state.activeJobId
+      ) {
         return;
       }
 

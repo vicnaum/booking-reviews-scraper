@@ -5,6 +5,7 @@ import SearchBar from '@/components/SearchBar';
 import PlatformToggle from '@/components/PlatformToggle';
 import FilterPanel from '@/components/FilterPanel';
 import ResultsSidebar from '@/components/ResultsSidebar';
+import { useSearchStore } from '@/hooks/useSearchStore';
 
 const SearchMap = dynamic(() => import('@/components/SearchMap'), {
   ssr: false,
@@ -16,6 +17,8 @@ const SearchMap = dynamic(() => import('@/components/SearchMap'), {
 });
 
 export default function HomePage() {
+  const hasInitializedSearch = useSearchStore((s) => s.hasInitializedSearch);
+
   return (
     <div className="flex h-screen flex-col">
       {/* Top bar */}
@@ -33,14 +36,31 @@ export default function HomePage() {
       <FilterPanel />
 
       {/* Main content */}
-      <div className="flex flex-1 overflow-hidden">
-        <ResultsSidebar />
+      {hasInitializedSearch ? (
+        <div className="flex flex-1 overflow-hidden">
+          <ResultsSidebar />
 
-        {/* Map */}
-        <main className="flex-1 relative">
-          <SearchMap />
+          <main className="relative flex-1">
+            <SearchMap />
+          </main>
+        </div>
+      ) : (
+        <main className="flex flex-1 items-center justify-center bg-neutral-950 px-6">
+          <div className="max-w-lg text-center">
+            <p className="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500">
+              City-first search
+            </p>
+            <h1 className="mt-4 text-3xl font-semibold tracking-tight text-white">
+              Search a city, then refine it on the map.
+            </h1>
+            <p className="mt-4 text-sm leading-6 text-neutral-400">
+              Pick a city in the top bar and set your filters first. The map and
+              results will open after the first search, so you start from a real
+              area instead of zooming in from the world view.
+            </p>
+          </div>
         </main>
-      </div>
+      )}
     </div>
   );
 }

@@ -34,6 +34,7 @@ export async function POST(request: NextRequest) {
       const params: AirbnbSearchParams = {
         platform: 'airbnb',
         boundingBox,
+        location: body.location,
         checkin: body.checkin,
         checkout: body.checkout,
         adults: body.adults ?? 2,
@@ -67,6 +68,7 @@ export async function POST(request: NextRequest) {
       const params: BookingSearchParams = {
         platform: 'booking',
         boundingBox,
+        location: body.location,
         checkin: body.checkin,
         checkout: body.checkout,
         adults: body.adults ?? 2,

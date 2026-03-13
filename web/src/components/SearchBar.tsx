@@ -8,7 +8,9 @@ export default function SearchBar() {
   const [query, setQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const setMapCenter = useSearchStore((s) => s.setMapCenter);
+  const initializeLocationSearch = useSearchStore(
+    (s) => s.initializeLocationSearch,
+  );
 
   const handleSearch = useCallback(async () => {
     const q = query.trim();
@@ -25,13 +27,13 @@ export default function SearchBar() {
         return;
       }
       const data: GeocodeResult = await res.json();
-      setMapCenter(data.center);
+      await initializeLocationSearch(data, q);
     } catch {
       setError('Network error');
     } finally {
       setIsSearching(false);
     }
-  }, [query, setMapCenter]);
+  }, [initializeLocationSearch, query]);
 
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Enter') handleSearch();
@@ -45,7 +47,7 @@ export default function SearchBar() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Search location..."
+          placeholder="Search a city to begin..."
           className="w-full rounded-lg border border-neutral-700 bg-neutral-900 px-4 py-2.5 pl-10 text-sm text-white placeholder-neutral-500 outline-none transition focus:border-neutral-500 focus:ring-1 focus:ring-neutral-500"
         />
         <svg
@@ -68,7 +70,7 @@ export default function SearchBar() {
         disabled={isSearching || !query.trim()}
         className="rounded-lg bg-neutral-700 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-neutral-600 disabled:opacity-40 disabled:cursor-not-allowed"
       >
-        {isSearching ? 'Searching...' : 'Go'}
+        {isSearching ? 'Searching...' : 'Search'}
       </button>
       {error && (
         <span className="text-xs text-red-400">{error}</span>

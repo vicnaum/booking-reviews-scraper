@@ -25,6 +25,9 @@ export default function FilterPanel() {
   const currency = useSearchStore((s) => s.currency);
   const platform = useSearchStore((s) => s.platform);
   const priceDisplay = useSearchStore((s) => s.priceDisplay);
+  const hasInitializedSearch = useSearchStore((s) => s.hasInitializedSearch);
+  const autoUpdate = useSearchStore((s) => s.autoUpdate);
+  const pendingViewportSearch = useSearchStore((s) => s.pendingViewportSearch);
   const airbnbFilters = useSearchStore((s) => s.airbnbFilters);
   const bookingFilters = useSearchStore((s) => s.bookingFilters);
   const viewportBbox = useSearchStore((s) => s.viewportBbox);
@@ -33,11 +36,13 @@ export default function FilterPanel() {
   const activeJobId = useSearchStore((s) => s.activeJobId);
   const jobProgress = useSearchStore((s) => s.jobProgress);
   const setFilter = useSearchStore((s) => s.setFilter);
+  const setAutoUpdate = useSearchStore((s) => s.setAutoUpdate);
   const triggerQuickSearch = useSearchStore((s) => s.triggerQuickSearch);
   const startFullSearch = useSearchStore((s) => s.startFullSearch);
 
   const fullSearchBbox = userBbox ?? viewportBbox;
   const canStartFullSearch =
+    hasInitializedSearch &&
     !!fullSearchBbox &&
     (userBbox !== null || zoom >= 12) &&
     !activeJobId;
@@ -297,6 +302,31 @@ export default function FilterPanel() {
       )}
 
       <div className="ml-auto flex items-center gap-2">
+        <label className="flex items-center gap-1.5 text-xs text-neutral-400 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={autoUpdate}
+            onChange={(e) => setAutoUpdate(e.target.checked)}
+            className="accent-neutral-400"
+          />
+          Auto-update
+        </label>
+        {!autoUpdate && (
+          <button
+            onClick={() => {
+              void triggerQuickSearch({ force: true });
+            }}
+            disabled={
+              !hasInitializedSearch ||
+              !pendingViewportSearch ||
+              !!activeJobId ||
+              !fullSearchBbox
+            }
+            className="rounded border border-amber-700 bg-amber-900/30 px-3 py-1.5 text-xs font-medium text-amber-100 transition hover:bg-amber-900/50 disabled:cursor-not-allowed disabled:border-neutral-800 disabled:bg-neutral-900 disabled:text-neutral-600"
+          >
+            {pendingViewportSearch ? 'Update map' : 'Map up to date'}
+          </button>
+        )}
         {activeJobId && (
           <span className="text-xs text-neutral-500">
             Full search {Math.round(jobProgress * 100)}%
