@@ -210,6 +210,54 @@ export default function FilterPanel() {
     [nights, priceDisplay, priceMax, priceMin, setFilter],
   );
 
+  const activateFullSearchMode = useCallback(
+    (mode: 'window' | 'rectangle' | 'circle') => {
+      setFullSearchMode(mode);
+
+      if (mode === 'window') {
+        setDrawMode(null);
+        return;
+      }
+
+      if (!canDrawArea) {
+        return;
+      }
+
+      if (mode === 'rectangle') {
+        if (hasRectangleArea) {
+          setDrawMode(null);
+          return;
+        }
+
+        setCircleFilter(null);
+        setUserBbox(null);
+        setPendingViewportSearch(false);
+        setDrawMode('rectangle');
+        return;
+      }
+
+      if (hasCircleArea) {
+        setDrawMode(null);
+        return;
+      }
+
+      setCircleFilter(null);
+      setUserBbox(null);
+      setPendingViewportSearch(false);
+      setDrawMode('circle');
+    },
+    [
+      canDrawArea,
+      hasCircleArea,
+      hasRectangleArea,
+      setCircleFilter,
+      setDrawMode,
+      setFullSearchMode,
+      setPendingViewportSearch,
+      setUserBbox,
+    ],
+  );
+
   return (
     <div className="rounded-[28px] border border-white/10 bg-black/[0.24] p-3 shadow-[0_22px_60px_rgba(0,0,0,0.28)] backdrop-blur-xl">
       <div className="flex flex-col gap-3">
@@ -499,7 +547,8 @@ export default function FilterPanel() {
               <div className="flex flex-wrap items-center gap-2">
                 <div className="flex rounded-xl border border-white/10 bg-black/20 p-1">
                   <button
-                    onClick={() => setFullSearchMode('window')}
+                    onClick={() => activateFullSearchMode('window')}
+                    disabled={!hasInitializedSearch || !!activeJobId}
                     className={`${modeButtonClassName} ${
                       fullSearchMode === 'window'
                         ? 'bg-white text-neutral-950 shadow-sm'
@@ -509,8 +558,8 @@ export default function FilterPanel() {
                     Window
                   </button>
                   <button
-                    onClick={() => setFullSearchMode('rectangle')}
-                    disabled={!hasRectangleArea}
+                    onClick={() => activateFullSearchMode('rectangle')}
+                    disabled={!hasInitializedSearch || !!activeJobId}
                     className={`${modeButtonClassName} ${
                       fullSearchMode === 'rectangle'
                         ? 'bg-white text-neutral-950 shadow-sm'
@@ -520,8 +569,8 @@ export default function FilterPanel() {
                     Rectangle
                   </button>
                   <button
-                    onClick={() => setFullSearchMode('circle')}
-                    disabled={!hasCircleArea}
+                    onClick={() => activateFullSearchMode('circle')}
+                    disabled={!hasInitializedSearch || !!activeJobId}
                     className={`${modeButtonClassName} ${
                       fullSearchMode === 'circle'
                         ? 'bg-white text-neutral-950 shadow-sm'
