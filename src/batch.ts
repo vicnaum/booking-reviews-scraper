@@ -93,12 +93,28 @@ export interface BatchEvent {
   payload?: Record<string, unknown>;
 }
 
+export type BatchListingPhase =
+  | 'details'
+  | 'reviews'
+  | 'photos'
+  | 'aiReviews'
+  | 'aiPhotos'
+  | 'triage';
+
+export interface BatchPhaseUpdate {
+  outputDir: string;
+  manifestKey: string;
+  phase: BatchListingPhase;
+  entry: ManifestEntry;
+}
+
 export interface BatchHooks {
   onEvent?: (event: BatchEvent) => void | Promise<void>;
   onScrapeComplete?: (input: {
     outputDir: string;
     manifest: BatchManifest;
   }) => void | Promise<void>;
+  onPhaseUpdate?: (input: BatchPhaseUpdate) => void | Promise<void>;
 }
 
 interface PhaseResult {
@@ -283,6 +299,45 @@ async function emitBatchEvent(
   }
 
   await options.hooks.onEvent(event);
+}
+
+function cloneManifestEntry(entry: ManifestEntry): ManifestEntry {
+  return JSON.parse(JSON.stringify(entry)) as ManifestEntry;
+}
+
+async function emitPhaseUpdate(
+  options: BatchOptions,
+  input: BatchPhaseUpdate,
+): Promise<void> {
+  if (!options.hooks?.onPhaseUpdate) {
+    return;
+  }
+
+  await options.hooks.onPhaseUpdate({
+    ...input,
+    entry: cloneManifestEntry(input.entry),
+  });
+}
+
+async function persistPhaseUpdate(
+  options: BatchOptions,
+  manifest: BatchManifest,
+  manifestPath: string,
+  manifestKey: string,
+  phase: BatchListingPhase,
+): Promise<void> {
+  saveManifest(manifest, manifestPath);
+  const entry = manifest.listings[manifestKey];
+  if (!entry) {
+    return;
+  }
+
+  await emitPhaseUpdate(options, {
+    outputDir: options.outputDir || 'data',
+    manifestKey,
+    phase,
+    entry,
+  });
 }
 
 function buildReviewProgressPayload(input: {
@@ -477,6 +532,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           airbnbResult.details.failed++;
           airbnbResult.errors.push({ id: roomId, phase: 'details', message: 'No API key' });
           entry.details = { status: 'failed', error: 'No API key' };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
         } else {
           const listingsDir = getListingsDir(airbnbOutputDir);
           const detailsFile = path.join(listingsDir, `listing_${roomId}.json`);
@@ -484,6 +540,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
             statusParts.push('details \u2298 skip');
             airbnbResult.details.skipped++;
             entry.details = { status: 'skipped', file: `listings/listing_${roomId}.json` };
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
             if (options.fetchPhotos) {
               try { details = JSON.parse(fs.readFileSync(detailsFile, 'utf-8')); } catch {}
             }
@@ -497,11 +554,13 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
               statusParts.push(`details \u2713 (${formatDuration(Date.now() - t)})`);
               airbnbResult.details.fetched++;
               entry.details = { status: 'fetched', file: `listings/listing_${roomId}.json` };
+              await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
             } catch (err: any) {
               statusParts.push('details \u2717 error');
               airbnbResult.details.failed++;
               airbnbResult.errors.push({ id: roomId, phase: 'details', message: err.message });
               entry.details = { status: 'failed', error: err.message };
+              await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
               if (err.message?.includes('401') || err.message?.includes('403')) {
                 try { apiKey = await airbnbScraper.getApiKey(); } catch {}
               }
@@ -512,6 +571,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         // Phase requested but skipped by retry logic (already fetched)
         statusParts.push('details \u2298 skip');
         airbnbResult.details.skipped++;
+        await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
       }
 
       // Load details for photos/review-check if not already loaded
@@ -529,6 +589,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           airbnbResult.reviews.failed++;
           airbnbResult.errors.push({ id: roomId, phase: 'reviews', message: 'No API key' });
           entry.reviews = { status: 'failed', error: 'No API key' };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
         } else {
           const reviewsDir = getReviewsDir(airbnbOutputDir);
           const reviewsFile = path.join(reviewsDir, `room_${roomId}_reviews.json`);
@@ -536,6 +597,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
             statusParts.push('reviews \u2298 skip');
             airbnbResult.reviews.skipped++;
             entry.reviews = { status: 'skipped', file: `reviews/room_${roomId}_reviews.json` };
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
           } else {
             const t = Date.now();
             try {
@@ -603,11 +665,13 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
               } else {
                 entry.reviews = { status: 'fetched', file: `reviews/room_${roomId}_reviews.json`, count: reviews.length, expected: expectedReviews || undefined };
               }
+              await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
             } catch (err: any) {
               statusParts.push('reviews \u2717 error');
               airbnbResult.reviews.failed++;
               airbnbResult.errors.push({ id: roomId, phase: 'reviews', message: err.message });
               entry.reviews = { status: 'failed', error: err.message };
+              await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
               if (err.message?.includes('401') || err.message?.includes('403')) {
                 try { apiKey = await airbnbScraper.getApiKey(); } catch {}
               }
@@ -617,6 +681,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
       } else if (options.fetchReviews) {
         statusParts.push('reviews \u2298 skip');
         airbnbResult.reviews.skipped++;
+        await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
       }
 
       // --- Photos ---
@@ -632,10 +697,12 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           statusParts.push('photos \u2298 skip');
           airbnbResult.photos.skipped++;
           entry.photos = { status: 'skipped', dir: `photos/${roomId}`, count: actualPhotos, expected: expectedPhotos || undefined };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
         } else if (!details) {
           statusParts.push('photos \u2298 skip (no details)');
           airbnbResult.photos.skipped++;
           entry.photos = { status: 'skipped', reason: 'no details' };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
         } else {
           if (photosIncomplete) {
             statusParts.push(`photos: ${actualPhotos}/${expectedPhotos} incomplete, re-downloading`);
@@ -651,16 +718,19 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
               entry.photos = { status: 'fetched', dir: `photos/${roomId}`, count: finalCount, expected: expectedPhotos || undefined };
             }
             airbnbResult.photos.fetched++;
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
           } catch (err: any) {
             statusParts.push('photos \u2717 error');
             airbnbResult.photos.failed++;
             airbnbResult.errors.push({ id: roomId, phase: 'photos', message: err.message });
             entry.photos = { status: 'failed', dir: `photos/${roomId}`, error: err.message };
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
           }
         }
       } else if (options.fetchPhotos) {
         statusParts.push('photos \u2298 skip');
         airbnbResult.photos.skipped++;
+        await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
       }
 
       console.log(`${prefix} \u2014 ${statusParts.join(' | ')}`);
@@ -736,6 +806,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           statusParts.push('details \u2298 skip');
           bookingResult.details.skipped++;
           entry.details = { status: 'skipped', file: `listings/listing_${id}.json` };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
           if (options.fetchPhotos) {
             try { details = JSON.parse(fs.readFileSync(detailsFile, 'utf-8')); } catch {}
           }
@@ -749,16 +820,19 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
             statusParts.push(`details \u2713 (${formatDuration(Date.now() - t)})`);
             bookingResult.details.fetched++;
             entry.details = { status: 'fetched', file: `listings/listing_${id}.json` };
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
           } catch (err: any) {
             statusParts.push('details \u2717 error');
             bookingResult.details.failed++;
             bookingResult.errors.push({ id, phase: 'details', message: err.message });
             entry.details = { status: 'failed', error: err.message };
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
           }
         }
       } else if (options.fetchDetails) {
         statusParts.push('details \u2298 skip');
         bookingResult.details.skipped++;
+        await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
       }
 
       // Load details for photos/review-check if not already loaded
@@ -777,6 +851,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           statusParts.push('reviews \u2298 skip');
           bookingResult.reviews.skipped++;
           entry.reviews = { status: 'skipped', file: `reviews/${id}_reviews.json` };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
         } else {
           const t = Date.now();
           try {
@@ -833,16 +908,19 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
             } else {
               entry.reviews = { status: 'fetched', file: `reviews/${id}_reviews.json`, count: reviews.length, expected: expectedReviews || undefined };
             }
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
           } catch (err: any) {
             statusParts.push('reviews \u2717 error');
             bookingResult.reviews.failed++;
             bookingResult.errors.push({ id, phase: 'reviews', message: err.message });
             entry.reviews = { status: 'failed', error: err.message };
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
           }
         }
       } else if (options.fetchReviews) {
         statusParts.push('reviews \u2298 skip');
         bookingResult.reviews.skipped++;
+        await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
       }
 
       // --- Photos ---
@@ -858,10 +936,12 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           statusParts.push('photos \u2298 skip');
           bookingResult.photos.skipped++;
           entry.photos = { status: 'skipped', dir: `photos/${id}`, count: actualPhotos, expected: expectedPhotos || undefined };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
         } else if (!details) {
           statusParts.push('photos \u2298 skip (no details)');
           bookingResult.photos.skipped++;
           entry.photos = { status: 'skipped', reason: 'no details' };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
         } else {
           if (photosIncomplete) {
             statusParts.push(`photos: ${actualPhotos}/${expectedPhotos} incomplete, re-downloading`);
@@ -880,16 +960,19 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
               entry.photos = { status: 'fetched', dir: `photos/${id}`, count: finalCount, expected: expectedPhotos || undefined };
             }
             bookingResult.photos.fetched++;
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
           } catch (err: any) {
             statusParts.push('photos \u2717 error');
             bookingResult.photos.failed++;
             bookingResult.errors.push({ id, phase: 'photos', message: err.message });
             entry.photos = { status: 'failed', dir: `photos/${id}`, error: err.message };
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
           }
         }
       } else if (options.fetchPhotos) {
         statusParts.push('photos \u2298 skip');
         bookingResult.photos.skipped++;
+        await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
       }
 
       console.log(`${prefix} \u2014 ${statusParts.join(' | ')}`);
@@ -966,6 +1049,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           if (!(options.retryFailed && shouldRetryPhase(manifest, manifestKey, 'aiReviews'))) {
             console.log(`${prefix} \u2014 ai-reviews \u2298 skip`);
             platformResult.aiReviews.skipped++;
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'aiReviews');
             await emitBatchEvent(options, {
               phase: 'ai-reviews',
               level: 'info',
@@ -983,6 +1067,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         if (options.retryFailed && entry.aiReviews?.status === 'fetched') {
           console.log(`${prefix} \u2014 ai-reviews \u2298 skip`);
           platformResult.aiReviews.skipped++;
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'aiReviews');
           await emitBatchEvent(options, {
             phase: 'ai-reviews',
             level: 'info',
@@ -999,6 +1084,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} \u2014 ai-reviews \u2298 skip (no reviews)`);
           platformResult.aiReviews.skipped++;
           entry.aiReviews = { status: 'skipped', reason: 'no reviews' };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'aiReviews');
           await emitBatchEvent(options, {
             phase: 'ai-reviews',
             level: 'info',
@@ -1018,6 +1104,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} \u2014 ai-reviews \u2298 skip (reviews file missing)`);
           platformResult.aiReviews.skipped++;
           entry.aiReviews = { status: 'skipped', reason: 'reviews file missing' };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'aiReviews');
           await emitBatchEvent(options, {
             phase: 'ai-reviews',
             level: 'warning',
@@ -1044,6 +1131,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} \u2014 ai-reviews \u2713 (${formatDuration(Date.now() - t)})`);
           platformResult.aiReviews.fetched++;
           entry.aiReviews = { status: 'fetched', file: `ai-reviews/${entry.id}.json`, model: result.model, cost: result.usage?.cost };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'aiReviews');
           await emitBatchEvent(options, {
             phase: 'ai-reviews',
             level: 'info',
@@ -1057,6 +1145,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           platformResult.aiReviews.failed++;
           platformResult.errors.push({ id: entry.id, phase: 'ai-reviews', message: err.message });
           entry.aiReviews = { status: 'failed', error: err.message, model: modelConfig.model };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'aiReviews');
           await emitBatchEvent(options, {
             phase: 'ai-reviews',
             level: 'error',
@@ -1067,7 +1156,6 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           });
         }
 
-        saveManifest(manifest, manifestPath);
       }
     }
   }
@@ -1121,6 +1209,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           if (!(options.retryFailed && shouldRetryPhase(manifest, manifestKey, 'aiPhotos'))) {
             console.log(`${prefix} — ai-photos ⊘ skip`);
             platformResult.aiPhotos.skipped++;
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'aiPhotos');
             await emitBatchEvent(options, {
               phase: 'ai-photos',
               level: 'info',
@@ -1137,6 +1226,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         if (options.retryFailed && entry.aiPhotos?.status === 'fetched') {
           console.log(`${prefix} — ai-photos ⊘ skip`);
           platformResult.aiPhotos.skipped++;
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'aiPhotos');
           await emitBatchEvent(options, {
             phase: 'ai-photos',
             level: 'info',
@@ -1153,6 +1243,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} — ai-photos ⊘ skip (no photos)`);
           platformResult.aiPhotos.skipped++;
           entry.aiPhotos = { status: 'skipped', reason: 'no photos' };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'aiPhotos');
           await emitBatchEvent(options, {
             phase: 'ai-photos',
             level: 'info',
@@ -1170,6 +1261,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} — ai-photos ⊘ skip (photos dir empty/missing)`);
           platformResult.aiPhotos.skipped++;
           entry.aiPhotos = { status: 'skipped', reason: 'photos dir empty' };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'aiPhotos');
           await emitBatchEvent(options, {
             phase: 'ai-photos',
             level: 'warning',
@@ -1198,6 +1290,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} — ai-photos ✓ ${result.photoCount} photos (${formatDuration(Date.now() - t)})`);
           platformResult.aiPhotos.fetched++;
           entry.aiPhotos = { status: 'fetched', file: `ai-photos/${entry.id}.json`, model: result.model, count: result.photoCount, cost: result.usage?.cost };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'aiPhotos');
           await emitBatchEvent(options, {
             phase: 'ai-photos',
             level: 'info',
@@ -1211,6 +1304,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           platformResult.aiPhotos.failed++;
           platformResult.errors.push({ id: entry.id, phase: 'ai-photos', message: err.message });
           entry.aiPhotos = { status: 'failed', error: err.message, model: modelConfig.model };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'aiPhotos');
           await emitBatchEvent(options, {
             phase: 'ai-photos',
             level: 'error',
@@ -1221,7 +1315,6 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           });
         }
 
-        saveManifest(manifest, manifestPath);
       }
     }
   }
@@ -1275,6 +1368,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           if (!(options.retryFailed && shouldRetryPhase(manifest, manifestKey, 'triage'))) {
             console.log(`${prefix} — triage ⊘ skip`);
             platformResult.triage.skipped++;
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'triage');
             await emitBatchEvent(options, {
               phase: 'triage',
               level: 'info',
@@ -1291,6 +1385,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         if (options.retryFailed && entry.triage?.status === 'fetched') {
           console.log(`${prefix} — triage ⊘ skip`);
           platformResult.triage.skipped++;
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'triage');
           await emitBatchEvent(options, {
             phase: 'triage',
             level: 'info',
@@ -1307,6 +1402,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} — triage ⊘ skip (no listing details)`);
           platformResult.triage.skipped++;
           entry.triage = { status: 'skipped', reason: 'no listing details' };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'triage');
           await emitBatchEvent(options, {
             phase: 'triage',
             level: 'warning',
@@ -1323,6 +1419,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} — triage ⊘ skip (listing file missing)`);
           platformResult.triage.skipped++;
           entry.triage = { status: 'skipped', reason: 'listing file missing' };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'triage');
           await emitBatchEvent(options, {
             phase: 'triage',
             level: 'warning',
@@ -1356,6 +1453,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} — triage ✓ ${tier} (${fitScore}) (${formatDuration(Date.now() - t)})`);
           platformResult.triage.fetched++;
           entry.triage = { status: 'fetched', file: `triage/${entry.id}.json`, model: result.model, cost: result.usage?.cost };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'triage');
           await emitBatchEvent(options, {
             phase: 'triage',
             level: 'info',
@@ -1369,6 +1467,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           platformResult.triage.failed++;
           platformResult.errors.push({ id: entry.id, phase: 'triage', message: err.message });
           entry.triage = { status: 'failed', error: err.message, model: modelConfig.model };
+          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'triage');
           await emitBatchEvent(options, {
             phase: 'triage',
             level: 'error',
@@ -1379,7 +1478,6 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           });
         }
 
-        saveManifest(manifest, manifestPath);
       }
     }
   }

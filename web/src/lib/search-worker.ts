@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { Prisma } from '@prisma/client';
 import { Worker } from 'bullmq';
 import { config as loadDotEnv } from 'dotenv';
-import { runBatch, type BatchEvent } from '../../../src/batch.js';
+import { runBatch, type BatchEvent, type BatchPhaseUpdate } from '../../../src/batch.js';
 import { bootstrapRuntimeProxyEnv } from '../../../src/config.js';
 import { generateReport } from '../../../src/report.js';
 import { searchAirbnb } from '../../../src/airbnb/search.js';
@@ -488,6 +488,186 @@ function resolveAnalysisEventState(event: BatchEvent): {
   };
 }
 
+type PersistableManifestEntry = AnalysisManifest['listings'][string] | BatchPhaseUpdate['entry'];
+
+interface ReviewJobListingPersistenceRow {
+  id: string;
+  platform: 'airbnb' | 'booking';
+  url: string;
+  lat: number | null;
+  lng: number | null;
+  poiDistanceMeters: number | null;
+  analysis: { startedAt: Date | null } | null;
+}
+
+function getManifestEntryError(entry: PersistableManifestEntry): string | null {
+  return (
+    entry.triage.error
+    ?? entry.aiPhotos.error
+    ?? entry.aiReviews.error
+    ?? entry.photos.error
+    ?? entry.reviews.error
+    ?? entry.details.error
+    ?? null
+  );
+}
+
+function readArtifactJson(
+  artifactRoot: string,
+  relativePath: string | undefined,
+): Record<string, unknown> | null {
+  if (!relativePath) {
+    return null;
+  }
+
+  return readJsonFile<Record<string, unknown>>(path.join(artifactRoot, relativePath));
+}
+
+function getResolvedPoiDistanceMeters(input: {
+  poi: { lat: number; lng: number } | null;
+  listing: Pick<ReviewJobListingPersistenceRow, 'lat' | 'lng' | 'poiDistanceMeters'>;
+  coordinates: { lat: number; lng: number } | null;
+}): number | null {
+  if (input.poi && input.coordinates) {
+    return getPoiDistanceMeters(input.poi, input.coordinates);
+  }
+
+  if (input.poi && input.listing.lat != null && input.listing.lng != null) {
+    return getPoiDistanceMeters(input.poi, {
+      lat: input.listing.lat,
+      lng: input.listing.lng,
+    });
+  }
+
+  return input.listing.poiDistanceMeters;
+}
+
+function getDetailsJsonWithPoiContext(input: {
+  artifactRoot: string;
+  entry: PersistableManifestEntry;
+  poi: { lat: number; lng: number } | null;
+  listing: ReviewJobListingPersistenceRow;
+}): {
+  details: Record<string, unknown> | null;
+  poiDistanceMeters: number | null;
+} {
+  const details = readArtifactJson(input.artifactRoot, input.entry.details.file);
+  const detailCoordinates = details ? asStoredMapPoint(details.coordinates) : null;
+  const fallbackCoordinates =
+    input.listing.lat != null && input.listing.lng != null
+      ? { lat: input.listing.lat, lng: input.listing.lng }
+      : null;
+  const resolvedCoordinates = detailCoordinates ?? fallbackCoordinates;
+  const poiDistanceMeters = getResolvedPoiDistanceMeters({
+    poi: input.poi,
+    listing: input.listing,
+    coordinates: resolvedCoordinates,
+  });
+
+  if (!details) {
+    return {
+      details: null,
+      poiDistanceMeters,
+    };
+  }
+
+  const nextDetails: Record<string, unknown> = { ...details };
+
+  if (input.poi) {
+    nextDetails.poi = input.poi;
+    nextDetails.poiDistanceMeters = poiDistanceMeters;
+  }
+
+  if (!detailCoordinates && fallbackCoordinates) {
+    nextDetails.coordinates = fallbackCoordinates;
+  }
+
+  return {
+    details: nextDetails,
+    poiDistanceMeters,
+  };
+}
+
+async function persistReviewJobManifestEntryToDb(input: {
+  artifactRoot: string;
+  poi: { lat: number; lng: number } | null;
+  listing: ReviewJobListingPersistenceRow;
+  entry: PersistableManifestEntry;
+  currentPhase: string;
+  finalize?: boolean;
+}) {
+  const { details, poiDistanceMeters } = getDetailsJsonWithPoiContext({
+    artifactRoot: input.artifactRoot,
+    entry: input.entry,
+    poi: input.poi,
+    listing: input.listing,
+  });
+  const aiReviews = readArtifactJson(input.artifactRoot, input.entry.aiReviews.file);
+  const aiPhotos = readArtifactJson(input.artifactRoot, input.entry.aiPhotos.file);
+  const triage = readArtifactJson(input.artifactRoot, input.entry.triage.file);
+  const terminalStatus = summarizeManifestEntryStatus(input.entry);
+  const completedAt =
+    input.finalize && ['completed', 'partial', 'failed', 'skipped'].includes(terminalStatus)
+      ? new Date()
+      : null;
+  const durationMs =
+    completedAt && input.listing.analysis?.startedAt
+      ? completedAt.getTime() - input.listing.analysis.startedAt.getTime()
+      : null;
+
+  await prisma.$transaction(async (tx) => {
+    await tx.reviewJobListing.update({
+      where: { id: input.listing.id },
+      data: {
+        poiDistanceMeters: poiDistanceMeters ?? null,
+      },
+    });
+
+    await tx.reviewJobListingAnalysis.upsert({
+      where: { jobListingId: input.listing.id },
+      create: {
+        jobListingId: input.listing.id,
+        status: terminalStatus,
+        currentPhase: input.currentPhase,
+        detailsStatus: toPhaseStatus(input.entry.details.status),
+        reviewsStatus: toPhaseStatus(input.entry.reviews.status),
+        photosStatus: toPhaseStatus(input.entry.photos.status),
+        aiReviewsStatus: toPhaseStatus(input.entry.aiReviews.status),
+        aiPhotosStatus: toPhaseStatus(input.entry.aiPhotos.status),
+        triageStatus: toPhaseStatus(input.entry.triage.status),
+        errorMessage: getManifestEntryError(input.entry),
+        details: details == null ? Prisma.DbNull : (details as Prisma.InputJsonValue),
+        aiReviews: aiReviews == null ? Prisma.DbNull : (aiReviews as Prisma.InputJsonValue),
+        aiPhotos: aiPhotos == null ? Prisma.DbNull : (aiPhotos as Prisma.InputJsonValue),
+        triage: triage == null ? Prisma.DbNull : (triage as Prisma.InputJsonValue),
+        reviewCount: input.entry.reviews.count ?? null,
+        photoCount: input.entry.photos.count ?? null,
+        completedAt,
+        durationMs,
+      },
+      update: {
+        status: terminalStatus,
+        currentPhase: input.currentPhase,
+        detailsStatus: toPhaseStatus(input.entry.details.status),
+        reviewsStatus: toPhaseStatus(input.entry.reviews.status),
+        photosStatus: toPhaseStatus(input.entry.photos.status),
+        aiReviewsStatus: toPhaseStatus(input.entry.aiReviews.status),
+        aiPhotosStatus: toPhaseStatus(input.entry.aiPhotos.status),
+        triageStatus: toPhaseStatus(input.entry.triage.status),
+        errorMessage: getManifestEntryError(input.entry),
+        details: details == null ? Prisma.DbNull : (details as Prisma.InputJsonValue),
+        aiReviews: aiReviews == null ? Prisma.DbNull : (aiReviews as Prisma.InputJsonValue),
+        aiPhotos: aiPhotos == null ? Prisma.DbNull : (aiPhotos as Prisma.InputJsonValue),
+        triage: triage == null ? Prisma.DbNull : (triage as Prisma.InputJsonValue),
+        reviewCount: input.entry.reviews.count ?? null,
+        photoCount: input.entry.photos.count ?? null,
+        completedAt: completedAt ?? undefined,
+        durationMs: durationMs ?? undefined,
+      },
+    });
+  });
+}
+
 async function syncReviewJobArtifactsToDb(input: {
   reviewJobId: string;
   artifactRoot: string;
@@ -518,97 +698,13 @@ async function syncReviewJobArtifactsToDb(input: {
       continue;
     }
 
-    const details =
-      entry.details.file
-        ? readJsonFile<Record<string, unknown>>(
-            path.join(input.artifactRoot, entry.details.file),
-          )
-        : null;
-    const aiReviews =
-      entry.aiReviews.file
-        ? readJsonFile<Record<string, unknown>>(
-            path.join(input.artifactRoot, entry.aiReviews.file),
-          )
-        : null;
-    const aiPhotos =
-      entry.aiPhotos.file
-        ? readJsonFile<Record<string, unknown>>(
-            path.join(input.artifactRoot, entry.aiPhotos.file),
-          )
-        : null;
-    const triage =
-      entry.triage.file
-        ? readJsonFile<Record<string, unknown>>(
-            path.join(input.artifactRoot, entry.triage.file),
-          )
-        : null;
-
-    const poiDistanceMeters =
-      input.poi && listing.lat != null && listing.lng != null
-        ? getPoiDistanceMeters(input.poi, { lat: listing.lat, lng: listing.lng })
-        : listing.poiDistanceMeters;
-
-    await prisma.$transaction(async (tx) => {
-      await tx.reviewJobListing.update({
-        where: { id: listing.id },
-        data: {
-          poiDistanceMeters: poiDistanceMeters ?? null,
-        },
-      });
-
-      await tx.reviewJobListingAnalysis.upsert({
-        where: { jobListingId: listing.id },
-        create: {
-          jobListingId: listing.id,
-          status: summarizeManifestEntryStatus(entry),
-          currentPhase: 'completed',
-          detailsStatus: toPhaseStatus(entry.details.status),
-          reviewsStatus: toPhaseStatus(entry.reviews.status),
-          photosStatus: toPhaseStatus(entry.photos.status),
-          aiReviewsStatus: toPhaseStatus(entry.aiReviews.status),
-          aiPhotosStatus: toPhaseStatus(entry.aiPhotos.status),
-          triageStatus: toPhaseStatus(entry.triage.status),
-          errorMessage:
-            entry.triage.error
-            ?? entry.aiPhotos.error
-            ?? entry.aiReviews.error
-            ?? entry.photos.error
-            ?? entry.reviews.error
-            ?? entry.details.error
-            ?? null,
-          details: details == null ? Prisma.DbNull : (details as Prisma.InputJsonValue),
-          aiReviews: aiReviews == null ? Prisma.DbNull : (aiReviews as Prisma.InputJsonValue),
-          aiPhotos: aiPhotos == null ? Prisma.DbNull : (aiPhotos as Prisma.InputJsonValue),
-          triage: triage == null ? Prisma.DbNull : (triage as Prisma.InputJsonValue),
-          reviewCount: entry.reviews.count ?? null,
-          photoCount: entry.photos.count ?? null,
-        },
-        update: {
-          status: summarizeManifestEntryStatus(entry),
-          currentPhase: 'completed',
-          detailsStatus: toPhaseStatus(entry.details.status),
-          reviewsStatus: toPhaseStatus(entry.reviews.status),
-          photosStatus: toPhaseStatus(entry.photos.status),
-          aiReviewsStatus: toPhaseStatus(entry.aiReviews.status),
-          aiPhotosStatus: toPhaseStatus(entry.aiPhotos.status),
-          triageStatus: toPhaseStatus(entry.triage.status),
-          errorMessage:
-            entry.triage.error
-            ?? entry.aiPhotos.error
-            ?? entry.aiReviews.error
-            ?? entry.photos.error
-            ?? entry.reviews.error
-            ?? entry.details.error
-            ?? null,
-          details: details == null ? Prisma.DbNull : (details as Prisma.InputJsonValue),
-          aiReviews: aiReviews == null ? Prisma.DbNull : (aiReviews as Prisma.InputJsonValue),
-          aiPhotos: aiPhotos == null ? Prisma.DbNull : (aiPhotos as Prisma.InputJsonValue),
-          triage: triage == null ? Prisma.DbNull : (triage as Prisma.InputJsonValue),
-          reviewCount: entry.reviews.count ?? null,
-          photoCount: entry.photos.count ?? null,
-          completedAt: new Date(),
-        },
-      });
+    await persistReviewJobManifestEntryToDb({
+      artifactRoot: input.artifactRoot,
+      poi: input.poi,
+      listing,
+      entry,
+      currentPhase: 'completed',
+      finalize: true,
     });
   }
 
@@ -637,6 +733,7 @@ async function runReviewJobAnalysis(reviewJobId: string) {
       listings: {
         where: { hidden: false },
         orderBy: { createdAt: 'asc' },
+        include: { analysis: true },
       },
     },
   });
@@ -656,6 +753,12 @@ async function runReviewJobAnalysis(reviewJobId: string) {
   const analysisModel = process.env.LLM_MODEL || 'gemini-3-flash-preview:high';
   const poi = asStoredMapPoint(jobRecord.poi);
   const startedAt = new Date();
+  const activeListingByKey = new Map(
+    activeListings.map((listing) => [
+      getListingMatchKey(listing.platform, listing.url),
+      listing,
+    ]),
+  );
 
   fs.mkdirSync(artifactRoot, { recursive: true });
   pruneAnalysisManifestToListings({
@@ -774,6 +877,22 @@ async function runReviewJobAnalysis(reviewJobId: string) {
             listingId: event.listingId ?? null,
             listingPlatform: event.platform ?? null,
             payload: (event.payload ?? undefined) as Prisma.InputJsonValue | undefined,
+          });
+        },
+        onPhaseUpdate: async (phaseUpdate) => {
+          const listing = activeListingByKey.get(
+            getListingMatchKey(phaseUpdate.entry.platform, phaseUpdate.entry.url),
+          );
+          if (!listing) {
+            return;
+          }
+
+          await persistReviewJobManifestEntryToDb({
+            artifactRoot: phaseUpdate.outputDir,
+            poi,
+            listing,
+            entry: phaseUpdate.entry,
+            currentPhase: phaseUpdate.phase,
           });
         },
         onScrapeComplete: async ({ outputDir, manifest }) => {
