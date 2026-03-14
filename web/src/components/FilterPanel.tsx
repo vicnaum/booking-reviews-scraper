@@ -41,12 +41,10 @@ export default function FilterPanel() {
   const adults = useSearchStore((s) => s.adults);
   const priceMin = useSearchStore((s) => s.priceMin);
   const priceMax = useSearchStore((s) => s.priceMax);
-  const minRating = useSearchStore((s) => s.minRating);
   const minBedrooms = useSearchStore((s) => s.minBedrooms);
   const minBeds = useSearchStore((s) => s.minBeds);
   const propertyType = useSearchStore((s) => s.propertyType);
   const currency = useSearchStore((s) => s.currency);
-  const platform = useSearchStore((s) => s.platform);
   const priceDisplay = useSearchStore((s) => s.priceDisplay);
   const hasInitializedSearch = useSearchStore((s) => s.hasInitializedSearch);
   const autoUpdate = useSearchStore((s) => s.autoUpdate);
@@ -54,8 +52,6 @@ export default function FilterPanel() {
   const circleFilter = useSearchStore((s) => s.circleFilter);
   const poi = useSearchStore((s) => s.poi);
   const pendingViewportSearch = useSearchStore((s) => s.pendingViewportSearch);
-  const airbnbFilters = useSearchStore((s) => s.airbnbFilters);
-  const bookingFilters = useSearchStore((s) => s.bookingFilters);
   const viewportBbox = useSearchStore((s) => s.viewportBbox);
   const userBbox = useSearchStore((s) => s.userBbox);
   const zoom = useSearchStore((s) => s.zoom);
@@ -179,22 +175,6 @@ export default function FilterPanel() {
       }
     },
     [triggerQuickSearch],
-  );
-
-  const updateAirbnb = useCallback(
-    (key: string, value: unknown) => {
-      setFilter('airbnbFilters', { ...airbnbFilters, [key]: value });
-      triggerQuickSearch({ force: true });
-    },
-    [airbnbFilters, setFilter, triggerQuickSearch],
-  );
-
-  const updateBooking = useCallback(
-    (key: string, value: unknown) => {
-      setFilter('bookingFilters', { ...bookingFilters, [key]: value });
-      triggerQuickSearch({ force: true });
-    },
-    [bookingFilters, setFilter, triggerQuickSearch],
   );
 
   const switchPriceDisplay = useCallback(
@@ -371,29 +351,6 @@ export default function FilterPanel() {
 
           <div className={groupClassName}>
             <select
-              value={minRating ?? ''}
-              onChange={(e) =>
-                update('minRating', e.target.value ? Number(e.target.value) : null)
-              }
-              className={`${fieldClassName} w-36`}
-            >
-              <option value="">Any rating</option>
-              {platform === 'airbnb' ? (
-                <>
-                  <option value="4.5">4.5+</option>
-                  <option value="4.7">4.7+</option>
-                  <option value="4.9">4.9+</option>
-                </>
-              ) : (
-                <>
-                  <option value="7">7+</option>
-                  <option value="8">8+</option>
-                  <option value="9">9+</option>
-                </>
-              )}
-            </select>
-
-            <select
               value={propertyType ?? ''}
               onChange={(e) => update('propertyType', e.target.value || null)}
               className={`${fieldClassName} w-40`}
@@ -430,52 +387,6 @@ export default function FilterPanel() {
                 </button>
               ))}
             </div>
-          </div>
-
-          <div className={groupClassName}>
-            {platform === 'airbnb' && (
-              <>
-                <label className="flex items-center gap-2 rounded-xl px-2 py-1 text-xs font-medium text-stone-300">
-                  <input
-                    type="checkbox"
-                    checked={airbnbFilters.superhost ?? false}
-                    onChange={(e) =>
-                      updateAirbnb('superhost', e.target.checked || undefined)
-                    }
-                    className="accent-[#ff6b5f]"
-                  />
-                  Superhost
-                </label>
-                <label className="flex items-center gap-2 rounded-xl px-2 py-1 text-xs font-medium text-stone-300">
-                  <input
-                    type="checkbox"
-                    checked={airbnbFilters.instantBook ?? false}
-                    onChange={(e) =>
-                      updateAirbnb('instantBook', e.target.checked || undefined)
-                    }
-                    className="accent-[#ff6b5f]"
-                  />
-                  Instant Book
-                </label>
-              </>
-            )}
-
-            {platform === 'booking' && (
-              <label className="flex items-center gap-2 rounded-xl px-2 py-1 text-xs font-medium text-stone-300">
-                <input
-                  type="checkbox"
-                  checked={bookingFilters.freeCancellation ?? false}
-                  onChange={(e) =>
-                    updateBooking(
-                      'freeCancellation',
-                      e.target.checked || undefined,
-                    )
-                  }
-                  className="accent-[#2870ff]"
-                />
-                Free cancellation
-              </label>
-            )}
           </div>
         </div>
 
@@ -622,8 +533,11 @@ export default function FilterPanel() {
                 </div>
 
                 <button
-                  onClick={() => {
-                    void startFullSearch();
+                  onClick={async () => {
+                    const jobId = await startFullSearch();
+                    if (jobId) {
+                      window.location.assign(`/jobs/${jobId}`);
+                    }
                   }}
                   disabled={!canStartFullSearch}
                   className={`rounded-2xl border px-4 py-2.5 text-xs font-semibold transition ${

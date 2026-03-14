@@ -20,6 +20,12 @@ enum JobStatus {
   cancelled
 }
 
+enum SearchAreaMode {
+  window
+  rectangle
+  circle
+}
+
 model SearchJob {
   id           String    @id @default(cuid())
   status       JobStatus @default(pending)
@@ -74,4 +80,88 @@ model SearchResult {
 
   @@unique([jobId, listingId, platform])
   @@index([jobId])
+}
+
+model ReviewJob {
+  id             String          @id @default(cuid())
+  ownerKey       String?
+  status         JobStatus       @default(pending)
+  currentPhase   String          @default("search")
+  location       String?
+  prompt         String?
+  boundingBox    Json?
+  circle         Json?
+  poi            Json?
+  mapBounds      Json?
+  mapCenter      Json?
+  mapZoom        Int?
+  searchAreaMode SearchAreaMode  @default(window)
+  checkin        String?
+  checkout       String?
+  adults         Int             @default(2)
+  currency       String          @default("USD")
+  filters        Json?
+  totalResults   Int             @default(0)
+  pagesScanned   Int             @default(0)
+  progress       Float           @default(0)
+  errorMessage   String?
+  queueJobId     String?
+  createdAt      DateTime        @default(now())
+  startedAt      DateTime?
+  completedAt    DateTime?
+  durationMs     Int?
+  listings       ReviewJobListing[]
+  events         ReviewJobEvent[]
+
+  @@index([ownerKey, createdAt])
+}
+
+model ReviewJobListing {
+  id               String    @id @default(cuid())
+  jobId            String
+  job              ReviewJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  listingId        String
+  platform         Platform
+  name             String
+  url              String
+  rating           Float?
+  reviewCount      Int       @default(0)
+  priceAmount      Float?
+  priceCurrency    String?
+  totalPrice       Float?
+  pricing          Json?
+  lat              Float?
+  lng              Float?
+  propertyType     String?
+  photoUrl         String?
+  bedrooms         Int?
+  beds             Int?
+  bathrooms        Int?
+  maxGuests        Int?
+  superhost        Boolean?
+  instantBook      Boolean?
+  hostId           String?
+  stars            Int?
+  freeCancellation Boolean?
+  selected         Boolean   @default(false)
+  hidden           Boolean   @default(false)
+  createdAt        DateTime  @default(now())
+
+  @@unique([jobId, listingId, platform])
+  @@index([jobId, createdAt])
+}
+
+model ReviewJobEvent {
+  id             String    @id @default(cuid())
+  jobId          String
+  job            ReviewJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  phase          String
+  level          String
+  message        String
+  payload        Json?
+  listingId      String?
+  listingPlatform Platform?
+  createdAt      DateTime  @default(now())
+
+  @@index([jobId, createdAt])
 }

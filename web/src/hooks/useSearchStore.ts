@@ -4,20 +4,19 @@ import { create } from 'zustand';
 import type {
   BoundingBox,
   CircleFilter,
+  CreateReviewJobRequest,
+  CreateReviewJobResponse,
   FullSearchRequest,
   GeocodeResult,
   MapPoint,
   Platform,
   QuickSearchRequest,
   SearchJobStatus,
-  SearchJobResponse,
   SearchResult,
-  StartSearchResponse,
 } from '@/types';
 import type { PriceDisplay } from '@/lib/format';
 
 const MIN_SEARCH_ZOOM = 12;
-const JOB_POLL_INTERVAL_MS = 2000;
 
 interface QuickSearchOptions {
   force?: boolean;
@@ -103,14 +102,13 @@ interface SearchStore {
     status?: SearchJobStatus | null,
   ) => void;
   triggerQuickSearch: (options?: QuickSearchOptions) => Promise<void>;
-  startFullSearch: () => Promise<void>;
+  startFullSearch: () => Promise<string | null>;
 }
 
 type SearchRequestState = Pick<
   SearchStore,
   | 'locationQuery'
   | 'useLocationSearch'
-  | 'platform'
   | 'circleFilter'
   | 'checkin'
   | 'checkout'
@@ -128,14 +126,6 @@ type SearchRequestState = Pick<
 >;
 
 let currentAbortController: AbortController | null = null;
-let currentJobPollTimeout: ReturnType<typeof setTimeout> | null = null;
-
-function clearJobPolling() {
-  if (currentJobPollTimeout) {
-    clearTimeout(currentJobPollTimeout);
-    currentJobPollTimeout = null;
-  }
-}
 
 function buildSearchRequest(
   state: SearchRequestState,
@@ -143,7 +133,7 @@ function buildSearchRequest(
   options: BuildSearchRequestOptions = {},
 ): FullSearchRequest {
   return {
-    platform: state.platform,
+    platforms: ['airbnb', 'booking'],
     boundingBox: bbox,
     circle:
       options.circle !== undefined
@@ -165,86 +155,10 @@ function buildSearchRequest(
     minBeds: state.minBeds ?? undefined,
     propertyType: state.propertyType ?? undefined,
     exhaustive: true,
-    ...(state.platform === 'airbnb' ? state.airbnbFilters : {}),
-    ...(state.platform === 'booking' ? state.bookingFilters : {}),
   };
 }
 
 export const useSearchStore = create<SearchStore>((set, get) => {
-  const pollJob = async (jobId: string): Promise<void> => {
-    try {
-      const res = await fetch(`/api/search/${jobId}`, { cache: 'no-store' });
-
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to load job status');
-      }
-
-      const data: SearchJobResponse = await res.json();
-
-      if (data.job.status === 'completed') {
-        clearJobPolling();
-        set({
-          activeJobId: null,
-          completedJobId: data.job.id,
-          jobStatus: data.job.status,
-          jobProgress: 1,
-          jobPagesScanned: data.job.pagesScanned,
-          jobResultCount: data.job.totalResults,
-          isLoading: false,
-          searchError: null,
-          results: data.results,
-          lastSearchMs: data.job.durationMs,
-        });
-        return;
-      }
-
-      if (data.job.status === 'failed' || data.job.status === 'cancelled') {
-        clearJobPolling();
-        set({
-          activeJobId: null,
-          completedJobId: null,
-          jobStatus: data.job.status,
-          jobProgress: 0,
-          jobPagesScanned: data.job.pagesScanned,
-          jobResultCount: data.job.totalResults,
-          isLoading: false,
-          searchError: data.job.errorMessage || 'Full search failed',
-        });
-        return;
-      }
-
-      set({
-        activeJobId: data.job.id,
-        completedJobId: null,
-        jobStatus: data.job.status,
-        jobProgress: data.job.progress,
-        jobPagesScanned: data.job.pagesScanned,
-        jobResultCount: data.job.totalResults,
-        isLoading: false,
-        searchError: null,
-      });
-
-      clearJobPolling();
-      currentJobPollTimeout = setTimeout(() => {
-        void pollJob(jobId);
-      }, JOB_POLL_INTERVAL_MS);
-    } catch (err: unknown) {
-      clearJobPolling();
-      set({
-        activeJobId: null,
-        completedJobId: null,
-        jobStatus: 'failed',
-        jobProgress: 0,
-        jobPagesScanned: 0,
-        jobResultCount: 0,
-        isLoading: false,
-        searchError:
-          err instanceof Error ? err.message : 'Failed to poll full search job',
-      });
-    }
-  };
-
   return {
     platform: 'airbnb',
     locationQuery: null,
@@ -357,8 +271,6 @@ export const useSearchStore = create<SearchStore>((set, get) => {
         currentAbortController.abort();
         currentAbortController = null;
       }
-
-      clearJobPolling();
 
       set({
         hasInitializedSearch: true,
@@ -482,7 +394,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
         (state.fullSearchMode === 'window' && state.zoom < MIN_SEARCH_ZOOM) ||
         state.activeJobId
       ) {
-        return;
+        return null;
       }
 
       if (currentAbortController) {
@@ -490,7 +402,6 @@ export const useSearchStore = create<SearchStore>((set, get) => {
         currentAbortController = null;
       }
 
-      clearJobPolling();
       set({
         isLoading: false,
         searchError: null,
@@ -503,9 +414,16 @@ export const useSearchStore = create<SearchStore>((set, get) => {
       });
 
       try {
-        const body = buildSearchRequest(state, bbox, { circle });
+        const body: CreateReviewJobRequest = {
+          ...buildSearchRequest(state, bbox, { circle }),
+          mapBounds: state.mapBounds ?? undefined,
+          mapCenter: state.mapCenter ?? undefined,
+          mapZoom: state.zoom,
+          searchAreaMode: state.fullSearchMode,
+          poi: state.poi ?? undefined,
+        };
 
-        const res = await fetch('/api/search', {
+        const res = await fetch('/api/jobs', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -519,10 +437,10 @@ export const useSearchStore = create<SearchStore>((set, get) => {
             jobStatus: 'failed',
             searchError: data.error || 'Failed to start full search',
           });
-          return;
+          return null;
         }
 
-        const data: StartSearchResponse = await res.json();
+        const data: CreateReviewJobResponse = await res.json();
         set({
           activeJobId: data.jobId,
           completedJobId: null,
@@ -533,10 +451,8 @@ export const useSearchStore = create<SearchStore>((set, get) => {
           isLoading: false,
           searchError: null,
         });
-
-        void pollJob(data.jobId);
+        return data.jobId;
       } catch (err: unknown) {
-        clearJobPolling();
         set({
           activeJobId: null,
           completedJobId: null,
@@ -550,6 +466,7 @@ export const useSearchStore = create<SearchStore>((set, get) => {
               ? err.message
               : 'Failed to start full search',
         });
+        return null;
       }
     },
   };

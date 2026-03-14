@@ -12,7 +12,6 @@ export default function ResultsSidebar() {
   const isLoading = useSearchStore((s) => s.isLoading);
   const searchError = useSearchStore((s) => s.searchError);
   const lastSearchMs = useSearchStore((s) => s.lastSearchMs);
-  const platform = useSearchStore((s) => s.platform);
   const zoom = useSearchStore((s) => s.zoom);
   const activeJobId = useSearchStore((s) => s.activeJobId);
   const completedJobId = useSearchStore((s) => s.completedJobId);
@@ -154,13 +153,11 @@ export default function ResultsSidebar() {
           ))
         ) : !isLoading && !searchError ? (
           <div className="flex flex-col items-center justify-center py-16 text-center">
-            <div className="mb-3 text-3xl">
-              {platform === 'airbnb' ? '🏠' : '🏨'}
-            </div>
+            <div className="mb-3 text-3xl">🗺️</div>
             <p className="max-w-[18rem] text-sm leading-6 text-stone-500">
               {zoom < 12
-                ? 'Zoom in to search for listings'
-                : 'No results in this area'}
+                ? 'Zoom in to search across Airbnb and Booking'
+                : 'No results from Airbnb or Booking in this area'}
             </p>
           </div>
         ) : null}

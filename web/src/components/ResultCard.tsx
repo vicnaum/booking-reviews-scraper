@@ -5,20 +5,33 @@ import type { SearchResult } from '@/types';
 import { getPriceDisplayInfo, formatRating } from '@/lib/format';
 import { buildListingUrl } from '@/lib/listingLinks';
 import { useSearchStore } from '@/hooks/useSearchStore';
+import PlatformBadge from './PlatformBadge';
 
 interface ResultCardProps {
   result: SearchResult;
   isSelected: boolean;
   onClick: () => void;
+  context?: {
+    priceDisplay?: 'total' | 'perNight';
+    checkin?: string | null;
+    checkout?: string | null;
+    adults?: number;
+    currency?: string;
+  };
 }
 
 const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
-  function ResultCard({ result, isSelected, onClick }, ref) {
-    const priceDisplay = useSearchStore((s) => s.priceDisplay);
-    const checkin = useSearchStore((s) => s.checkin);
-    const checkout = useSearchStore((s) => s.checkout);
-    const adults = useSearchStore((s) => s.adults);
-    const currency = useSearchStore((s) => s.currency);
+  function ResultCard({ result, isSelected, onClick, context }, ref) {
+    const storePriceDisplay = useSearchStore((s) => s.priceDisplay);
+    const storeCheckin = useSearchStore((s) => s.checkin);
+    const storeCheckout = useSearchStore((s) => s.checkout);
+    const storeAdults = useSearchStore((s) => s.adults);
+    const storeCurrency = useSearchStore((s) => s.currency);
+    const priceDisplay = context?.priceDisplay ?? storePriceDisplay;
+    const checkin = context?.checkin ?? storeCheckin;
+    const checkout = context?.checkout ?? storeCheckout;
+    const adults = context?.adults ?? storeAdults;
+    const currency = context?.currency ?? storeCurrency;
     const hoverBorder =
       result.platform === 'airbnb'
         ? 'hover:border-red-500/50'
@@ -63,9 +76,14 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
 
           <div className="min-w-0 flex-1">
             <div className="flex items-start justify-between gap-2">
-              <h3 className="min-w-0 truncate text-sm font-semibold text-stone-100">
-                {result.name}
-              </h3>
+              <div className="min-w-0">
+                <div className="mb-1.5">
+                  <PlatformBadge platform={result.platform} />
+                </div>
+                <h3 className="min-w-0 truncate text-sm font-semibold text-stone-100">
+                  {result.name}
+                </h3>
+              </div>
               <a
                 href={listingUrl}
                 target="_blank"

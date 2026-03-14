@@ -22,6 +22,13 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  if (!body.platform) {
+    return NextResponse.json(
+      { error: 'Legacy /api/search requires a single platform' },
+      { status: 400 },
+    );
+  }
+
   const job = await prisma.searchJob.create({
     data: {
       status: 'pending',

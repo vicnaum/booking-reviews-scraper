@@ -78,7 +78,8 @@ export interface GeocodeResult {
 }
 
 export interface QuickSearchRequest {
-  platform: Platform;
+  platform?: Platform;
+  platforms?: Platform[];
   boundingBox: BoundingBox;
   circle?: CircleFilter;
   location?: string;
@@ -105,10 +106,25 @@ export interface QuickSearchResponse {
   pagesScanned: number;
   durationMs: number;
   truncated: boolean;
+  warnings?: string[];
 }
 
 export interface FullSearchRequest extends QuickSearchRequest {
   exhaustive?: boolean;
+}
+
+export interface CreateReviewJobRequest extends FullSearchRequest {
+  mapBounds?: BoundingBox;
+  mapCenter?: MapPoint;
+  mapZoom?: number;
+  searchAreaMode?: 'window' | 'rectangle' | 'circle';
+  poi?: MapPoint;
+  prompt?: string;
+}
+
+export interface CreateReviewJobResponse {
+  jobId: string;
+  status: SearchJobStatus;
 }
 
 export interface StartSearchResponse {
@@ -137,4 +153,50 @@ export interface SearchJobState {
 export interface SearchJobResponse {
   job: SearchJobState;
   results: SearchResult[];
+}
+
+export interface ReviewJobEvent {
+  id: string;
+  phase: string;
+  level: string;
+  message: string;
+  payload: Record<string, unknown> | null;
+  listingId: string | null;
+  listingPlatform: Platform | null;
+  createdAt: string;
+}
+
+export interface ReviewJobState {
+  id: string;
+  ownerKey: string | null;
+  status: SearchJobStatus;
+  currentPhase: string;
+  location: string | null;
+  prompt: string | null;
+  boundingBox: BoundingBox | null;
+  circle: CircleFilter | null;
+  poi: MapPoint | null;
+  mapBounds: BoundingBox | null;
+  mapCenter: MapPoint | null;
+  mapZoom: number | null;
+  searchAreaMode: 'window' | 'rectangle' | 'circle';
+  checkin: string | null;
+  checkout: string | null;
+  adults: number;
+  currency: string;
+  filters: Record<string, unknown> | null;
+  totalResults: number;
+  pagesScanned: number;
+  progress: number;
+  errorMessage: string | null;
+  durationMs: number | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+}
+
+export interface ReviewJobResponse {
+  job: ReviewJobState;
+  results: SearchResult[];
+  events: ReviewJobEvent[];
 }
