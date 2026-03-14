@@ -200,3 +200,14 @@ export interface ReviewJobResponse {
   results: SearchResult[];
   events: ReviewJobEvent[];
 }
+
+export interface ReviewJobListItem {
+  id: string;
+  location: string | null;
+  status: SearchJobStatus;
+  currentPhase: string;
+  totalResults: number;
+  searchAreaMode: 'window' | 'rectangle' | 'circle';
+  createdAt: string;
+  completedAt: string | null;
+}

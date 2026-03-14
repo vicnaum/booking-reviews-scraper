@@ -4,6 +4,7 @@ import dynamic from 'next/dynamic';
 import SearchBar from '@/components/SearchBar';
 import LandingFilters from '@/components/LandingFilters';
 import FilterPanel from '@/components/FilterPanel';
+import RecentJobs from '@/components/RecentJobs';
 import ResultsSidebar from '@/components/ResultsSidebar';
 import { useSearchStore } from '@/hooks/useSearchStore';
 
@@ -49,6 +50,8 @@ export default function HomePage() {
               Enter a city like London, Lisbon, or Rome, then open the map with
               your filters already in place.
             </p>
+
+            <RecentJobs />
           </div>
         </div>
       </main>
