@@ -5,6 +5,10 @@
 // Fallback: SSR HTML parsing (18-20 results/page, no auth)
 
 import { makeRequest, getApiKey, BROWSER_HEADERS, API_HEADERS } from './scraper.js';
+import {
+  parseAirbnbPricingQuote,
+  parseAirbnbStructuredDisplayPrice,
+} from './pricing.js';
 import { createSearchGrid, subdivideBbox, createPriceRanges } from '../search/geo.js';
 import { filterSearchResults } from '../search/filters.js';
 import type {
@@ -109,26 +113,7 @@ function parseExploreListing(item: any, params: AirbnbSearchParams): SearchResul
   if (!id) return null;
 
   const pricingQuote = item?.pricing_quote;
-
-  let price: SearchResult['price'] = null;
-  let totalPrice: SearchResult['totalPrice'] = null;
-
-  if (pricingQuote) {
-    const rateAmount = pricingQuote?.price?.rate_amount
-      ?? pricingQuote?.rate?.amount
-      ?? pricingQuote?.price_string?.match?.(/[\d,]+/)?.[0]?.replace(',', '');
-    if (rateAmount) {
-      price = {
-        amount: Number(rateAmount),
-        currency: params.currency,
-        period: 'night' as const,
-      };
-    }
-    const totalAmount = pricingQuote?.price?.total?.amount ?? pricingQuote?.price?.total_price;
-    if (totalAmount) {
-      totalPrice = { amount: Number(totalAmount), currency: params.currency };
-    }
-  }
+  const pricing = parseAirbnbPricingQuote(pricingQuote, params.currency);
 
   return {
     id,
@@ -137,8 +122,7 @@ function parseExploreListing(item: any, params: AirbnbSearchParams): SearchResul
     url: `${AIRBNB_BASE_URL}/rooms/${id}`,
     rating: listing.star_rating ?? listing.avg_rating ?? null,
     reviewCount: listing.reviews_count ?? 0,
-    price,
-    totalPrice,
+    pricing,
     coordinates: listing.lat != null && listing.lng != null
       ? { lat: listing.lat, lng: listing.lng }
       : null,
@@ -353,16 +337,10 @@ async function searchAirbnbSSR(
         seenIds.add(id);
 
         const coord = listing.location?.coordinate || listing.coordinate;
-        const priceDisplay = item?.structuredDisplayPrice?.primaryLine;
-
-        let price: SearchResult['price'] = null;
-        if (priceDisplay?.discountedPrice || priceDisplay?.originalPrice) {
-          const priceStr = (priceDisplay.discountedPrice || priceDisplay.originalPrice) as string;
-          const amount = parseFloat(priceStr.replace(/[^0-9.]/g, ''));
-          if (!isNaN(amount)) {
-            price = { amount, currency: params.currency, period: 'night' };
-          }
-        }
+        const pricing = parseAirbnbStructuredDisplayPrice(
+          item?.structuredDisplayPrice,
+          params.currency,
+        );
 
         // Check for superhost badge
         const badges = item?.badges || [];
@@ -403,8 +381,7 @@ async function searchAirbnbSSR(
           url: `${AIRBNB_BASE_URL}/rooms/${id}`,
           rating,
           reviewCount,
-          price,
-          totalPrice: null,
+          pricing,
           coordinates: coord ? { lat: coord.latitude, lng: coord.longitude } : null,
           propertyType: listing?.roomType ?? null,
           photoUrl: item?.contextualPictures?.[0]?.picture || null,

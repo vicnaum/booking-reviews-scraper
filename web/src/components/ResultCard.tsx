@@ -18,6 +18,7 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
     const checkin = useSearchStore((s) => s.checkin);
     const checkout = useSearchStore((s) => s.checkout);
     const adults = useSearchStore((s) => s.adults);
+    const currency = useSearchStore((s) => s.currency);
     const hoverBorder =
       result.platform === 'airbnb'
         ? 'hover:border-red-500/50'
@@ -33,6 +34,7 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
       checkin,
       checkout,
       adults,
+      currency,
     });
 
     return (

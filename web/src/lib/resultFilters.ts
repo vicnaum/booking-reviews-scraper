@@ -4,6 +4,7 @@ import type {
   QuickSearchRequest,
   SearchResult,
 } from '@/types';
+import { resolveComparablePrice } from './pricing';
 
 type ResultFilterRequest = Pick<
   QuickSearchRequest,
@@ -39,57 +40,13 @@ function haversineDistanceMeters(
   return 2 * earthRadiusMeters * Math.asin(Math.sqrt(a));
 }
 
-function getNightCount(
-  checkin?: string,
-  checkout?: string,
-): number | null {
-  if (!checkin || !checkout) {
-    return null;
-  }
-
-  const start = new Date(`${checkin}T00:00:00Z`);
-  const end = new Date(`${checkout}T00:00:00Z`);
-  const diffMs = end.getTime() - start.getTime();
-
-  if (!Number.isFinite(diffMs) || diffMs <= 0) {
-    return null;
-  }
-
-  const nights = Math.round(diffMs / 86400000);
-  return nights > 0 ? nights : null;
-}
-
 function getComparablePriceAmount(
   result: SearchResult,
   mode: PriceDisplayMode,
   checkin?: string,
   checkout?: string,
 ): number | null {
-  if (mode === 'total') {
-    if (result.totalPrice) {
-      return result.totalPrice.amount;
-    }
-
-    if (result.price) {
-      // Airbnb often omits an explicit total. In those cases, use the returned
-      // amount as the best comparable shown price instead of assuming it is nightly.
-      return result.price.amount;
-    }
-
-    return null;
-  }
-
-  const nights = getNightCount(checkin, checkout);
-
-  if (result.price) {
-    return result.price.amount;
-  }
-
-  if (result.totalPrice) {
-    return nights ? result.totalPrice.amount / nights : result.totalPrice.amount;
-  }
-
-  return null;
+  return resolveComparablePrice(result, mode, { checkin, checkout })?.amount ?? null;
 }
 
 function matchesCircleFilter(

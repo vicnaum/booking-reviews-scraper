@@ -4,6 +4,7 @@ interface ListingLinkOptions {
   checkin?: string | null;
   checkout?: string | null;
   adults?: number | null;
+  currency?: string | null;
 }
 
 export function buildListingUrl(
@@ -36,6 +37,9 @@ export function buildListingUrl(
     if (options.adults && options.adults > 0) {
       url.searchParams.set('group_adults', String(options.adults));
       url.searchParams.set('no_rooms', '1');
+    }
+    if (options.currency) {
+      url.searchParams.set('selected_currency', options.currency);
     }
 
     return url.toString();

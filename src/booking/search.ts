@@ -6,6 +6,10 @@
 
 import fetch from 'node-fetch';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import {
+  parseBookingCardPricing,
+  parseBookingGraphQLPricing,
+} from './pricing.js';
 import { createSearchGrid, subdivideBbox } from '../search/geo.js';
 import { filterSearchResults } from '../search/filters.js';
 import type {
@@ -53,6 +57,20 @@ function getMatchingUnitConfigurations(result: any): any[] {
   }
 
   return configurations;
+}
+
+function getStayNights(params: BookingSearchParams): number | null {
+  if (!params.checkin || !params.checkout) {
+    return null;
+  }
+
+  const diffMs =
+    new Date(params.checkout).getTime() - new Date(params.checkin).getTime();
+  if (!Number.isFinite(diffMs) || diffMs <= 0) {
+    return null;
+  }
+
+  return Math.max(1, Math.round(diffMs / 86400000));
 }
 
 // --- Session management ---
@@ -270,6 +288,7 @@ function buildSearchUrl(params: BookingSearchParams): string {
   if (params.checkout) url.searchParams.set('checkout', params.checkout);
   url.searchParams.set('group_adults', String(params.adults));
   url.searchParams.set('no_rooms', '1');
+  url.searchParams.set('selected_currency', params.currency);
 
   // Build nflt filter string
   const filters = buildFilterString(params);
@@ -635,24 +654,12 @@ function parseSearchResult(r: any, params: BookingSearchParams): SearchResult | 
   const pageName = r?.basicPropertyData?.pageName || '';
   const countryCode = (r?.basicPropertyData?.location?.countryCode || '').toLowerCase();
 
-  let price: SearchResult['price'] = null;
-  let totalPrice: SearchResult['totalPrice'] = null;
-
   const priceInfo = r?.priceDisplayInfoIrene?.displayPrice;
-  if (priceInfo) {
-    const perStay = priceInfo?.amountPerStay?.amountRounded;
-    if (perStay) {
-      const amount = parseFloat(String(perStay).replace(/[^0-9.]/g, ''));
-      if (!isNaN(amount)) {
-        // Booking shows per-stay, approximate per-night
-        const nights = params.checkin && params.checkout
-          ? Math.max(1, Math.round((new Date(params.checkout).getTime() - new Date(params.checkin).getTime()) / 86400000))
-          : 1;
-        price = { amount: Math.round(amount / nights), currency: params.currency, period: 'night' };
-        totalPrice = { amount, currency: params.currency };
-      }
-    }
-  }
+  const pricing = parseBookingGraphQLPricing(
+    priceInfo,
+    params.currency,
+    getStayNights(params),
+  );
 
   const reviewScore = r?.basicPropertyData?.reviewScore;
   const location = r?.basicPropertyData?.location;
@@ -674,8 +681,7 @@ function parseSearchResult(r: any, params: BookingSearchParams): SearchResult | 
     url: `https://www.booking.com/hotel/${countryCode}/${pageName}.html`,
     rating: reviewScore?.score ?? null,
     reviewCount: reviewScore?.reviewCount ?? 0,
-    price,
-    totalPrice,
+    pricing,
     coordinates: location?.latitude != null && location?.longitude != null
       ? { lat: location.latitude, lng: location.longitude }
       : null,
@@ -826,12 +832,7 @@ async function searchBookingSSR(
         if (countMatch) reviewCount = parseInt(countMatch[1].replace(',', ''));
 
         // Parse price
-        let price: SearchResult['price'] = null;
-        const priceMatch = card.price.match(/([\d,]+)/);
-        if (priceMatch) {
-          const amount = parseInt(priceMatch[1].replace(',', ''));
-          price = { amount, currency: params.currency, period: 'night' };
-        }
+        const pricing = parseBookingCardPricing(card.price, params.currency);
 
         pageResults.push({
           id: hotelId,
@@ -840,8 +841,7 @@ async function searchBookingSSR(
           url: card.link.startsWith('http') ? card.link : `https://www.booking.com${card.link}`,
           rating,
           reviewCount,
-          price,
-          totalPrice: null,
+          pricing,
           coordinates: null,
           propertyType: null,
           photoUrl: null,

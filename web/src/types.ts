@@ -22,6 +22,26 @@ export type PriceDisplayMode = 'perNight' | 'total';
 
 export type Platform = 'airbnb' | 'booking';
 
+export type SearchPriceSource = 'upstream' | 'derived' | 'displayed';
+
+export type SearchPriceBasis = 'night' | 'stay' | 'unknown';
+
+export interface SearchPriceValue {
+  amount: number;
+  currency: string;
+  source: SearchPriceSource;
+}
+
+export interface SearchDisplayPriceValue extends SearchPriceValue {
+  basis: SearchPriceBasis;
+}
+
+export interface SearchPricing {
+  nightly: SearchPriceValue | null;
+  total: SearchPriceValue | null;
+  display: SearchDisplayPriceValue | null;
+}
+
 export type SearchJobStatus =
   | 'pending'
   | 'running'
@@ -36,8 +56,7 @@ export interface SearchResult {
   url: string;
   rating: number | null;
   reviewCount: number;
-  price: { amount: number; currency: string; period: 'night' } | null;
-  totalPrice: { amount: number; currency: string } | null;
+  pricing: SearchPricing | null;
   coordinates: { lat: number; lng: number } | null;
   propertyType: string | null;
   photoUrl: string | null;

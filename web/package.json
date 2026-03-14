@@ -9,6 +9,7 @@
     "start": "next start",
     "worker": "dotenv -e .env.local -- tsx src/lib/search-worker.ts",
     "worker:dev": "dotenv -e .env.local -- tsx watch src/lib/search-worker.ts",
+    "test:pricing": "tsx --test src/lib/pricing.test.ts",
     "lint": "next lint",
     "db:generate": "dotenv -e .env.local -- prisma generate",
     "db:push": "dotenv -e .env.local -- prisma db push",
