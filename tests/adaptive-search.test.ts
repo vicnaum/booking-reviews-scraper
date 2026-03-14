@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   countNewChildIds,
   hasMeaningfulChildGain,
+  runAdaptiveQuadrantSearch,
   shouldRecurseIntoChildren,
   shouldProbeChildren,
   type AdaptiveSubdivisionConfig,
@@ -102,6 +103,36 @@ test('shouldRecurseIntoChildren honors forced depth before gain checks', () => {
       depth: 0,
       parentCount: 30,
       newIdCount: 0,
+      config,
+    }),
+    true,
+  );
+
+  assert.equal(
+    shouldRecurseIntoChildren({
+      depth: 1,
+      parentCount: 30,
+      newIdCount: 0,
+      config,
+    }),
+    false,
+  );
+
+  assert.equal(
+    shouldRecurseIntoChildren({
+      depth: 0,
+      parentCount: 30,
+      newIdCount: 0,
+      config: { ...config, forceProbeDepth: 2 },
+    }),
+    true,
+  );
+
+  assert.equal(
+    shouldRecurseIntoChildren({
+      depth: 1,
+      parentCount: 30,
+      newIdCount: 0,
       config: { ...config, forceProbeDepth: 2 },
     }),
     true,
@@ -116,4 +147,30 @@ test('shouldRecurseIntoChildren honors forced depth before gain checks', () => {
     }),
     false,
   );
+});
+
+test('runAdaptiveQuadrantSearch keeps subdividing until forced depth even without uplift', async () => {
+  const visitedDepths: number[] = [];
+
+  const result = await runAdaptiveQuadrantSearch({
+    root: { neLat: 51.52, neLng: -0.12, swLat: 51.50, swLng: -0.16 },
+    forceSubdivisionDepth: 2,
+    maxSubdivisionDepth: 3,
+    minSubdivisionResults: 10,
+    minNewUniqueResults: 2,
+    minCellSideMeters: 900,
+    visitCell: async (_cell, context) => {
+      visitedDepths.push(context.depth);
+      if (context.depth === 0) {
+        return { filteredResultCount: 12, newUniqueResultCount: 12 };
+      }
+      if (context.depth === 1) {
+        return { filteredResultCount: 12, newUniqueResultCount: 0 };
+      }
+      return { filteredResultCount: 1, newUniqueResultCount: 0 };
+    },
+  });
+
+  assert.equal(result.visitedCells, 21);
+  assert.equal(visitedDepths.filter((depth) => depth === 2).length, 16);
 });
