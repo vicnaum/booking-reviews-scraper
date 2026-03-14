@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import {
   Circle,
   MapContainer,
@@ -81,29 +81,62 @@ function getCenterFromBbox(bbox: BoundingBox): [number, number] {
   return [(bbox.neLat + bbox.swLat) / 2, (bbox.neLng + bbox.swLng) / 2];
 }
 
+function formatDistance(meters: number): string {
+  if (meters < 1000) {
+    return `${Math.round(meters)} m`;
+  }
+
+  return `${(meters / 1000).toFixed(1)} km`;
+}
+
 function JobViewport({
   mapBounds,
   boundingBox,
+  mapCenter,
+  mapZoom,
   selectedPoint,
 }: {
   mapBounds: BoundingBox | null;
   boundingBox: BoundingBox | null;
+  mapCenter: MapPoint | null;
+  mapZoom: number | null;
   selectedPoint: MapPoint | null;
 }) {
   const map = useMap();
+  const hasRestoredViewportRef = useRef(false);
+  const lastSelectedPointKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (selectedPoint) {
-      map.panTo([selectedPoint.lat, selectedPoint.lng], { animate: true });
+      const pointKey = `${selectedPoint.lat}:${selectedPoint.lng}`;
+      if (lastSelectedPointKeyRef.current !== pointKey) {
+        lastSelectedPointKeyRef.current = pointKey;
+        map.panTo([selectedPoint.lat, selectedPoint.lng], { animate: true });
+      }
+      return;
+    }
+
+    lastSelectedPointKeyRef.current = null;
+
+    if (hasRestoredViewportRef.current) {
+      return;
+    }
+
+    hasRestoredViewportRef.current = true;
+
+    if (mapCenter && mapZoom != null) {
+      map.setView([mapCenter.lat, mapCenter.lng], mapZoom, {
+        animate: false,
+      });
       return;
     }
 
     const target = mapBounds ?? boundingBox;
     if (target) {
       const bounds: LatLngBoundsExpression = toRectangleBounds(target);
-      map.fitBounds(bounds, { padding: [24, 24] });
+      map.fitBounds(bounds, { padding: [24, 24], animate: false });
     }
-  }, [boundingBox, map, mapBounds, selectedPoint]);
+  }, [boundingBox, map, mapBounds, mapCenter, mapZoom, selectedPoint]);
 
   return null;
 }
@@ -164,6 +197,8 @@ export default function JobMap({
       <JobViewport
         mapBounds={mapBounds}
         boundingBox={boundingBox}
+        mapCenter={mapCenter}
+        mapZoom={mapZoom}
         selectedPoint={selectedResult?.coordinates ?? null}
       />
 
@@ -225,6 +260,11 @@ export default function JobMap({
                   <div style={{ fontSize: 12, color: '#666' }}>
                     {formatRating(result)}
                     {result.reviewCount > 0 && ` (${result.reviewCount})`}
+                  </div>
+                )}
+                {poi && result.poiDistanceMeters != null && (
+                  <div style={{ fontSize: 12, color: '#888' }}>
+                    {formatDistance(result.poiDistanceMeters)} from POI
                   </div>
                 )}
               </div>

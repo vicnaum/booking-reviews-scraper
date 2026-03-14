@@ -127,6 +127,13 @@ type SearchRequestState = Pick<
 
 let currentAbortController: AbortController | null = null;
 
+function getCenterFromBbox(bbox: BoundingBox): MapPoint {
+  return {
+    lat: (bbox.neLat + bbox.swLat) / 2,
+    lng: (bbox.neLng + bbox.swLng) / 2,
+  };
+}
+
 function buildSearchRequest(
   state: SearchRequestState,
   bbox: BoundingBox,
@@ -387,6 +394,11 @@ export const useSearchStore = create<SearchStore>((set, get) => {
             : circleBbox;
       const circle =
         state.fullSearchMode === 'circle' ? state.circleFilter : null;
+      const viewportBbox = state.viewportBbox ?? bbox;
+      const viewportCenter =
+        viewportBbox != null
+          ? getCenterFromBbox(viewportBbox)
+          : state.mapCenter;
 
       if (
         !state.hasInitializedSearch ||
@@ -416,8 +428,8 @@ export const useSearchStore = create<SearchStore>((set, get) => {
       try {
         const body: CreateReviewJobRequest = {
           ...buildSearchRequest(state, bbox, { circle }),
-          mapBounds: state.mapBounds ?? undefined,
-          mapCenter: state.mapCenter ?? undefined,
+          mapBounds: viewportBbox ?? undefined,
+          mapCenter: viewportCenter ?? undefined,
           mapZoom: state.zoom,
           searchAreaMode: state.fullSearchMode,
           poi: state.poi ?? undefined,
