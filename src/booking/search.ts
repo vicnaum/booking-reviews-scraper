@@ -10,14 +10,19 @@ import {
   parseBookingCardPricing,
   parseBookingGraphQLPricing,
 } from './pricing.js';
-import { subdivideBbox } from '../search/geo.js';
+import {
+  countNewChildIds,
+  hasMeaningfulChildGain,
+  shouldProbeChildren,
+  type AdaptiveSubdivisionConfig,
+} from '../search/adaptive.js';
+import { bboxIntersectsCircle, subdivideBbox } from '../search/geo.js';
 import { filterSearchResults } from '../search/filters.js';
 import type {
   BookingSearchParams,
   SearchResult,
   SearchPage,
   BoundingBox,
-  CircleFilter,
   ProgressCallback,
 } from '../search/types.js';
 
@@ -25,10 +30,14 @@ const FULL_SEARCH_HASH = '8cea877c71f083895aa316412e85ffe818b503bb5331babba34a16
 const MAP_MARKERS_HASH = 'f6d2e861c5149589bf368582c31f74d58399004da319fac65f2c88313cf15c16';
 const PAGE_DELAY_MS = 300;
 const CELL_DELAY_MS = 500;
-const FORCE_SUBDIVISION_DEPTH = 1;
-const MAX_SUBDIVISION_DEPTH = 2;
-const MIN_SUBDIVISION_RESULTS = 12;
-const MIN_CELL_SIDE_METERS = 900;
+const BOOKING_SUBDIVISION_CONFIG: AdaptiveSubdivisionConfig = {
+  forceProbeDepth: 1,
+  maxDepth: 3,
+  minCellSideMeters: 900,
+  minResultsToProbe: 10,
+  minNewIds: 2,
+  minGainRatio: 0.05,
+};
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -76,50 +85,6 @@ function getStayNights(params: BookingSearchParams): number | null {
   }
 
   return Math.max(1, Math.round(diffMs / 86400000));
-}
-
-function haversineDistanceMeters(
-  aLat: number,
-  aLng: number,
-  bLat: number,
-  bLng: number,
-): number {
-  const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
-  const earthRadiusMeters = 6371000;
-  const dLat = toRadians(bLat - aLat);
-  const dLng = toRadians(bLng - aLng);
-  const lat1 = toRadians(aLat);
-  const lat2 = toRadians(bLat);
-  const sinDLat = Math.sin(dLat / 2);
-  const sinDLng = Math.sin(dLng / 2);
-
-  const a =
-    sinDLat * sinDLat +
-    Math.cos(lat1) * Math.cos(lat2) * sinDLng * sinDLng;
-
-  return 2 * earthRadiusMeters * Math.asin(Math.sqrt(a));
-}
-
-function bboxHeightMeters(bbox: BoundingBox): number {
-  return haversineDistanceMeters(bbox.swLat, bbox.swLng, bbox.neLat, bbox.swLng);
-}
-
-function bboxWidthMeters(bbox: BoundingBox): number {
-  return haversineDistanceMeters(bbox.swLat, bbox.swLng, bbox.swLat, bbox.neLng);
-}
-
-function bboxIntersectsCircle(
-  bbox: BoundingBox,
-  circle: CircleFilter,
-): boolean {
-  const nearestLat = Math.min(Math.max(circle.center.lat, bbox.swLat), bbox.neLat);
-  const nearestLng = Math.min(Math.max(circle.center.lng, bbox.swLng), bbox.neLng);
-  return haversineDistanceMeters(
-    circle.center.lat,
-    circle.center.lng,
-    nearestLat,
-    nearestLng,
-  ) <= circle.radiusMeters;
 }
 
 // --- Session management ---
@@ -1062,34 +1027,6 @@ export async function searchBooking(
     return { cellResults, totalResults };
   };
 
-  const shouldSubdivideCell = (
-    cell: BoundingBox,
-    depth: number,
-    resultCount: number,
-  ): boolean => {
-    if (depth >= MAX_SUBDIVISION_DEPTH) {
-      return false;
-    }
-
-    if (resultCount === 0) {
-      return false;
-    }
-
-    const maxSideMeters = Math.max(
-      bboxWidthMeters(cell),
-      bboxHeightMeters(cell),
-    );
-    if (maxSideMeters <= MIN_CELL_SIDE_METERS) {
-      return false;
-    }
-
-    if (depth < FORCE_SUBDIVISION_DEPTH) {
-      return true;
-    }
-
-    return resultCount >= MIN_SUBDIVISION_RESULTS;
-  };
-
   if (!params.exhaustive && !useBboxSearch) {
     // Quick mode: FullSearch with offset pagination (city-based)
     console.log(`🔍 Quick search via FullSearch (25/page, max ${params.maxResults || 'unlimited'} results)...`);
@@ -1209,30 +1146,79 @@ export async function searchBooking(
     console.log('🔍 Exhaustive search via MapMarkersDesktop + quadrant subdivision...');
 
     let visitedCells = 0;
-    const visitCell = async (cell: BoundingBox, depth: number): Promise<void> => {
+    const visitCell = async (
+      cell: BoundingBox,
+      depth: number,
+      seededResults?: SearchResult[],
+    ): Promise<void> => {
       visitedCells++;
       const label = `Cell ${visitedCells} (depth ${depth})`;
       console.log(`  📍 ${label}`);
 
       try {
-        const { cellResults, totalResults } = await searchMapMarkersCell(cell, label);
-        const split = shouldSubdivideCell(cell, depth, cellResults.length);
+        const { cellResults, totalResults } = seededResults
+          ? { cellResults: seededResults, totalResults: 0 }
+          : await searchMapMarkersCell(cell, label);
         console.log(
           `    ↳ ${cellResults.length} filtered / ${totalResults} reported results`,
         );
 
-        if (!split || (params.maxResults && allResults.length >= params.maxResults)) {
+        if (
+          !shouldProbeChildren({
+            bbox: cell,
+            depth,
+            resultCount: cellResults.length,
+            config: BOOKING_SUBDIVISION_CONFIG,
+          }) ||
+          (params.maxResults && allResults.length >= params.maxResults)
+        ) {
           return;
         }
 
         const childCells = subdivideBbox(cell).filter(
           (child) => !params.circle || bboxIntersectsCircle(child, params.circle),
         );
-        console.log(`    ↳ subdividing into ${childCells.length} exact quadrants`);
+        if (childCells.length === 0) {
+          return;
+        }
+
+        console.log(`    ↳ probing ${childCells.length} exact quadrants`);
+        const parentIds = new Set(cellResults.map((result) => result.id));
+        const childSearches: Array<{ cell: BoundingBox; results: SearchResult[] }> = [];
+        const childUnionIds = new Set<string>();
 
         for (const child of childCells) {
           await sleep(CELL_DELAY_MS);
-          await visitCell(child, depth + 1);
+          const childLabel = `${label} -> probe`;
+          const { cellResults: childResults } = await searchMapMarkersCell(
+            child,
+            childLabel,
+          );
+          childSearches.push({ cell: child, results: childResults });
+          for (const result of childResults) {
+            childUnionIds.add(result.id);
+          }
+          if (params.maxResults && allResults.length >= params.maxResults) {
+            break;
+          }
+        }
+
+        const newIdCount = countNewChildIds(parentIds, childUnionIds);
+        const gain = hasMeaningfulChildGain({
+          parentCount: parentIds.size,
+          newIdCount,
+          config: BOOKING_SUBDIVISION_CONFIG,
+        });
+        console.log(
+          `    ↳ child cells added ${newIdCount} new IDs beyond parent`,
+        );
+
+        if (!gain || (params.maxResults && allResults.length >= params.maxResults)) {
+          return;
+        }
+
+        for (const child of childSearches) {
+          await visitCell(child.cell, depth + 1, child.results);
           if (params.maxResults && allResults.length >= params.maxResults) {
             break;
           }
