@@ -42,6 +42,10 @@ import {
   toPhaseStatus,
   type AnalysisManifest,
 } from './review-job-analysis.js';
+import {
+  summarizeReviewJobSearchOutcome,
+  type ReviewJobSearchPlatformFailure,
+} from './reviewJobSearch.js';
 import { createSearchLogger } from './searchLog.js';
 import type {
   SearchResult,
@@ -299,6 +303,8 @@ async function runReviewJobSearch(reviewJobId: string) {
 
     const platforms: Array<'airbnb' | 'booking'> = ['airbnb', 'booking'];
     const allResults: SearchResult[] = [];
+    const warnings: ReviewJobSearchPlatformFailure[] = [];
+    const successfulPlatforms: Array<'airbnb' | 'booking'> = [];
 
     for (const platform of platforms) {
       await appendReviewJobEvent(reviewJobId, {
@@ -309,16 +315,37 @@ async function runReviewJobSearch(reviewJobId: string) {
       });
 
       let output;
-      if (platform === 'airbnb') {
-        const params = buildReviewJobPlatformParams(jobRecord, platform);
-        output = await searchAirbnb(params, () => persistProgress(platform));
-      } else {
-        const params = buildReviewJobPlatformParams(jobRecord, platform);
-        output = await searchBooking(params, () => persistProgress(platform));
+      try {
+        if (platform === 'airbnb') {
+          const params = buildReviewJobPlatformParams(jobRecord, platform);
+          output = await searchAirbnb(params, () => persistProgress(platform));
+        } else {
+          const params = buildReviewJobPlatformParams(jobRecord, platform);
+          output = await searchBooking(params, () => persistProgress(platform));
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Platform search failed';
+        warnings.push({ platform, message });
+        searchLogger.log('platform_failed', {
+          platform,
+          message,
+        });
+        await appendReviewJobEvent(reviewJobId, {
+          phase: 'search',
+          level: 'warning',
+          message: `${platform} search failed: ${message}`,
+          payload: {
+            platform,
+            message,
+          },
+        });
+        continue;
       }
 
       const filteredResults = filterResultsForRequest(output.results, requestFilters);
       allResults.push(...filteredResults);
+      successfulPlatforms.push(platform);
       searchLogger.log('platform_completed', {
         platform,
         fetchedResults: output.results.length,
@@ -338,6 +365,15 @@ async function runReviewJobSearch(reviewJobId: string) {
           pagesScanned: output.pagesScanned,
         },
       });
+    }
+
+    const searchSummary = summarizeReviewJobSearchOutcome({
+      successfulPlatforms,
+      warnings,
+    });
+
+    if (!searchSummary.canPersistResults) {
+      throw new Error(searchSummary.failureMessage ?? 'Review job search failed');
     }
 
     const rows = allResults.map((result) =>
@@ -378,18 +414,27 @@ async function runReviewJobSearch(reviewJobId: string) {
           progress: 1,
           completedAt,
           durationMs,
+          errorMessage:
+            warnings.length > 0
+              ? warnings.map((warning) => `${warning.platform}: ${warning.message}`).join('; ')
+              : null,
         },
       });
       await tx.reviewJobEvent.create({
         data: buildReviewJobEventData(reviewJobId, {
           phase: 'search',
-          level: 'info',
-          message: 'Combined full search completed',
+          level: searchSummary.completedEventLevel,
+          message: searchSummary.completedEventMessage,
           payload: {
             totalResults: rows.length,
             pagesScanned,
             durationMs,
-          },
+            successfulPlatforms,
+            warnings: warnings.map((warning) => ({
+              platform: warning.platform,
+              message: warning.message,
+            })),
+          } as Prisma.InputJsonValue,
         }),
       });
     });
@@ -397,6 +442,8 @@ async function runReviewJobSearch(reviewJobId: string) {
       totalResults: rows.length,
       pagesScanned,
       durationMs,
+      successfulPlatforms,
+      warnings: warnings.length > 0 ? warnings : null,
     });
 
     console.log(
