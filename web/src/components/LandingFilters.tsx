@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, type KeyboardEvent } from 'react';
 import { useSearchStore } from '@/hooks/useSearchStore';
+import { currencySymbol } from '@/lib/format';
 
 const fieldClassName =
   'h-12 w-full min-w-0 rounded-2xl border border-white/10 bg-white/[0.04] px-4 text-sm font-medium text-stone-100 outline-none transition placeholder:text-stone-500 focus:border-[#ff6b5f]/35 focus:bg-black/30';
@@ -52,6 +53,7 @@ export default function LandingFilters() {
     },
     [setFilter],
   );
+  const currencyPrefix = currencySymbol(currency);
 
   return (
     <div className="mt-6 w-full rounded-[28px] border border-white/10 bg-black/[0.24] p-5 shadow-[0_22px_60px_rgba(0,0,0,0.28)] backdrop-blur-xl">
@@ -161,7 +163,7 @@ export default function LandingFilters() {
               value={minBedrooms ?? ''}
               onChange={(e) => updateNumber('minBedrooms', e.target.value)}
               onKeyDown={onEnter}
-              placeholder="2"
+              placeholder="Any"
               className={fieldClassName}
             />
           </div>
@@ -174,7 +176,7 @@ export default function LandingFilters() {
               value={minBeds ?? ''}
               onChange={(e) => updateNumber('minBeds', e.target.value)}
               onKeyDown={onEnter}
-              placeholder="2"
+              placeholder="Any"
               className={fieldClassName}
             />
           </div>
@@ -182,22 +184,32 @@ export default function LandingFilters() {
           <div>
             <label className={labelClassName}>Price range ({currency})</label>
             <div className="grid grid-cols-2 gap-3">
-              <input
-                type="number"
-                value={priceMin ?? ''}
-                onChange={(e) => updateNumber('priceMin', e.target.value)}
-                onKeyDown={onEnter}
-                placeholder="Min"
-                className={fieldClassName}
-              />
-              <input
-                type="number"
-                value={priceMax ?? ''}
-                onChange={(e) => updateNumber('priceMax', e.target.value)}
-                onKeyDown={onEnter}
-                placeholder="Max"
-                className={fieldClassName}
-              />
+              <div className="relative">
+                <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-sm font-semibold text-stone-400">
+                  {currencyPrefix}
+                </span>
+                <input
+                  type="number"
+                  value={priceMin ?? ''}
+                  onChange={(e) => updateNumber('priceMin', e.target.value)}
+                  onKeyDown={onEnter}
+                  placeholder="Min"
+                  className={`${fieldClassName} pl-9`}
+                />
+              </div>
+              <div className="relative">
+                <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-sm font-semibold text-stone-400">
+                  {currencyPrefix}
+                </span>
+                <input
+                  type="number"
+                  value={priceMax ?? ''}
+                  onChange={(e) => updateNumber('priceMax', e.target.value)}
+                  onKeyDown={onEnter}
+                  placeholder="Max"
+                  className={`${fieldClassName} pl-9`}
+                />
+              </div>
             </div>
           </div>
         </div>

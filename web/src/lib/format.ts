@@ -12,7 +12,7 @@ export interface PriceDisplayInfo {
   secondary: string | null;
 }
 
-function currencySymbol(code: string): string {
+export function currencySymbol(code: string): string {
   if (code === 'USD') return '$';
   if (code === 'EUR') return '\u20AC';
   if (code === 'GBP') return '\u00A3';

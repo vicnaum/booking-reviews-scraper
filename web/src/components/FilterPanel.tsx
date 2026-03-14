@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, type KeyboardEvent } from 'react';
 import { useSearchStore } from '@/hooks/useSearchStore';
+import { currencySymbol } from '@/lib/format';
 import type { PriceDisplay } from '@/lib/format';
 
 const PROPERTY_TYPES = [
@@ -70,6 +71,7 @@ export default function FilterPanel() {
   const triggerQuickSearch = useSearchStore((s) => s.triggerQuickSearch);
   const startFullSearch = useSearchStore((s) => s.startFullSearch);
   const commitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const currencyPrefix = currencySymbol(currency);
 
   const hasRectangleArea = !!userBbox && !circleFilter;
   const hasCircleArea = !!circleFilter && !!userBbox;
@@ -225,7 +227,7 @@ export default function FilterPanel() {
                 }
                 onBlur={commitSearch}
                 onKeyDown={onEnter}
-                placeholder="0"
+                placeholder="Any"
                 className={`${fieldClassName} w-36`}
               />
             </div>
@@ -246,7 +248,7 @@ export default function FilterPanel() {
                 }
                 onBlur={commitSearch}
                 onKeyDown={onEnter}
-                placeholder="0"
+                placeholder="Any"
                 className={`${fieldClassName} w-32`}
               />
             </div>
@@ -254,41 +256,51 @@ export default function FilterPanel() {
               <label htmlFor="map-price-min" className={fieldLabelClassName}>
                 {priceDisplay === 'total' ? 'Min total' : 'Min nightly'}
               </label>
-              <input
-                id="map-price-min"
-                type="number"
-                value={priceMin ?? ''}
-                onChange={(e) =>
-                  updateDebounced(
-                    'priceMin',
-                    e.target.value ? Number(e.target.value) : null,
-                  )
-                }
-                onBlur={commitSearch}
-                onKeyDown={onEnter}
-                placeholder="0"
-                className={`${fieldClassName} w-[7.5rem]`}
-              />
+              <div className="relative">
+                <span className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-sm font-semibold text-stone-400">
+                  {currencyPrefix}
+                </span>
+                <input
+                  id="map-price-min"
+                  type="number"
+                  value={priceMin ?? ''}
+                  onChange={(e) =>
+                    updateDebounced(
+                      'priceMin',
+                      e.target.value ? Number(e.target.value) : null,
+                    )
+                  }
+                  onBlur={commitSearch}
+                  onKeyDown={onEnter}
+                  placeholder="Min"
+                  className={`${fieldClassName} w-[7.5rem] pl-8`}
+                />
+              </div>
             </div>
             <div className="flex flex-col gap-1">
               <label htmlFor="map-price-max" className={fieldLabelClassName}>
                 {priceDisplay === 'total' ? 'Max total' : 'Max nightly'}
               </label>
-              <input
-                id="map-price-max"
-                type="number"
-                value={priceMax ?? ''}
-                onChange={(e) =>
-                  updateDebounced(
-                    'priceMax',
-                    e.target.value ? Number(e.target.value) : null,
-                  )
-                }
-                onBlur={commitSearch}
-                onKeyDown={onEnter}
-                placeholder="Any"
-                className={`${fieldClassName} w-[7.5rem]`}
-              />
+              <div className="relative">
+                <span className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-sm font-semibold text-stone-400">
+                  {currencyPrefix}
+                </span>
+                <input
+                  id="map-price-max"
+                  type="number"
+                  value={priceMax ?? ''}
+                  onChange={(e) =>
+                    updateDebounced(
+                      'priceMax',
+                      e.target.value ? Number(e.target.value) : null,
+                    )
+                  }
+                  onBlur={commitSearch}
+                  onKeyDown={onEnter}
+                  placeholder="Max"
+                  className={`${fieldClassName} w-[7.5rem] pl-8`}
+                />
+              </div>
             </div>
           </div>
 
