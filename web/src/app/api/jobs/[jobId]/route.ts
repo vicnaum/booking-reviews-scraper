@@ -65,6 +65,25 @@ export async function PATCH(request: Request, { params }: Params) {
       )
     : null;
 
+  const existingJob = await prisma.reviewJob.findUnique({
+    where: { id: jobId },
+    select: {
+      id: true,
+      analysisStatus: true,
+    },
+  });
+
+  if (!existingJob) {
+    return NextResponse.json({ error: 'Review job not found' }, { status: 404 });
+  }
+
+  if (existingJob.analysisStatus === 'running') {
+    return NextResponse.json(
+      { error: 'Wait for the current analysis run to finish before changing brief or selection' },
+      { status: 409 },
+    );
+  }
+
   const job = await prisma.$transaction(async (tx) => {
     await tx.reviewJob.update({
       where: { id: jobId },

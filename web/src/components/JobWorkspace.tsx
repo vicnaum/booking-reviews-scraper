@@ -200,6 +200,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   );
 
   const selectedCount = selectedListings.length;
+  const analysisLocked = data.job.analysisStatus === 'running';
 
   const persistSelection = useCallback(
     async (
@@ -471,7 +472,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                   onClick={() => {
                     void savePrompt();
                   }}
-                  disabled={isSavingPrompt}
+                  disabled={isSavingPrompt || analysisLocked}
                   className="rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-2 text-xs font-semibold text-stone-200 transition hover:bg-white/[0.1] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {isSavingPrompt ? 'Saving…' : 'Save brief'}
@@ -488,7 +489,9 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                 <span className="text-xs text-stone-500">
                   {saveMessage
                     ?? (
-                      selectedCount > 0
+                      analysisLocked
+                        ? 'Brief and selection are locked while analysis is running.'
+                        : selectedCount > 0
                         ? `Only the ${selectedCount} selected listing${selectedCount === 1 ? '' : 's'} will be analyzed.`
                         : `No shortlist yet, so analysis will run on all ${sortedResults.length} listings.`
                     )}
@@ -536,7 +539,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                     onClick={() => {
                       void selectAllVisible();
                     }}
-                    disabled={isSavingSelection || selectedCount === sortedResults.length}
+                    disabled={analysisLocked || isSavingSelection || selectedCount === sortedResults.length}
                     className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] font-semibold text-stone-300 transition hover:bg-white/[0.08] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     Select all
@@ -547,7 +550,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                   onClick={() => {
                     void clearSelection();
                   }}
-                  disabled={isSavingSelection || selectedCount === 0}
+                  disabled={analysisLocked || isSavingSelection || selectedCount === 0}
                   className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] font-semibold text-stone-300 transition hover:bg-white/[0.08] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Clear
@@ -568,7 +571,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                     onToggle: () => {
                       void toggleListingSelection(result);
                     },
-                    disabled: isSavingSelection,
+                    disabled: analysisLocked || isSavingSelection,
                   }}
                   context={resultCardContext}
                 />

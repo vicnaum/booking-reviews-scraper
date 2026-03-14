@@ -844,7 +844,7 @@ async function runReviewJobAnalysis(reviewJobId: string) {
     await tx.reviewJobListingAnalysis.updateMany({
       where: {
         jobListingId: {
-          in: activeListings.map((listing) => listing.id),
+          in: jobRecord.listings.map((listing) => listing.id),
         },
       },
       data: {
