@@ -6,6 +6,7 @@ import { getPriceDisplayInfo, formatRating } from '@/lib/format';
 import { buildListingUrl } from '@/lib/listingLinks';
 import { useSearchStore } from '@/hooks/useSearchStore';
 import PlatformBadge from './PlatformBadge';
+import ListingThumbnail from './ListingThumbnail';
 
 interface ResultCardProps {
   result: SearchResult;
@@ -67,18 +68,7 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
         }`}
       >
         <div className="flex gap-3">
-          {result.photoUrl ? (
-            <img
-              src={result.photoUrl}
-              alt={result.name}
-              className="h-24 w-24 flex-shrink-0 rounded-2xl object-cover"
-              loading="lazy"
-            />
-          ) : (
-            <div className="flex h-24 w-24 flex-shrink-0 items-center justify-center rounded-2xl bg-black/30 text-xs text-stone-600">
-              No photo
-            </div>
-          )}
+          <ListingThumbnail photoUrl={result.photoUrl} alt={result.name} />
 
           <div className="min-w-0 flex-1">
             <div className="flex items-start justify-between gap-2">

@@ -3,8 +3,9 @@
 import { Marker, Tooltip } from 'react-leaflet';
 import L from 'leaflet';
 import type { SearchResult, Platform } from '@/types';
-import { getPriceDisplayInfo, formatRating } from '@/lib/format';
+import { getPriceDisplayInfo } from '@/lib/format';
 import { useSearchStore } from '@/hooks/useSearchStore';
+import MapListingTooltip from './MapListingTooltip';
 
 function createPriceIcon(price: string, platform: Platform, isSelected: boolean) {
   const borderColor = platform === 'airbnb' ? '#ff5a5f' : '#003580';
@@ -63,16 +64,12 @@ export default function PriceMarker({ result, isSelected, onClick }: PriceMarker
         click: () => onClick(result.id),
       }}
     >
-      <Tooltip direction="top" offset={[0, -10]}>
-        <div style={{ maxWidth: 200 }}>
-          <div style={{ fontWeight: 600, fontSize: 13 }}>{result.name}</div>
-          {formatRating(result) && (
-            <div style={{ fontSize: 12, color: '#666' }}>
-              {formatRating(result)}
-              {result.reviewCount > 0 && ` (${result.reviewCount})`}
-            </div>
-          )}
-        </div>
+      <Tooltip
+        direction="auto"
+        offset={[0, -10]}
+        className="stayreviewr-map-tooltip"
+      >
+        <MapListingTooltip result={result} />
       </Tooltip>
     </Marker>
   );

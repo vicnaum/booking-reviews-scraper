@@ -20,7 +20,8 @@ import type {
   PriceDisplayMode,
   ReviewJobListing,
 } from '@/types';
-import { formatRating, getPriceDisplayInfo } from '@/lib/format';
+import { getPriceDisplayInfo } from '@/lib/format';
+import MapListingTooltip from './MapListingTooltip';
 
 const poiIcon = L.divIcon({
   className: '',
@@ -334,21 +335,19 @@ export default function JobMap({
               click: () => onSelect(`${result.platform}:${result.id}`),
             }}
           >
-            <Tooltip direction="top" offset={[0, -10]}>
-              <div style={{ maxWidth: 220 }}>
-                <div style={{ fontWeight: 600, fontSize: 13 }}>{result.name}</div>
-                {formatRating(result) && (
-                  <div style={{ fontSize: 12, color: '#666' }}>
-                    {formatRating(result)}
-                    {result.reviewCount > 0 && ` (${result.reviewCount})`}
-                  </div>
-                )}
-                {poi && result.poiDistanceMeters != null && (
-                  <div style={{ fontSize: 12, color: '#888' }}>
-                    {formatDistance(result.poiDistanceMeters)} from POI
-                  </div>
-                )}
-              </div>
+            <Tooltip
+              direction="auto"
+              offset={[0, -10]}
+              className="stayreviewr-map-tooltip"
+            >
+              <MapListingTooltip
+                result={result}
+                poiDistanceLabel={
+                  poi && result.poiDistanceMeters != null
+                    ? `${formatDistance(result.poiDistanceMeters)} from POI`
+                    : null
+                }
+              />
             </Tooltip>
           </Marker>
         );

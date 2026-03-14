@@ -107,3 +107,58 @@ select {
 .leaflet-marker-icon {
   overflow: visible !important;
 }
+
+.leaflet-tooltip.stayreviewr-map-tooltip {
+  width: min(280px, calc(100vw - 3rem));
+  max-width: none !important;
+  margin-top: -4px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 18px;
+  padding: 0;
+  color: var(--text-primary);
+  background: rgba(20, 16, 13, 0.98);
+  box-shadow:
+    0 20px 46px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(14px);
+}
+
+.leaflet-tooltip.stayreviewr-map-tooltip::before {
+  display: none;
+}
+
+.stayreviewr-map-tooltip__body {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 12px;
+}
+
+.stayreviewr-map-tooltip__title {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.stayreviewr-map-tooltip__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.stayreviewr-map-tooltip__distance {
+  margin-top: 8px;
+  color: #cbb59c;
+  font-size: 11px;
+  line-height: 1.4;
+}
