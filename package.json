@@ -18,7 +18,7 @@
     "analytics:airbnb:12m": "tsx src/airbnb/analytics.ts --12m",
     "transform": "tsx src/booking/transform-to-csv.ts",
     "build": "tsc",
-    "lint": "eslint . --ext .ts",
+    "lint": "eslint src tests",
     "format": "prettier --write \"src/**/*.ts\""
   },
   "keywords": [],

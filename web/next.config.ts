@@ -3,6 +3,7 @@ import path from 'path';
 
 const nextConfig: NextConfig = {
   serverExternalPackages: ['playwright', 'playwright-core'],
+  outputFileTracingRoot: path.resolve(__dirname, '..'),
   webpack: (config, { isServer }) => {
     if (isServer) {
       // The CLI code uses .js extensions in imports (Node.js ESM convention)

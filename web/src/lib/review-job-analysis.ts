@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Prisma, ReviewJobListing, ReviewJobListingAnalysis } from '@prisma/client';
-import type { MapPoint, PhaseStatus, Platform } from '@/types';
+import type { MapPoint, PhaseStatus, Platform } from '../types.js';
 
 function sanitize(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]+/g, '-');

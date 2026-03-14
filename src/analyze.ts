@@ -1276,7 +1276,9 @@ if (isDirectRun) {
     }
 
     // Load .env for GEMINI_API_KEY
-    try { require('dotenv/config'); } catch {}
+    try {
+      await import('dotenv/config');
+    } catch {}
 
     const result = await runAnalyze({
       reviewsFile: files[0],
