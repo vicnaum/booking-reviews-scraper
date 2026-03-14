@@ -149,9 +149,8 @@ export function resolveComparablePrice(
 }
 
 function formatResolvedPrice(value: ResolvedPriceValue): string {
-  const prefix = value.approximate ? '~' : '';
   const suffix = value.basis === 'stay' ? ' total' : ' per night';
-  return `${prefix}${formatAmount(value.amount, value.currency)}${suffix}`;
+  return `${formatAmount(value.amount, value.currency)}${suffix}`;
 }
 
 export function getPriceDisplayInfo(
@@ -179,7 +178,7 @@ export function getPriceDisplayInfo(
   return {
     primary: formatResolvedPrice(primary),
     secondary: secondary ? formatResolvedPrice(secondary) : null,
-    marker: `${primary.approximate ? '~' : ''}${formatAmount(primary.amount, primary.currency)}`,
+    marker: formatAmount(primary.amount, primary.currency),
     source: primary.source,
     basis: primary.basis,
   };

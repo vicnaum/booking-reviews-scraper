@@ -40,7 +40,7 @@ test('exact nightly and total prices stay explicit in both display modes', () =>
   assert.equal(nightly.secondary, '$1413 total');
 });
 
-test('derived nightly prices are marked as approximate instead of masquerading as exact', () => {
+test('derived nightly prices stay clear without prefix noise', () => {
   const result = makeResult({
     nightly: null,
     total: { amount: 8454.61, currency: 'PLN', source: 'upstream' },
@@ -56,10 +56,10 @@ test('derived nightly prices are marked as approximate instead of masquerading a
     checkout: '2026-03-29',
   });
 
-  assert.equal(nightly.primary, '~PLN 939 per night');
+  assert.equal(nightly.primary, 'PLN 939 per night');
   assert.equal(nightly.secondary, 'PLN 8455 total');
   assert.equal(total.primary, 'PLN 8455 total');
-  assert.equal(total.secondary, '~PLN 939 per night');
+  assert.equal(total.secondary, 'PLN 939 per night');
 });
 
 test('total-only displayed prices no longer show the same amount as both total and per-night', () => {
@@ -78,10 +78,10 @@ test('total-only displayed prices no longer show the same amount as both total a
     checkout: '2026-03-29',
   });
 
-  assert.equal(total.primary, '~$1554 total');
-  assert.equal(total.secondary, '~$173 per night');
-  assert.equal(nightly.primary, '~$173 per night');
-  assert.equal(nightly.secondary, '~$1554 total');
+  assert.equal(total.primary, '$1554 total');
+  assert.equal(total.secondary, '$173 per night');
+  assert.equal(nightly.primary, '$173 per night');
+  assert.equal(nightly.secondary, '$1554 total');
   assert.equal(
     resolveComparablePrice(result, 'perNight', {
       checkin: '2026-03-20',
