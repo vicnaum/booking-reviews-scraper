@@ -410,6 +410,18 @@ export function buildFilterString(params: BookingSearchParams): string {
     if (mapped) parts.push(mapped);
   }
 
+  if (
+    params.minBedrooms != null
+    && params.minBedrooms > 0
+    && params.propertyType !== 'private'
+    && params.propertyType !== 'hotel'
+  ) {
+    if (!parts.includes('privacy_type=3')) {
+      parts.push('privacy_type=3');
+    }
+    parts.push(`entire_place_bedroom_count=${Math.max(1, Math.floor(params.minBedrooms))}`);
+  }
+
   if (params.stars?.length) {
     for (const star of params.stars) {
       parts.push(`class=${star}`);
