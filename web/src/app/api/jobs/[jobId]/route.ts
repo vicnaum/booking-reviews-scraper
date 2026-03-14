@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
+import { getReviewJobOwnerKey } from '@/lib/reviewJobOwner';
 import { toReviewJobResponse } from '@/lib/reviewJobs';
 import type { Platform, ReviewJobResponse } from '@/types';
 
@@ -12,9 +13,17 @@ interface Params {
 
 export async function GET(_request: Request, { params }: Params) {
   const { jobId } = await params;
+  const ownerKey = await getReviewJobOwnerKey();
 
-  const job = await prisma.reviewJob.findUnique({
-    where: { id: jobId },
+  if (!ownerKey) {
+    return NextResponse.json({ error: 'Review job not found' }, { status: 404 });
+  }
+
+  const job = await prisma.reviewJob.findFirst({
+    where: {
+      id: jobId,
+      ownerKey,
+    },
     include: {
       listings: {
         where: { hidden: false },
@@ -44,6 +53,11 @@ export async function GET(_request: Request, { params }: Params) {
 
 export async function PATCH(request: Request, { params }: Params) {
   const { jobId } = await params;
+  const ownerKey = await getReviewJobOwnerKey();
+
+  if (!ownerKey) {
+    return NextResponse.json({ error: 'Review job not found' }, { status: 404 });
+  }
 
   let body: {
     prompt?: string | null;
@@ -65,8 +79,11 @@ export async function PATCH(request: Request, { params }: Params) {
       )
     : null;
 
-  const existingJob = await prisma.reviewJob.findUnique({
-    where: { id: jobId },
+  const existingJob = await prisma.reviewJob.findFirst({
+    where: {
+      id: jobId,
+      ownerKey,
+    },
     select: {
       id: true,
       analysisStatus: true,
@@ -112,8 +129,11 @@ export async function PATCH(request: Request, { params }: Params) {
       }
     }
 
-    return tx.reviewJob.findUniqueOrThrow({
-      where: { id: jobId },
+    return tx.reviewJob.findFirstOrThrow({
+      where: {
+        id: jobId,
+        ownerKey,
+      },
       include: {
         listings: {
           where: { hidden: false },

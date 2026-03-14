@@ -1,6 +1,7 @@
 import { notFound } from 'next/navigation';
 import ResultsWorkspace from '@/components/ResultsWorkspace';
 import { prisma } from '@/lib/prisma';
+import { getReviewJobOwnerKey } from '@/lib/reviewJobOwner';
 import { toReviewJobResponse } from '@/lib/reviewJobs';
 
 interface Params {
@@ -11,9 +12,17 @@ export const dynamic = 'force-dynamic';
 
 export default async function ReviewJobResultsPage({ params }: Params) {
   const { jobId } = await params;
+  const ownerKey = await getReviewJobOwnerKey();
 
-  const job = await prisma.reviewJob.findUnique({
-    where: { id: jobId },
+  if (!ownerKey) {
+    notFound();
+  }
+
+  const job = await prisma.reviewJob.findFirst({
+    where: {
+      id: jobId,
+      ownerKey,
+    },
     include: {
       listings: {
         where: { hidden: false },

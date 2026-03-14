@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
+import { getReviewJobOwnerKey } from '@/lib/reviewJobOwner';
 import { resolveArtifactPath } from '@/lib/review-job-analysis';
 
 export const runtime = 'nodejs';
@@ -26,9 +27,17 @@ function getContentType(filePath: string): string {
 
 export async function GET(_request: Request, { params }: Params) {
   const { jobId, artifactPath } = await params;
+  const ownerKey = await getReviewJobOwnerKey();
 
-  const job = await prisma.reviewJob.findUnique({
-    where: { id: jobId },
+  if (!ownerKey) {
+    return NextResponse.json({ error: 'Artifact root not found' }, { status: 404 });
+  }
+
+  const job = await prisma.reviewJob.findFirst({
+    where: {
+      id: jobId,
+      ownerKey,
+    },
     select: { artifactRoot: true },
   });
 

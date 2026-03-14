@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
+import { getReviewJobOwnerKey } from '@/lib/reviewJobOwner';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -11,9 +12,17 @@ interface Params {
 
 export async function GET(_request: Request, { params }: Params) {
   const { jobId } = await params;
+  const ownerKey = await getReviewJobOwnerKey();
 
-  const job = await prisma.reviewJob.findUnique({
-    where: { id: jobId },
+  if (!ownerKey) {
+    return NextResponse.json({ error: 'Report not found' }, { status: 404 });
+  }
+
+  const job = await prisma.reviewJob.findFirst({
+    where: {
+      id: jobId,
+      ownerKey,
+    },
     select: {
       artifactRoot: true,
       reportPath: true,

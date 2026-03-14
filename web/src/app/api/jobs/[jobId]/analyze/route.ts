@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { enqueueReviewJobAnalysis } from '@/lib/review-job-queue';
+import { getReviewJobOwnerKey } from '@/lib/reviewJobOwner';
 
 export const runtime = 'nodejs';
 
@@ -10,9 +11,17 @@ interface Params {
 
 export async function POST(_request: Request, { params }: Params) {
   const { jobId } = await params;
+  const ownerKey = await getReviewJobOwnerKey();
 
-  const job = await prisma.reviewJob.findUnique({
-    where: { id: jobId },
+  if (!ownerKey) {
+    return NextResponse.json({ error: 'Review job not found' }, { status: 404 });
+  }
+
+  const job = await prisma.reviewJob.findFirst({
+    where: {
+      id: jobId,
+      ownerKey,
+    },
     include: {
       listings: {
         where: { hidden: false },

@@ -3,6 +3,7 @@ import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { enqueueReviewJobSearch } from '@/lib/review-job-queue';
+import { OWNER_KEY_COOKIE } from '@/lib/reviewJobOwner';
 import { buildReviewJobData } from '@/lib/reviewJobs';
 import type {
   CreateReviewJobRequest,
@@ -10,8 +11,6 @@ import type {
 } from '@/types';
 
 export const runtime = 'nodejs';
-
-const OWNER_KEY_COOKIE = 'stayreviewr_owner';
 
 export async function POST(request: NextRequest) {
   let body: CreateReviewJobRequest;

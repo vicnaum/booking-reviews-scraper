@@ -1,9 +1,8 @@
 import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
+import { OWNER_KEY_COOKIE } from '@/lib/reviewJobOwner';
 import type { ReviewJobListItem } from '@/types';
-
-const OWNER_KEY_COOKIE = 'stayreviewr_owner';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
