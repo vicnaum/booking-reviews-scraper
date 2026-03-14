@@ -10,7 +10,6 @@ import {
   parseBookingCardPricing,
   parseBookingGraphQLPricing,
 } from './pricing.js';
-import { createSearchGrid, subdivideBbox } from '../search/geo.js';
 import { filterSearchResults } from '../search/filters.js';
 import type {
   BookingSearchParams,
@@ -136,13 +135,14 @@ async function bootstrapSession(
     const page = await context.newPage();
 
     // Build a search URL that will trigger GraphQL requests.
-    // If no location/destId provided (bbox-only search), use a fallback city
-    // so the page loads results and fires GraphQL (needed to capture CSRF token).
-    const bootstrapParams = (!params.location && !params.destId)
-      ? { ...params, destId: '-2601889', location: undefined } as BookingSearchParams  // London
+    // If this is a bbox-only search, use a fallback city so the page loads
+    // search results and then open map mode to capture MapMarkersDesktop.
+    const needsFallbackCity = !!params.boundingBox && !params.location && !params.destId;
+    const bootstrapParams = needsFallbackCity
+      ? { ...params, destId: '-2601889', location: undefined } as BookingSearchParams // London
       : params;
     const searchUrl = buildSearchUrl(bootstrapParams);
-    const shouldOpenMap = !!params.boundingBox && !params.location && !params.destId;
+    const shouldOpenMap = !!params.boundingBox;
     const bootstrapUrl = shouldOpenMap ? `${searchUrl}#map_opened` : searchUrl;
     console.log(`  Navigating to: ${bootstrapUrl}`);
 
@@ -921,9 +921,10 @@ export async function searchBooking(
     if (onProgress) onProgress(page);
   };
 
-  // Use MapMarkers when we have a bbox but no city (viewport search).
-  // FullSearch only works with destType=CITY; it ignores bbox.
-  const useBboxSearch = !!bbox && !params.location && !params.destId;
+  // Once a bbox exists, search against the map area. The optional location is
+  // still useful for bootstrap / initial destination, but it should not switch
+  // us back to city-wide FullSearch semantics.
+  const useBboxSearch = !!bbox;
 
   if (!params.exhaustive && !useBboxSearch) {
     // Quick mode: FullSearch with offset pagination (city-based)
@@ -1041,8 +1042,8 @@ export async function searchBooking(
       throw new Error('Exhaustive Booking search requires a bounding box (--bbox or --location)');
     }
 
-    console.log('🔍 Exhaustive search via MapMarkersDesktop (100/page)...');
-    const cells = createSearchGrid(bbox, 5);
+    console.log('🔍 Exhaustive search via MapMarkersDesktop (paged bbox)...');
+    const cells = [bbox];
     console.log(`   ${cells.length} cells to search`);
 
     let retried = false;
