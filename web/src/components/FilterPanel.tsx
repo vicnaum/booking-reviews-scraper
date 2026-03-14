@@ -29,6 +29,7 @@ const fieldLabelClassName =
   'px-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500';
 
 const FILTER_INPUT_DEBOUNCE_MS = 450;
+const MIN_LIVE_SEARCH_ZOOM = 12;
 
 export default function FilterPanel() {
   const checkin = useSearchStore((s) => s.checkin);
@@ -78,6 +79,7 @@ export default function FilterPanel() {
   const hasWindowArea = !!viewportBbox && zoom >= 12;
   const canDrawArea = hasInitializedSearch && !activeJobId;
   const canTogglePoi = hasInitializedSearch;
+  const hasLockedLiveArea = !!userBbox;
   const canStartFullSearch =
     hasInitializedSearch &&
     !activeJobId &&
@@ -99,6 +101,29 @@ export default function FilterPanel() {
         : hasCircleArea
           ? 'Use the drawn circle.'
           : 'Draw a circle first.';
+  const canRunManualMapUpdate =
+    hasInitializedSearch &&
+    !activeJobId &&
+    !hasLockedLiveArea &&
+    !!viewportBbox &&
+    zoom >= MIN_LIVE_SEARCH_ZOOM &&
+    pendingViewportSearch;
+  const liveMapButtonLabel = hasLockedLiveArea
+    ? 'Area locked'
+    : zoom < MIN_LIVE_SEARCH_ZOOM
+      ? 'Zoom in to update'
+      : pendingViewportSearch
+        ? 'Update map'
+        : 'Map up to date';
+  const liveMapHint = hasLockedLiveArea
+    ? circleFilter
+      ? 'Live map updates follow the drawn circle. Clear or redraw it to change the search area.'
+      : 'Live map updates follow the drawn rectangle. Clear or redraw it to change the search area.'
+    : zoom < MIN_LIVE_SEARCH_ZOOM
+      ? 'Zoom in a bit more before panning the live map.'
+      : pendingViewportSearch
+        ? 'The map window changed. Click update or turn on auto-update.'
+        : 'The live map window is current.';
 
   const update = useCallback(
     (key: string, value: unknown) => {
@@ -489,24 +514,22 @@ export default function FilterPanel() {
                 onChange={(e) => setAutoUpdate(e.target.checked)}
                 className="accent-[#ff6b5f]"
               />
-              Auto-update
+              Auto-update window
             </label>
             {!autoUpdate && (
               <button
                 onClick={() => {
                   void triggerQuickSearch({ force: true });
                 }}
-                disabled={
-                  !hasInitializedSearch ||
-                  !pendingViewportSearch ||
-                  !!activeJobId ||
-                  (!userBbox && !viewportBbox)
-                }
+                disabled={!canRunManualMapUpdate}
                 className="rounded-2xl border border-[#f4b56a]/30 bg-[#3a2917] px-4 py-2.5 text-xs font-semibold text-[#ffe0b0] transition hover:brightness-110 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:bg-white/[0.03] disabled:text-stone-600"
               >
-                {pendingViewportSearch ? 'Update map' : 'Map up to date'}
+                {liveMapButtonLabel}
               </button>
             )}
+            <p className="ml-1 text-xs text-stone-500">
+              {liveMapHint}
+            </p>
           </div>
 
           <div className="ml-auto min-w-[320px] flex-1 rounded-2xl border border-emerald-300/15 bg-[linear-gradient(180deg,rgba(17,44,31,0.72),rgba(11,26,20,0.72))] px-3 py-3 shadow-[0_16px_40px_rgba(8,56,37,0.18)]">
