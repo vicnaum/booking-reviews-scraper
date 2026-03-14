@@ -12,6 +12,7 @@ import {
 import {
   countNewChildIds,
   hasMeaningfulChildGain,
+  shouldRecurseIntoChildren,
   shouldProbeChildren,
   type AdaptiveSubdivisionConfig,
 } from '../search/adaptive.js';
@@ -582,9 +583,20 @@ export async function searchAirbnb(
         newIdCount,
         config: AIRBNB_SUBDIVISION_CONFIG,
       });
-      console.log(`    ↳ child cells added ${newIdCount} new IDs beyond parent`);
+      const shouldRecurse = shouldRecurseIntoChildren({
+        depth,
+        parentCount: parentIds.size,
+        newIdCount,
+        config: AIRBNB_SUBDIVISION_CONFIG,
+      });
+      const forcedRecursion = depth < AIRBNB_SUBDIVISION_CONFIG.forceProbeDepth;
+      console.log(
+        `    ↳ child cells added ${newIdCount} new IDs beyond parent${
+          forcedRecursion && !gain ? ' (continuing to forced depth)' : ''
+        }`,
+      );
 
-      if (!gain || (params.maxResults && allResults.length >= params.maxResults)) {
+      if (!shouldRecurse || (params.maxResults && allResults.length >= params.maxResults)) {
         return;
       }
 

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   countNewChildIds,
   hasMeaningfulChildGain,
+  shouldRecurseIntoChildren,
   shouldProbeChildren,
   type AdaptiveSubdivisionConfig,
 } from '../src/search/adaptive';
@@ -92,5 +93,27 @@ test('hasMeaningfulChildGain accepts either absolute or relative uplift', () => 
       config,
     }),
     true,
+  );
+});
+
+test('shouldRecurseIntoChildren honors forced depth before gain checks', () => {
+  assert.equal(
+    shouldRecurseIntoChildren({
+      depth: 0,
+      parentCount: 30,
+      newIdCount: 0,
+      config: { ...config, forceProbeDepth: 2 },
+    }),
+    true,
+  );
+
+  assert.equal(
+    shouldRecurseIntoChildren({
+      depth: 2,
+      parentCount: 30,
+      newIdCount: 0,
+      config: { ...config, forceProbeDepth: 2 },
+    }),
+    false,
   );
 });

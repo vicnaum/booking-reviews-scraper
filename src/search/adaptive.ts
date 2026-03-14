@@ -106,6 +106,23 @@ export function hasMeaningfulChildGain(options: {
   return options.newIdCount / options.parentCount >= options.config.minGainRatio;
 }
 
+export function shouldRecurseIntoChildren(options: {
+  depth: number;
+  parentCount: number;
+  newIdCount: number;
+  config: AdaptiveSubdivisionConfig;
+}): boolean {
+  if (options.depth < options.config.forceProbeDepth) {
+    return true;
+  }
+
+  return hasMeaningfulChildGain({
+    parentCount: options.parentCount,
+    newIdCount: options.newIdCount,
+    config: options.config,
+  });
+}
+
 function shouldSubdivideCell(
   cell: BoundingBox,
   depth: number,

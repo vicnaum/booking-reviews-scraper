@@ -13,6 +13,7 @@ import {
 import {
   countNewChildIds,
   hasMeaningfulChildGain,
+  shouldRecurseIntoChildren,
   shouldProbeChildren,
   type AdaptiveSubdivisionConfig,
 } from '../search/adaptive.js';
@@ -31,8 +32,8 @@ const MAP_MARKERS_HASH = 'f6d2e861c5149589bf368582c31f74d58399004da319fac65f2c88
 const PAGE_DELAY_MS = 300;
 const CELL_DELAY_MS = 500;
 const BOOKING_SUBDIVISION_CONFIG: AdaptiveSubdivisionConfig = {
-  forceProbeDepth: 1,
-  maxDepth: 2,
+  forceProbeDepth: 2,
+  maxDepth: 3,
   minCellSideMeters: 900,
   minResultsToProbe: 10,
   minNewIds: 2,
@@ -1209,11 +1210,20 @@ export async function searchBooking(
           newIdCount,
           config: BOOKING_SUBDIVISION_CONFIG,
         });
+        const shouldRecurse = shouldRecurseIntoChildren({
+          depth,
+          parentCount: parentIds.size,
+          newIdCount,
+          config: BOOKING_SUBDIVISION_CONFIG,
+        });
+        const forcedRecursion = depth < BOOKING_SUBDIVISION_CONFIG.forceProbeDepth;
         console.log(
-          `    ↳ child cells added ${newIdCount} new IDs beyond parent`,
+          `    ↳ child cells added ${newIdCount} new IDs beyond parent${
+            forcedRecursion && !gain ? ' (continuing to forced depth)' : ''
+          }`,
         );
 
-        if (!gain || (params.maxResults && allResults.length >= params.maxResults)) {
+        if (!shouldRecurse || (params.maxResults && allResults.length >= params.maxResults)) {
           return;
         }
 
