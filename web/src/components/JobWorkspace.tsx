@@ -551,6 +551,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                 results={sortedResults}
                 selectedId={selectedId}
                 onSelect={setSelectedId}
+                searchAreaMode={data.job.searchAreaMode}
                 boundingBox={data.job.boundingBox}
                 mapBounds={data.job.mapBounds}
                 circle={data.job.circle}

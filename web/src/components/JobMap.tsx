@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Circle,
   MapContainer,
@@ -9,6 +9,7 @@ import {
   TileLayer,
   Tooltip,
   useMap,
+  useMapEvents,
 } from 'react-leaflet';
 import L, { type LatLngBoundsExpression } from 'leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -89,13 +90,32 @@ function formatDistance(meters: number): string {
   return `${(meters / 1000).toFixed(1)} km`;
 }
 
+function haversineDistanceMeters(a: MapPoint, b: MapPoint): number {
+  const earthRadiusMeters = 6371000;
+  const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
+  const dLat = toRadians(b.lat - a.lat);
+  const dLng = toRadians(b.lng - a.lng);
+  const lat1 = toRadians(a.lat);
+  const lat2 = toRadians(b.lat);
+  const sinDLat = Math.sin(dLat / 2);
+  const sinDLng = Math.sin(dLng / 2);
+
+  const h =
+    sinDLat * sinDLat +
+    Math.cos(lat1) * Math.cos(lat2) * sinDLng * sinDLng;
+
+  return 2 * earthRadiusMeters * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
 function JobViewport({
+  searchAreaMode,
   mapBounds,
   boundingBox,
   mapCenter,
   mapZoom,
   selectedPoint,
 }: {
+  searchAreaMode: 'window' | 'rectangle' | 'circle';
   mapBounds: BoundingBox | null;
   boundingBox: BoundingBox | null;
   mapCenter: MapPoint | null;
@@ -124,6 +144,12 @@ function JobViewport({
 
     hasRestoredViewportRef.current = true;
 
+    if ((searchAreaMode === 'rectangle' || searchAreaMode === 'circle') && boundingBox) {
+      const bounds: LatLngBoundsExpression = toRectangleBounds(boundingBox);
+      map.fitBounds(bounds, { padding: [24, 24], animate: false });
+      return;
+    }
+
     if (mapCenter && mapZoom != null) {
       map.setView([mapCenter.lat, mapCenter.lng], mapZoom, {
         animate: false,
@@ -136,15 +162,67 @@ function JobViewport({
       const bounds: LatLngBoundsExpression = toRectangleBounds(target);
       map.fitBounds(bounds, { padding: [24, 24], animate: false });
     }
-  }, [boundingBox, map, mapBounds, mapCenter, mapZoom, selectedPoint]);
+  }, [boundingBox, map, mapBounds, mapCenter, mapZoom, searchAreaMode, selectedPoint]);
 
   return null;
+}
+
+function JobPoiDistanceOverlay({
+  poi,
+}: {
+  poi: MapPoint | null;
+}) {
+  const [mouseDistance, setMouseDistance] = useState<{
+    x: number;
+    y: number;
+    meters: number;
+  } | null>(null);
+
+  useMapEvents({
+    mousemove: (event) => {
+      if (!poi) {
+        setMouseDistance(null);
+        return;
+      }
+
+      setMouseDistance({
+        x: event.originalEvent.offsetX,
+        y: event.originalEvent.offsetY,
+        meters: haversineDistanceMeters(poi, {
+          lat: event.latlng.lat,
+          lng: event.latlng.lng,
+        }),
+      });
+    },
+    mouseout: () => {
+      setMouseDistance(null);
+    },
+  });
+
+  if (!poi || !mouseDistance) {
+    return null;
+  }
+
+  return (
+    <div
+      className="pointer-events-none absolute z-[1000]"
+      style={{
+        left: `${mouseDistance.x + 18}px`,
+        top: `${mouseDistance.y + 18}px`,
+      }}
+    >
+      <div className="rounded-full bg-neutral-900/95 px-3 py-1.5 text-xs text-neutral-100 shadow-lg backdrop-blur-sm">
+        {formatDistance(mouseDistance.meters)} from POI
+      </div>
+    </div>
+  );
 }
 
 interface JobMapProps {
   results: ReviewJobListing[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  searchAreaMode: 'window' | 'rectangle' | 'circle';
   boundingBox: BoundingBox | null;
   mapBounds: BoundingBox | null;
   circle: CircleFilter | null;
@@ -160,6 +238,7 @@ export default function JobMap({
   results,
   selectedId,
   onSelect,
+  searchAreaMode,
   boundingBox,
   mapBounds,
   circle,
@@ -195,12 +274,14 @@ export default function JobMap({
       />
 
       <JobViewport
+        searchAreaMode={searchAreaMode}
         mapBounds={mapBounds}
         boundingBox={boundingBox}
         mapCenter={mapCenter}
         mapZoom={mapZoom}
         selectedPoint={selectedResult?.coordinates ?? null}
       />
+      <JobPoiDistanceOverlay poi={poi} />
 
       {boundingBox && !circle && (
         <Rectangle

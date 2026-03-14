@@ -391,7 +391,7 @@ function cloneBodyTemplate<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-function buildFilterString(params: BookingSearchParams): string {
+export function buildFilterString(params: BookingSearchParams): string {
   const parts: string[] = ['oos=1']; // Only available properties
 
   if (params.minRating) {

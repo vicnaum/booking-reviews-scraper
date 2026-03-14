@@ -41,6 +41,7 @@ import {
   toPhaseStatus,
   type AnalysisManifest,
 } from './review-job-analysis.js';
+import { createSearchLogger } from './searchLog.js';
 import type {
   SearchResult,
 } from '../types.js';
@@ -229,6 +230,21 @@ async function runReviewJobSearch(reviewJobId: string) {
 
   const startedAt = new Date();
   let pagesScanned = 0;
+  const searchLogger = createSearchLogger({
+    kind: 'review-job-search',
+    label: reviewJobId,
+    payload: {
+      location: jobRecord.location ?? null,
+      boundingBox: jobRecord.boundingBox,
+      circle: jobRecord.circle,
+      poi: jobRecord.poi,
+      checkin: jobRecord.checkin ?? null,
+      checkout: jobRecord.checkout ?? null,
+      adults: jobRecord.adults,
+      currency: jobRecord.currency,
+      filters: jobRecord.filters,
+    },
+  });
 
   await prisma.reviewJob.update({
     where: { id: reviewJobId },
@@ -302,6 +318,13 @@ async function runReviewJobSearch(reviewJobId: string) {
 
       const filteredResults = filterResultsForRequest(output.results, requestFilters);
       allResults.push(...filteredResults);
+      searchLogger.log('platform_completed', {
+        platform,
+        fetchedResults: output.results.length,
+        keptResults: filteredResults.length,
+        pagesScanned: output.pagesScanned,
+        sampleIds: filteredResults.slice(0, 10).map((result) => result.id),
+      });
 
       await appendReviewJobEvent(reviewJobId, {
         phase: 'search',
@@ -369,6 +392,11 @@ async function runReviewJobSearch(reviewJobId: string) {
         }),
       });
     });
+    searchLogger.log('completed', {
+      totalResults: rows.length,
+      pagesScanned,
+      durationMs,
+    });
 
     console.log(
       `[review-worker] completed ${reviewJobId} with ${rows.length} results`,
@@ -397,6 +425,10 @@ async function runReviewJobSearch(reviewJobId: string) {
           message,
         }),
       });
+    });
+    searchLogger.log('failed', {
+      message,
+      pagesScanned,
     });
 
     throw error;

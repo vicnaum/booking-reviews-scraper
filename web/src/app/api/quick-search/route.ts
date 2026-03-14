@@ -6,6 +6,7 @@ import type { AirbnbSearchParams, BookingSearchParams } from '@cli/search/types.
 import type { QuickSearchRequest } from '@/types';
 import { filterResultsForRequest } from '@/lib/resultFilters';
 import { resolveComparablePrice } from '@/lib/pricing';
+import { createSearchLogger } from '@/lib/searchLog';
 
 export const maxDuration = 60;
 
@@ -30,6 +31,38 @@ export async function POST(request: NextRequest) {
 
   const start = Date.now();
   log(`combined search starting | bbox: [${boundingBox.swLat.toFixed(3)},${boundingBox.swLng.toFixed(3)} → ${boundingBox.neLat.toFixed(3)},${boundingBox.neLng.toFixed(3)}] | dates: ${body.checkin || 'none'}→${body.checkout || 'none'} | adults: ${body.adults ?? 2}`);
+  const searchLogger = createSearchLogger({
+    kind: 'quick-search',
+    label: body.location || 'map-search',
+    payload: {
+      requestedPlatforms: body.platforms?.length
+        ? body.platforms
+        : body.platform
+          ? [body.platform]
+          : ['airbnb', 'booking'],
+      boundingBox,
+      circle: body.circle ?? null,
+      location: body.location ?? null,
+      checkin: body.checkin ?? null,
+      checkout: body.checkout ?? null,
+      adults: body.adults ?? 2,
+      currency: body.currency ?? 'USD',
+      priceDisplay: body.priceDisplay ?? 'total',
+      priceMin: body.priceMin ?? null,
+      priceMax: body.priceMax ?? null,
+      minRating: body.minRating ?? null,
+      minBedrooms: body.minBedrooms ?? null,
+      minBeds: body.minBeds ?? null,
+      propertyType: body.propertyType ?? null,
+      superhost: body.superhost ?? null,
+      instantBook: body.instantBook ?? null,
+      stars: body.stars ?? null,
+      freeCancellation: body.freeCancellation ?? null,
+    },
+  });
+  if (searchLogger.filePath) {
+    log(`structured quick-search log: ${searchLogger.filePath}`);
+  }
 
   try {
     const requestedPlatforms = body.platforms?.length
@@ -64,6 +97,13 @@ export async function POST(request: NextRequest) {
         const output = await searchAirbnb(params);
         const results = filterResultsForRequest(output.results, body);
         log(`airbnb done: ${results.length} results, ${output.pagesScanned} pages`);
+        searchLogger.log('platform_completed', {
+          platform,
+          fetchedResults: output.results.length,
+          keptResults: results.length,
+          pagesScanned: output.pagesScanned,
+          sampleIds: results.slice(0, 10).map((result) => result.id),
+        });
         return {
           platform,
           results,
@@ -97,6 +137,13 @@ export async function POST(request: NextRequest) {
         const output = await searchBooking(params);
         const results = filterResultsForRequest(output.results, body);
         log(`booking done: ${results.length} results, ${output.pagesScanned} pages`);
+        searchLogger.log('platform_completed', {
+          platform,
+          fetchedResults: output.results.length,
+          keptResults: results.length,
+          pagesScanned: output.pagesScanned,
+          sampleIds: results.slice(0, 10).map((result) => result.id),
+        });
         return {
           platform,
           results,
@@ -123,9 +170,19 @@ export async function POST(request: NextRequest) {
         result.reason instanceof Error ? result.reason.message : 'Search failed';
       warnings.push(message);
       log(`WARNING: ${message}`);
+      searchLogger.log('platform_failed', {
+        message,
+      });
     }
 
     if (mergedResults.length === 0 && warnings.length > 0) {
+      searchLogger.log('completed', {
+        totalResults: 0,
+        pagesScanned,
+        durationMs: Date.now() - start,
+        warnings,
+        failed: true,
+      });
       return NextResponse.json({ error: warnings[0] }, { status: 500 });
     }
 
@@ -147,6 +204,12 @@ export async function POST(request: NextRequest) {
 
     const durationMs = Date.now() - start;
     log(`combined done: ${mergedResults.length} results, ${pagesScanned} pages, ${durationMs}ms`);
+    searchLogger.log('completed', {
+      totalResults: mergedResults.length,
+      pagesScanned,
+      durationMs,
+      warnings: warnings.length > 0 ? warnings : null,
+    });
 
     return NextResponse.json({
       results: mergedResults,
@@ -160,6 +223,10 @@ export async function POST(request: NextRequest) {
     const message = err instanceof Error ? err.message : 'Search failed';
     const durationMs = Date.now() - start;
     log(`ERROR (${durationMs}ms): ${message}`);
+    searchLogger.log('failed', {
+      message,
+      durationMs,
+    });
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
