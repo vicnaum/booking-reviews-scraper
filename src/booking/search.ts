@@ -32,7 +32,7 @@ const PAGE_DELAY_MS = 300;
 const CELL_DELAY_MS = 500;
 const BOOKING_SUBDIVISION_CONFIG: AdaptiveSubdivisionConfig = {
   forceProbeDepth: 1,
-  maxDepth: 3,
+  maxDepth: 2,
   minCellSideMeters: 900,
   minResultsToProbe: 10,
   minNewIds: 2,
