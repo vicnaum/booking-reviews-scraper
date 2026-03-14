@@ -10,12 +10,14 @@ import {
   parseBookingCardPricing,
   parseBookingGraphQLPricing,
 } from './pricing.js';
+import { subdivideBbox } from '../search/geo.js';
 import { filterSearchResults } from '../search/filters.js';
 import type {
   BookingSearchParams,
   SearchResult,
   SearchPage,
   BoundingBox,
+  CircleFilter,
   ProgressCallback,
 } from '../search/types.js';
 
@@ -23,6 +25,10 @@ const FULL_SEARCH_HASH = '8cea877c71f083895aa316412e85ffe818b503bb5331babba34a16
 const MAP_MARKERS_HASH = 'f6d2e861c5149589bf368582c31f74d58399004da319fac65f2c88313cf15c16';
 const PAGE_DELAY_MS = 300;
 const CELL_DELAY_MS = 500;
+const FORCE_SUBDIVISION_DEPTH = 1;
+const MAX_SUBDIVISION_DEPTH = 2;
+const MIN_SUBDIVISION_RESULTS = 12;
+const MIN_CELL_SIDE_METERS = 900;
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -70,6 +76,50 @@ function getStayNights(params: BookingSearchParams): number | null {
   }
 
   return Math.max(1, Math.round(diffMs / 86400000));
+}
+
+function haversineDistanceMeters(
+  aLat: number,
+  aLng: number,
+  bLat: number,
+  bLng: number,
+): number {
+  const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
+  const earthRadiusMeters = 6371000;
+  const dLat = toRadians(bLat - aLat);
+  const dLng = toRadians(bLng - aLng);
+  const lat1 = toRadians(aLat);
+  const lat2 = toRadians(bLat);
+  const sinDLat = Math.sin(dLat / 2);
+  const sinDLng = Math.sin(dLng / 2);
+
+  const a =
+    sinDLat * sinDLat +
+    Math.cos(lat1) * Math.cos(lat2) * sinDLng * sinDLng;
+
+  return 2 * earthRadiusMeters * Math.asin(Math.sqrt(a));
+}
+
+function bboxHeightMeters(bbox: BoundingBox): number {
+  return haversineDistanceMeters(bbox.swLat, bbox.swLng, bbox.neLat, bbox.swLng);
+}
+
+function bboxWidthMeters(bbox: BoundingBox): number {
+  return haversineDistanceMeters(bbox.swLat, bbox.swLng, bbox.swLat, bbox.neLng);
+}
+
+function bboxIntersectsCircle(
+  bbox: BoundingBox,
+  circle: CircleFilter,
+): boolean {
+  const nearestLat = Math.min(Math.max(circle.center.lat, bbox.swLat), bbox.neLat);
+  const nearestLng = Math.min(Math.max(circle.center.lng, bbox.swLng), bbox.neLng);
+  return haversineDistanceMeters(
+    circle.center.lat,
+    circle.center.lng,
+    nearestLat,
+    nearestLng,
+  ) <= circle.radiusMeters;
 }
 
 // --- Session management ---
@@ -717,7 +767,16 @@ function parseFullSearchResponse(data: any, params: BookingSearchParams, pageInd
   };
 }
 
-function parseMapMarkersResponse(data: any, params: BookingSearchParams, pageIndex: number): SearchPage {
+type ParsedMapMarkersPage = SearchPage & {
+  rawResultsCount: number;
+  totalResults: number;
+};
+
+function parseMapMarkersResponse(
+  data: any,
+  params: BookingSearchParams,
+  pageIndex: number,
+): ParsedMapMarkersPage {
   const results = data?.data?.searchQueries?.search?.results || [];
   const total = data?.data?.searchQueries?.search?.pagination?.nbResultsTotal ?? 0;
 
@@ -732,6 +791,8 @@ function parseMapMarkersResponse(data: any, params: BookingSearchParams, pageInd
     results: filtered,
     hasNextPage: parsed.length > 0 && (pageIndex + 1) * 100 < total,
     pageIndex,
+    rawResultsCount: parsed.length,
+    totalResults: total,
   };
 }
 
@@ -926,6 +987,109 @@ export async function searchBooking(
   // us back to city-wide FullSearch semantics.
   const useBboxSearch = !!bbox;
 
+  const addUniqueResults = (results: SearchResult[]): SearchResult[] => {
+    const newResults: SearchResult[] = [];
+    for (const result of results) {
+      if (!seenIds.has(result.id)) {
+        seenIds.add(result.id);
+        newResults.push(result);
+      }
+    }
+    allResults.push(...newResults);
+    return newResults;
+  };
+
+  const searchMapMarkersCell = async (
+    cell: BoundingBox,
+    label: string,
+  ): Promise<{ cellResults: SearchResult[]; totalResults: number }> => {
+    let offset = 0;
+    let pageIndex = 0;
+    let retried = false;
+    let totalResults = 0;
+    const cellSeenIds = new Set<string>();
+    const cellResults: SearchResult[] = [];
+
+    while (true) {
+      try {
+        const body = buildMapMarkersBody(params, session, cell, offset);
+        const data = await fetchGraphQL(buildMapSession(session), body);
+        const page = parseMapMarkersResponse(data, params, pageIndex);
+
+        if (pageIndex === 0) {
+          totalResults = page.totalResults;
+        }
+
+        const freshCellResults: SearchResult[] = [];
+        for (const result of page.results) {
+          if (!cellSeenIds.has(result.id)) {
+            cellSeenIds.add(result.id);
+            cellResults.push(result);
+            freshCellResults.push(result);
+          }
+        }
+
+        const newResults = addUniqueResults(freshCellResults);
+        progressTracker({ ...page, results: newResults });
+
+        if (!page.hasNextPage) break;
+        if (params.maxResults && allResults.length >= params.maxResults) break;
+
+        offset += 100;
+        pageIndex++;
+        await sleep(PAGE_DELAY_MS);
+      } catch (error: any) {
+        if (error.message.includes('403') && !retried) {
+          console.log(`  🔄 ${label}: session expired, re-bootstrapping...`);
+          try {
+            cachedSession = null;
+            session = await bootstrapSession(params);
+            if (session.headers['x-booking-csrf-token']) {
+              cachedSession = session;
+              cachedSessionTime = Date.now();
+            }
+            retried = true;
+            continue;
+          } catch {
+            console.log(`  ❌ ${label}: re-bootstrap failed`);
+          }
+        }
+
+        throw error;
+      }
+    }
+
+    return { cellResults, totalResults };
+  };
+
+  const shouldSubdivideCell = (
+    cell: BoundingBox,
+    depth: number,
+    resultCount: number,
+  ): boolean => {
+    if (depth >= MAX_SUBDIVISION_DEPTH) {
+      return false;
+    }
+
+    if (resultCount === 0) {
+      return false;
+    }
+
+    const maxSideMeters = Math.max(
+      bboxWidthMeters(cell),
+      bboxHeightMeters(cell),
+    );
+    if (maxSideMeters <= MIN_CELL_SIDE_METERS) {
+      return false;
+    }
+
+    if (depth < FORCE_SUBDIVISION_DEPTH) {
+      return true;
+    }
+
+    return resultCount >= MIN_SUBDIVISION_RESULTS;
+  };
+
   if (!params.exhaustive && !useBboxSearch) {
     // Quick mode: FullSearch with offset pagination (city-based)
     console.log(`🔍 Quick search via FullSearch (25/page, max ${params.maxResults || 'unlimited'} results)...`);
@@ -1042,60 +1206,43 @@ export async function searchBooking(
       throw new Error('Exhaustive Booking search requires a bounding box (--bbox or --location)');
     }
 
-    console.log('🔍 Exhaustive search via MapMarkersDesktop (paged bbox)...');
-    const cells = [bbox];
-    console.log(`   ${cells.length} cells to search`);
+    console.log('🔍 Exhaustive search via MapMarkersDesktop + quadrant subdivision...');
 
-    let retried = false;
+    let visitedCells = 0;
+    const visitCell = async (cell: BoundingBox, depth: number): Promise<void> => {
+      visitedCells++;
+      const label = `Cell ${visitedCells} (depth ${depth})`;
+      console.log(`  📍 ${label}`);
 
-    for (let i = 0; i < cells.length; i++) {
-      const cell = cells[i];
-      console.log(`  📍 Cell ${i + 1}/${cells.length}`);
+      try {
+        const { cellResults, totalResults } = await searchMapMarkersCell(cell, label);
+        const split = shouldSubdivideCell(cell, depth, cellResults.length);
+        console.log(
+          `    ↳ ${cellResults.length} filtered / ${totalResults} reported results`,
+        );
 
-      let offset = 0;
-      let pageIndex = 0;
-
-      while (true) {
-        try {
-          const body = buildMapMarkersBody(params, session, cell, offset);
-          const data = await fetchGraphQL(buildMapSession(session), body);
-          const page = parseMapMarkersResponse(data, params, pageIndex);
-
-          const newResults: SearchResult[] = [];
-          for (const r of page.results) {
-            if (!seenIds.has(r.id)) {
-              seenIds.add(r.id);
-              newResults.push(r);
-            }
-          }
-
-          allResults.push(...newResults);
-          progressTracker({ ...page, results: newResults });
-
-          if (!page.hasNextPage) break;
-
-          offset += 100;
-          pageIndex++;
-          await sleep(PAGE_DELAY_MS);
-        } catch (error: any) {
-          if (error.message.includes('403') && !retried) {
-            console.log('  🔄 Session expired, re-bootstrapping...');
-            try {
-              session = await bootstrapSession(params);
-              retried = true;
-              continue;
-            } catch {
-              console.log('  ❌ Re-bootstrap failed');
-            }
-          }
-
-          console.log(`  ⚠️  Cell ${i + 1} error: ${error.message}`);
-          break; // Move to next cell
+        if (!split || (params.maxResults && allResults.length >= params.maxResults)) {
+          return;
         }
-      }
 
-      await sleep(CELL_DELAY_MS);
-    }
+        const childCells = subdivideBbox(cell).filter(
+          (child) => !params.circle || bboxIntersectsCircle(child, params.circle),
+        );
+        console.log(`    ↳ subdividing into ${childCells.length} exact quadrants`);
+
+        for (const child of childCells) {
+          await sleep(CELL_DELAY_MS);
+          await visitCell(child, depth + 1);
+          if (params.maxResults && allResults.length >= params.maxResults) {
+            break;
+          }
+        }
+      } catch (error: any) {
+        console.log(`  ⚠️  ${label} error: ${error.message}`);
+      }
+    };
+
+    await visitCell(bbox, 0);
   }
 
   console.log(`✅ Booking search complete: ${allResults.length} unique results, ${pagesScanned} pages scanned`);
