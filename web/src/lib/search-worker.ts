@@ -950,14 +950,16 @@ async function runReviewJobAnalysis(reviewJobId: string) {
     });
 
     const completedAt = new Date();
+    const resultsReady =
+      overallStatus === 'completed' || overallStatus === 'partial';
     await prisma.$transaction(async (tx) => {
       await tx.reviewJob.update({
         where: { id: reviewJobId },
         data: {
           status: 'completed',
-          currentPhase: reportPath ? 'results-ready' : 'analysis-complete',
+          currentPhase: resultsReady ? 'results-ready' : 'analysis-complete',
           analysisStatus: overallStatus,
-          analysisCurrentPhase: reportPath ? 'report' : 'completed',
+          analysisCurrentPhase: 'completed',
           analysisProgress: 1,
           analysisErrorMessage: null,
           analysisCompletedAt: completedAt,
@@ -973,7 +975,8 @@ async function runReviewJobAnalysis(reviewJobId: string) {
           payload: {
             status: overallStatus,
             listingCount: activeListings.length,
-            reportReady: !!reportPath,
+            resultsReady,
+            legacyReportAvailable: !!reportPath,
           },
         }),
       });

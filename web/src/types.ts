@@ -239,6 +239,7 @@ export interface ReviewJobState {
   startedAt: string | null;
   completedAt: string | null;
   reportReady: boolean;
+  legacyReportAvailable: boolean;
   createdAt: string;
 }
 

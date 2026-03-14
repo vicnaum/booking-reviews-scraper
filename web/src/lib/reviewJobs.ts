@@ -247,7 +247,19 @@ export function toWebReviewJobListing(
   };
 }
 
-export function toReviewJobState(job: ReviewJobModel): ReviewJobState {
+export function hasPersistedReviewJobResults(
+  job: Pick<ReviewJobModel, 'analysisStatus'>,
+): boolean {
+  return job.analysisStatus === 'completed' || job.analysisStatus === 'partial';
+}
+
+export function toReviewJobState(
+  job: ReviewJobModel,
+  options: {
+    resultsReady?: boolean;
+    legacyReportAvailable?: boolean;
+  } = {},
+): ReviewJobState {
   return {
     id: job.id,
     ownerKey: job.ownerKey ?? null,
@@ -281,7 +293,8 @@ export function toReviewJobState(job: ReviewJobModel): ReviewJobState {
     durationMs: job.durationMs ?? null,
     startedAt: job.startedAt?.toISOString() ?? null,
     completedAt: job.completedAt?.toISOString() ?? null,
-    reportReady: !!job.reportPath,
+    reportReady: options.resultsReady ?? hasPersistedReviewJobResults(job),
+    legacyReportAvailable: options.legacyReportAvailable ?? !!job.reportPath,
     createdAt: job.createdAt.toISOString(),
   };
 }
@@ -304,8 +317,13 @@ export function toReviewJobResponse(input: {
   listings: Array<ReviewJobListingModel & { analysis?: ReviewJobListingAnalysisModel | null }>;
   events: ReviewJobEventModel[];
 }): ReviewJobResponse {
+  const resultsReady = hasPersistedReviewJobResults(input.job);
+
   return {
-    job: toReviewJobState(input.job),
+    job: toReviewJobState(input.job, {
+      resultsReady,
+      legacyReportAvailable: !!input.job.reportPath,
+    }),
     listings: input.listings.map(toWebReviewJobListing),
     events: input.events.map(toReviewJobEvent),
   };

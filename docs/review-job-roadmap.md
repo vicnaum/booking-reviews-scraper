@@ -33,6 +33,8 @@ persistent, web-native workflow:
 
 ## Milestone 1: Persistent Combined Search Jobs
 
+Status: complete
+
 Outcome:
 - Platform switch removed from landing and map.
 - Quick search merges Airbnb + Booking into one result set.
@@ -47,6 +49,8 @@ Scope:
 - Build a first job workspace page.
 
 ## Milestone 2: Analysis Jobs
+
+Status: complete
 
 Outcome:
 - User can optionally enter a free-form prompt/preferences block on the job page.
@@ -70,6 +74,8 @@ Scope:
 
 ## Milestone 3: Progress and Results UX
 
+Status: mostly complete
+
 Outcome:
 - Job page shows live progress and phase history.
 - Results page shows map + ranking + listing drill-down/comparison.
@@ -80,7 +86,15 @@ Scope:
 - Start with polling; add SSE after the event model is stable.
 - Recreate the best parts of the current static report in the app.
 
+Current state:
+- Native results page is live.
+- Analysis phases persist incrementally into the DB while jobs are running.
+- Legacy HTML report is now a fallback export, not the main results surface.
+- Remaining work here is mostly UX polish, not architectural plumbing.
+
 ## Milestone 4: Temporary Job History
+
+Status: complete
 
 Outcome:
 - Landing page shows recent jobs for the current browser.
@@ -98,3 +112,10 @@ Scope:
 4. Job workspace rendering persisted results only.
 5. Analysis queue and persisted progress.
 6. Results page and richer history/dashboard UX.
+
+## Next Focus
+
+- Improve per-listing compare/selection UX on the job/results pages.
+- Add richer live progress delivery if polling becomes insufficient.
+- Treat artifact files purely as optional exports and debugging aids over time.
+- Replace temporary browser ownership with real auth later.
