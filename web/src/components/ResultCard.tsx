@@ -11,6 +11,12 @@ interface ResultCardProps {
   result: SearchResult;
   isSelected: boolean;
   onClick: () => void;
+  selectionControl?: {
+    active: boolean;
+    label?: string;
+    onToggle: () => void;
+    disabled?: boolean;
+  };
   context?: {
     priceDisplay?: 'total' | 'perNight';
     checkin?: string | null;
@@ -21,7 +27,7 @@ interface ResultCardProps {
 }
 
 const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
-  function ResultCard({ result, isSelected, onClick, context }, ref) {
+  function ResultCard({ result, isSelected, onClick, selectionControl, context }, ref) {
     const storePriceDisplay = useSearchStore((s) => s.priceDisplay);
     const storeCheckin = useSearchStore((s) => s.checkin);
     const storeCheckout = useSearchStore((s) => s.checkout);
@@ -131,6 +137,26 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
                 </span>
               )}
             </div>
+
+            {selectionControl && (
+              <div className="mt-3">
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    selectionControl.onToggle();
+                  }}
+                  disabled={selectionControl.disabled}
+                  className={`rounded-full border px-3 py-1 text-[11px] font-semibold transition ${
+                    selectionControl.active
+                      ? 'border-emerald-300/25 bg-emerald-300/12 text-emerald-100'
+                      : 'border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08] hover:text-white'
+                  } disabled:cursor-not-allowed disabled:opacity-50`}
+                >
+                  {selectionControl.label ?? (selectionControl.active ? 'Selected for analysis' : 'Select for analysis')}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>

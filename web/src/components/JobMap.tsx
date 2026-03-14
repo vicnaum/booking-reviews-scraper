@@ -17,7 +17,7 @@ import type {
   CircleFilter,
   MapPoint,
   PriceDisplayMode,
-  SearchResult,
+  ReviewJobListing,
 } from '@/types';
 import { formatRating, getPriceDisplayInfo } from '@/lib/format';
 
@@ -35,7 +35,11 @@ const poiIcon = L.divIcon({
   iconAnchor: [9, 9],
 });
 
-function createPriceIcon(price: string, platform: SearchResult['platform'], isSelected: boolean) {
+function createPriceIcon(
+  price: string,
+  platform: ReviewJobListing['platform'],
+  isSelected: boolean,
+) {
   const borderColor = platform === 'airbnb' ? '#ff5a5f' : '#003580';
   const scale = isSelected ? 1.1 : 1;
 
@@ -105,7 +109,7 @@ function JobViewport({
 }
 
 interface JobMapProps {
-  results: SearchResult[];
+  results: ReviewJobListing[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   boundingBox: BoundingBox | null;
@@ -142,7 +146,7 @@ export default function JobMap({
   const fallbackZoom = mapZoom ?? 13;
   const selectedResult =
     selectedId != null
-      ? results.find((result) => result.id === selectedId) ?? null
+      ? results.find((result) => `${result.platform}:${result.id}` === selectedId) ?? null
       : null;
 
   return (
@@ -204,10 +208,14 @@ export default function JobMap({
           <Marker
             key={`${result.platform}:${result.id}`}
             position={[result.coordinates.lat, result.coordinates.lng]}
-            icon={createPriceIcon(priceLabel, result.platform, result.id === selectedId)}
-            zIndexOffset={result.id === selectedId ? 200 : 0}
+            icon={createPriceIcon(
+              priceLabel,
+              result.platform,
+              `${result.platform}:${result.id}` === selectedId,
+            )}
+            zIndexOffset={`${result.platform}:${result.id}` === selectedId ? 200 : 0}
             eventHandlers={{
-              click: () => onSelect(result.id),
+              click: () => onSelect(`${result.platform}:${result.id}`),
             }}
           >
             <Tooltip direction="top" offset={[0, -10]}>

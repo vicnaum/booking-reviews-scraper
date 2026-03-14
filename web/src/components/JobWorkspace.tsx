@@ -85,6 +85,10 @@ function getSelectedAnalysisSummary(result: ReviewJobResponse['listings'][number
   };
 }
 
+function listingKey(listing: Pick<ReviewJobResponse['listings'][number], 'id' | 'platform'>) {
+  return `${listing.platform}:${listing.id}`;
+}
+
 interface JobWorkspaceProps {
   initialData: ReviewJobResponse;
 }
@@ -95,6 +99,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   const [priceDisplay, setPriceDisplay] = useState<PriceDisplayMode>('total');
   const [prompt, setPrompt] = useState(initialData.job.prompt ?? '');
   const [isSavingPrompt, setIsSavingPrompt] = useState(false);
+  const [isSavingSelection, setIsSavingSelection] = useState(false);
   const [isStartingAnalysis, setIsStartingAnalysis] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
 
@@ -150,9 +155,54 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   const selectedResult = useMemo(
     () =>
       selectedId != null
-        ? sortedResults.find((result) => result.id === selectedId) ?? null
+        ? sortedResults.find((result) => listingKey(result) === selectedId) ?? null
         : null,
     [selectedId, sortedResults],
+  );
+
+  const selectedListings = useMemo(
+    () => sortedResults.filter((result) => result.selected),
+    [sortedResults],
+  );
+
+  const selectedCount = selectedListings.length;
+
+  const persistSelection = useCallback(
+    async (
+      nextSelectedListings: Array<Pick<ReviewJobResponse['listings'][number], 'id' | 'platform'>>,
+      successMessage: string,
+    ) => {
+      setIsSavingSelection(true);
+      setSaveMessage(null);
+
+      try {
+        const res = await fetch(`/api/jobs/${data.job.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt,
+            selectedListings: nextSelectedListings.map((listing) => ({
+              id: listing.id,
+              platform: listing.platform,
+            })),
+          }),
+        });
+
+        if (!res.ok) {
+          const payload = await res.json().catch(() => null);
+          throw new Error(payload?.error || 'Failed to update selection');
+        }
+
+        const nextData: ReviewJobResponse = await res.json();
+        setData(nextData);
+        setSaveMessage(successMessage);
+      } catch (error) {
+        setSaveMessage(error instanceof Error ? error.message : 'Failed to update selection');
+      } finally {
+        setIsSavingSelection(false);
+      }
+    },
+    [data.job.id, prompt],
   );
 
   const savePrompt = useCallback(async () => {
@@ -215,6 +265,35 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     }
   }, [data.job.id, prompt, refreshJob]);
 
+  const toggleListingSelection = useCallback(
+    async (target: ReviewJobResponse['listings'][number]) => {
+      const activeKeys = new Set(selectedListings.map((listing) => listingKey(listing)));
+      const targetKey = listingKey(target);
+      if (activeKeys.has(targetKey)) {
+        activeKeys.delete(targetKey);
+      } else {
+        activeKeys.add(targetKey);
+      }
+
+      const nextSelectedListings = sortedResults.filter((listing) => activeKeys.has(listingKey(listing)));
+      await persistSelection(
+        nextSelectedListings,
+        nextSelectedListings.length > 0
+          ? `Selected ${nextSelectedListings.length} listing${nextSelectedListings.length === 1 ? '' : 's'} for analysis`
+          : 'Selection cleared',
+      );
+    },
+    [persistSelection, selectedListings, sortedResults],
+  );
+
+  const selectAllVisible = useCallback(async () => {
+    await persistSelection(sortedResults, `Selected all ${sortedResults.length} listings for analysis`);
+  }, [persistSelection, sortedResults]);
+
+  const clearSelection = useCallback(async () => {
+    await persistSelection([], 'Selection cleared');
+  }, [persistSelection]);
+
   const resultCardContext = {
     priceDisplay,
     checkin: data.job.checkin,
@@ -226,13 +305,18 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   const canStartAnalysis =
     sortedResults.length > 0
     && (data.job.status === 'completed' || data.job.status === 'failed')
-    && data.job.analysisStatus !== 'running';
+    && data.job.analysisStatus !== 'running'
+    && !isSavingSelection;
   const analysisButtonLabel =
     data.job.analysisStatus === 'completed' || data.job.analysisStatus === 'partial'
-      ? 'Re-run analysis'
+      ? selectedCount > 0
+        ? `Re-run analysis (${selectedCount} selected)`
+        : `Re-run analysis (${sortedResults.length} listings)`
       : data.job.analysisStatus === 'running'
         ? 'Analysis running...'
-        : 'Analyze now';
+        : selectedCount > 0
+          ? `Analyze selected (${selectedCount})`
+          : `Analyze all (${sortedResults.length})`;
 
   return (
     <div className="relative flex min-h-screen flex-col overflow-hidden">
@@ -368,7 +452,12 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
               />
               <div className="mt-3 flex items-center justify-between gap-3">
                 <span className="text-xs text-stone-500">
-                  {saveMessage ?? 'Details, reviews, photos, AI summaries, and triage all reuse this brief.'}
+                  {saveMessage
+                    ?? (
+                      selectedCount > 0
+                        ? `Only the ${selectedCount} selected listing${selectedCount === 1 ? '' : 's'} will be analyzed.`
+                        : `No shortlist yet, so analysis will run on all ${sortedResults.length} listings.`
+                    )}
                 </span>
                 <div className="flex items-center gap-2">
                   {data.job.reportReady && (
@@ -403,9 +492,33 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                 Listings
                 <span className="ml-1 text-stone-500">({sortedResults.length})</span>
               </span>
-              <span className="text-xs text-stone-500">
-                {data.job.status === 'completed' ? 'Saved set' : 'Updating'}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-stone-500">
+                  {selectedCount > 0 ? `${selectedCount} selected` : (data.job.status === 'completed' ? 'Saved set' : 'Updating')}
+                </span>
+                {sortedResults.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void selectAllVisible();
+                    }}
+                    disabled={isSavingSelection || selectedCount === sortedResults.length}
+                    className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] font-semibold text-stone-300 transition hover:bg-white/[0.08] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Select all
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    void clearSelection();
+                  }}
+                  disabled={isSavingSelection || selectedCount === 0}
+                  className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] font-semibold text-stone-300 transition hover:bg-white/[0.08] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Clear
+                </button>
+              </div>
             </div>
 
             <div className="space-y-3">
@@ -413,8 +526,16 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                 <ResultCard
                   key={`${result.platform}:${result.id}`}
                   result={result}
-                  isSelected={selectedId === result.id}
-                  onClick={() => setSelectedId(selectedId === result.id ? null : result.id)}
+                  isSelected={selectedId === listingKey(result)}
+                  onClick={() => setSelectedId(selectedId === listingKey(result) ? null : listingKey(result))}
+                  selectionControl={{
+                    active: result.selected,
+                    label: result.selected ? 'Selected for analysis' : 'Select for analysis',
+                    onToggle: () => {
+                      void toggleListingSelection(result);
+                    },
+                    disabled: isSavingSelection,
+                  }}
                   context={resultCardContext}
                 />
               ))}

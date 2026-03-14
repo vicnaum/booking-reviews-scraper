@@ -1,7 +1,6 @@
-import 'dotenv/config';
-
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { config as loadDotEnv } from 'dotenv';
 import { bootstrapRuntimeProxyEnv } from '../../../src/config.js';
 import type { BatchOptions } from '../../../src/batch.js';
 import { runBatch } from '../../../src/batch.js';
@@ -21,6 +20,14 @@ interface ReviewAnalysisConfig {
 }
 
 async function main() {
+  for (const envPath of [
+    path.resolve(process.cwd(), '.env.local'),
+    path.resolve(process.cwd(), '.env'),
+    path.resolve(process.cwd(), '../.env'),
+  ]) {
+    loadDotEnv({ path: envPath, override: false });
+  }
+
   const configPath = process.argv[2];
   if (!configPath) {
     throw new Error('Missing review analysis config path');

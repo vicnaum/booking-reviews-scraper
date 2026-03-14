@@ -1,9 +1,8 @@
-import 'dotenv/config';
-
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Prisma } from '@prisma/client';
 import { Worker } from 'bullmq';
+import { config as loadDotEnv } from 'dotenv';
 import { runBatch, type BatchEvent } from '../../../src/batch.js';
 import { bootstrapRuntimeProxyEnv } from '../../../src/config.js';
 import { generateReport } from '../../../src/report.js';
@@ -46,6 +45,14 @@ import type {
   SearchResult,
 } from '../types.js';
 import { filterResultsForRequest } from './resultFilters.js';
+
+for (const envPath of [
+  path.resolve(process.cwd(), '.env.local'),
+  path.resolve(process.cwd(), '.env'),
+  path.resolve(process.cwd(), '../.env'),
+]) {
+  loadDotEnv({ path: envPath, override: false });
+}
 
 bootstrapRuntimeProxyEnv();
 
