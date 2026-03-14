@@ -15,6 +15,11 @@ import * as bookingScraper from './booking/scraper.js';
 import { runAnalyze, parseModelConfig, getProviderApiKey, PROVIDER_KEY_NAMES, type AnalysisResult } from './analyze.js';
 import { runAnalyzePhotos, type PhotoAnalysisResult } from './analyze-photos.js';
 import { runTriage, type TriageResult } from './triage.js';
+import {
+  formatReviewProgressLabel,
+  getScrapeProgressFraction,
+  shouldEmitReviewProgressEvent,
+} from './review-progress.js';
 
 // --- Interfaces ---
 
@@ -280,6 +285,40 @@ async function emitBatchEvent(
   await options.hooks.onEvent(event);
 }
 
+function buildReviewProgressPayload(input: {
+  platform: 'airbnb' | 'booking';
+  listingId: string;
+  listingIndex: number;
+  listingCount: number;
+  currentPage: number;
+  totalPages?: number;
+  totalReviewsSoFar: number;
+  reportedReviewCount?: number | null;
+}): Record<string, unknown> {
+  return {
+    kind: 'review-pages',
+    stage: 'reviews',
+    listingIndex: input.listingIndex,
+    listingCount: input.listingCount,
+    currentPage: input.currentPage,
+    totalPages: input.totalPages ?? null,
+    totalReviewsSoFar: input.totalReviewsSoFar,
+    reportedReviewCount: input.reportedReviewCount ?? null,
+    progressFraction: getScrapeProgressFraction({
+      listingIndex: input.listingIndex,
+      listingCount: input.listingCount,
+      currentPage: input.currentPage,
+      totalPages: input.totalPages,
+    }),
+    progressLabel: formatReviewProgressLabel({
+      platform: input.platform,
+      listingId: input.listingId,
+      currentPage: input.currentPage,
+      totalPages: input.totalPages,
+    }),
+  };
+}
+
 // --- Main batch function ---
 
 export async function runBatch(filePaths: string[], options: BatchOptions): Promise<BatchResult> {
@@ -509,7 +548,36 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
                 review_count: '',
                 status: 'Unknown',
               };
-              const reviews = await airbnbScraper.fetchPropertyReviews(apiKey, property);
+              const reviews = await airbnbScraper.fetchPropertyReviews(
+                apiKey,
+                property,
+                async (progress) => {
+                  if (!shouldEmitReviewProgressEvent(progress)) {
+                    return;
+                  }
+
+                  const payload = buildReviewProgressPayload({
+                    platform: 'airbnb',
+                    listingId: roomId,
+                    listingIndex: currentIndex,
+                    listingCount: totalCount,
+                    currentPage: progress.currentPage,
+                    totalPages: progress.totalPages,
+                    totalReviewsSoFar: progress.totalReviewsSoFar,
+                    reportedReviewCount: progress.reportedReviewCount,
+                  });
+
+                  await emitBatchEvent(options, {
+                    phase: 'scrape',
+                    level: 'info',
+                    message: payload.progressLabel as string,
+                    manifestKey,
+                    platform: 'airbnb',
+                    listingId: roomId,
+                    payload,
+                  });
+                },
+              );
               if (!options.print) {
                 if (!fs.existsSync(reviewsDir)) fs.mkdirSync(reviewsDir, { recursive: true });
                 const output = {
@@ -712,7 +780,34 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         } else {
           const t = Date.now();
           try {
-            const reviews = await bookingScraper.scrapeHotelReviews(hotelInfo);
+            const reviews = await bookingScraper.scrapeHotelReviews(
+              hotelInfo,
+              async (progress) => {
+                if (!shouldEmitReviewProgressEvent(progress)) {
+                  return;
+                }
+
+                const payload = buildReviewProgressPayload({
+                  platform: 'booking',
+                  listingId: id,
+                  listingIndex: currentIndex,
+                  listingCount: totalCount,
+                  currentPage: progress.currentPage,
+                  totalPages: progress.totalPages,
+                  totalReviewsSoFar: progress.totalReviewsSoFar,
+                });
+
+                await emitBatchEvent(options, {
+                  phase: 'scrape',
+                  level: 'info',
+                  message: payload.progressLabel as string,
+                  manifestKey,
+                  platform: 'booking',
+                  listingId: id,
+                  payload,
+                });
+              },
+            );
             if (!options.print) {
               if (!fs.existsSync(reviewsDir)) fs.mkdirSync(reviewsDir, { recursive: true });
               const output = {

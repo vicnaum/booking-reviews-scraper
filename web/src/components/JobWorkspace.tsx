@@ -65,6 +65,40 @@ function asStringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === 'string');
 }
 
+function getEventDetailLine(
+  event: ReviewJobResponse['events'][number],
+): string | null {
+  const payload =
+    event.payload && typeof event.payload === 'object'
+      ? event.payload
+      : null;
+
+  if (!payload || payload.kind !== 'review-pages') {
+    return null;
+  }
+
+  const currentPage =
+    typeof payload.currentPage === 'number' ? payload.currentPage : null;
+  const totalPages =
+    typeof payload.totalPages === 'number' ? payload.totalPages : null;
+  const totalReviewsSoFar =
+    typeof payload.totalReviewsSoFar === 'number' ? payload.totalReviewsSoFar : null;
+
+  const parts: string[] = [];
+  if (currentPage != null) {
+    parts.push(
+      totalPages != null
+        ? `Page ${currentPage}/${totalPages}`
+        : `Page ${currentPage}`,
+    );
+  }
+  if (totalReviewsSoFar != null) {
+    parts.push(`${totalReviewsSoFar} reviews captured`);
+  }
+
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
 function getSelectedAnalysisSummary(result: ReviewJobResponse['listings'][number] | null) {
   const triage =
     result?.analysis?.triage && typeof result.analysis.triage === 'object'
@@ -652,22 +686,30 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
             </div>
             <div className="space-y-3">
               {data.events.length > 0 ? (
-                data.events.map((event) => (
-                  <div
-                    key={event.id}
-                    className="rounded-2xl border border-white/10 bg-white/[0.03] p-3"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
-                        {event.phase}
-                      </span>
-                      <span className="text-[11px] text-stone-500">
-                        {new Date(event.createdAt).toLocaleTimeString()}
-                      </span>
+                data.events.map((event) => {
+                  const detailLine = getEventDetailLine(event);
+                  return (
+                    <div
+                      key={event.id}
+                      className="rounded-2xl border border-white/10 bg-white/[0.03] p-3"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
+                          {event.phase}
+                        </span>
+                        <span className="text-[11px] text-stone-500">
+                          {new Date(event.createdAt).toLocaleTimeString()}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-sm text-stone-100">{event.message}</p>
+                      {detailLine && (
+                        <p className="mt-1 text-xs text-stone-500">
+                          {detailLine}
+                        </p>
+                      )}
                     </div>
-                    <p className="mt-2 text-sm text-stone-100">{event.message}</p>
-                  </div>
-                ))
+                  );
+                })
               ) : (
                 <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-stone-500">
                   No events yet.

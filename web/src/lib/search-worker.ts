@@ -453,6 +453,41 @@ function getAnalysisPhaseProgress(phase: BatchEvent['phase'] | 'report'): number
   }
 }
 
+function resolveAnalysisEventState(event: BatchEvent): {
+  currentPhase: string;
+  progress: number;
+} {
+  const payload =
+    event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+      ? event.payload as Record<string, unknown>
+      : null;
+  const progressLabel =
+    payload && typeof payload.progressLabel === 'string'
+      ? payload.progressLabel
+      : null;
+  const progressFraction =
+    payload && typeof payload.progressFraction === 'number'
+      ? payload.progressFraction
+      : null;
+
+  if (event.phase === 'scrape' && progressFraction != null) {
+    const SCRAPE_PROGRESS_START = 0.18;
+    const SCRAPE_PROGRESS_END = 0.5;
+    return {
+      currentPhase: progressLabel ?? event.message,
+      progress:
+        SCRAPE_PROGRESS_START
+        + Math.max(0, Math.min(1, progressFraction))
+        * (SCRAPE_PROGRESS_END - SCRAPE_PROGRESS_START),
+    };
+  }
+
+  return {
+    currentPhase: progressLabel ?? event.phase,
+    progress: getAnalysisPhaseProgress(event.phase),
+  };
+}
+
 async function syncReviewJobArtifactsToDb(input: {
   reviewJobId: string;
   artifactRoot: string;
@@ -720,14 +755,15 @@ async function runReviewJobAnalysis(reviewJobId: string) {
       programmatic: true,
       hooks: {
         onEvent: async (event) => {
+          const nextState = resolveAnalysisEventState(event);
           await prisma.reviewJob.update({
             where: { id: reviewJobId },
             data: {
               status: 'running',
               currentPhase: 'analysis',
               analysisStatus: 'running',
-              analysisCurrentPhase: event.phase,
-              analysisProgress: getAnalysisPhaseProgress(event.phase),
+              analysisCurrentPhase: nextState.currentPhase,
+              analysisProgress: nextState.progress,
             },
           });
 
