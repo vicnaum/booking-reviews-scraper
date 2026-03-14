@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, type KeyboardEvent } from 'react';
 import { useSearchStore } from '@/hooks/useSearchStore';
-import { currencySymbol } from '@/lib/format';
+import { currencySymbol, getNightCount } from '@/lib/format';
 import type { PriceDisplay } from '@/lib/format';
 
 const PROPERTY_TYPES = [
@@ -30,6 +30,10 @@ const fieldLabelClassName =
 
 const FILTER_INPUT_DEBOUNCE_MS = 450;
 const MIN_LIVE_SEARCH_ZOOM = 12;
+
+function roundPriceValue(value: number): number {
+  return Math.round(value * 100) / 100;
+}
 
 export default function FilterPanel() {
   const checkin = useSearchStore((s) => s.checkin);
@@ -124,6 +128,7 @@ export default function FilterPanel() {
       : pendingViewportSearch
         ? 'The map window changed. Click update or turn on auto-update.'
         : 'The live map window is current.';
+  const nights = getNightCount(checkin, checkout);
 
   const update = useCallback(
     (key: string, value: unknown) => {
@@ -190,6 +195,39 @@ export default function FilterPanel() {
       triggerQuickSearch({ force: true });
     },
     [bookingFilters, setFilter, triggerQuickSearch],
+  );
+
+  const switchPriceDisplay = useCallback(
+    (mode: PriceDisplay) => {
+      if (mode === priceDisplay) {
+        return;
+      }
+
+      setFilter('priceDisplay', mode);
+
+      if (!nights || nights <= 0) {
+        return;
+      }
+
+      if (priceMin != null) {
+        setFilter(
+          'priceMin',
+          roundPriceValue(
+            priceDisplay === 'total' ? priceMin / nights : priceMin * nights,
+          ),
+        );
+      }
+
+      if (priceMax != null) {
+        setFilter(
+          'priceMax',
+          roundPriceValue(
+            priceDisplay === 'total' ? priceMax / nights : priceMax * nights,
+          ),
+        );
+      }
+    },
+    [nights, priceDisplay, priceMax, priceMin, setFilter],
   );
 
   return (
@@ -288,6 +326,7 @@ export default function FilterPanel() {
                 <input
                   id="map-price-min"
                   type="number"
+                  step="0.01"
                   value={priceMin ?? ''}
                   onChange={(e) =>
                     updateDebounced(
@@ -313,6 +352,7 @@ export default function FilterPanel() {
                 <input
                   id="map-price-max"
                   type="number"
+                  step="0.01"
                   value={priceMax ?? ''}
                   onChange={(e) =>
                     updateDebounced(
@@ -379,7 +419,7 @@ export default function FilterPanel() {
               {(['total', 'perNight'] as PriceDisplay[]).map((mode) => (
                 <button
                   key={mode}
-                  onClick={() => setFilter('priceDisplay', mode)}
+                  onClick={() => switchPriceDisplay(mode)}
                   className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
                     priceDisplay === mode
                       ? 'bg-white text-neutral-950 shadow-sm'
@@ -586,7 +626,11 @@ export default function FilterPanel() {
                     void startFullSearch();
                   }}
                   disabled={!canStartFullSearch}
-                  className="rounded-2xl border border-emerald-300/20 bg-[linear-gradient(135deg,rgba(15,76,52,0.95),rgba(28,108,76,0.95))] px-4 py-2.5 text-xs font-semibold text-emerald-100 shadow-[0_12px_30px_rgba(8,56,37,0.28)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:bg-white/[0.03] disabled:text-stone-600 disabled:shadow-none"
+                  className={`rounded-2xl border px-4 py-2.5 text-xs font-semibold transition ${
+                    activeJobId
+                      ? 'cursor-wait border-emerald-300/20 bg-[linear-gradient(135deg,rgba(15,76,52,0.95),rgba(28,108,76,0.95))] text-emerald-100 opacity-85 shadow-[0_12px_30px_rgba(8,56,37,0.22)]'
+                      : 'border-emerald-300/20 bg-[linear-gradient(135deg,rgba(15,76,52,0.95),rgba(28,108,76,0.95))] text-emerald-100 shadow-[0_12px_30px_rgba(8,56,37,0.28)] hover:brightness-110 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:bg-white/[0.03] disabled:text-stone-600 disabled:shadow-none'
+                  }`}
                 >
                   {activeJobId ? 'Full search running...' : 'Run full search'}
                 </button>

@@ -190,6 +190,7 @@ export default function LandingFilters() {
                 </span>
                 <input
                   type="number"
+                  step="0.01"
                   value={priceMin ?? ''}
                   onChange={(e) => updateNumber('priceMin', e.target.value)}
                   onKeyDown={onEnter}
@@ -203,6 +204,7 @@ export default function LandingFilters() {
                 </span>
                 <input
                   type="number"
+                  step="0.01"
                   value={priceMax ?? ''}
                   onChange={(e) => updateNumber('priceMax', e.target.value)}
                   onKeyDown={onEnter}

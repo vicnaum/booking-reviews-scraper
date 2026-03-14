@@ -23,7 +23,7 @@ function formatAmount(amount: number, currency: string): string {
   return `${currencySymbol(currency)}${Math.round(amount)}`;
 }
 
-function getNightCount(
+export function getNightCount(
   checkin?: string | null,
   checkout?: string | null,
 ): number | null {
@@ -92,7 +92,7 @@ export function getPriceDisplayInfo(
 
     if (nightly) {
       return {
-        primary: `${nightly} shown price`,
+        primary: nightly,
         secondary: null,
       };
     }
