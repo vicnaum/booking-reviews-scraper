@@ -198,6 +198,37 @@ export function getReportPathFromRoot(rootDir: string): string {
   return path.join(rootDir, 'report.html');
 }
 
+export function pruneAnalysisManifestToListings(input: {
+  rootDir: string;
+  listings: Array<Pick<ReviewJobListing, 'platform' | 'url'>>;
+  dates?: { checkIn?: string; checkOut?: string; adults?: number };
+}) {
+  const manifestPath = getManifestPathFromRoot(input.rootDir);
+  const manifest = readJsonFile<AnalysisManifest>(manifestPath);
+  if (!manifest) {
+    return;
+  }
+
+  const allowedKeys = new Set(
+    input.listings.map((listing) => getListingMatchKey(listing.platform, listing.url)),
+  );
+
+  manifest.listings = Object.fromEntries(
+    Object.entries(manifest.listings).filter(([, entry]) =>
+      allowedKeys.has(getListingMatchKey(entry.platform, entry.url))),
+  );
+
+  if (input.dates) {
+    manifest.dates = {
+      checkIn: input.dates.checkIn,
+      checkOut: input.dates.checkOut,
+      adults: input.dates.adults,
+    };
+  }
+
+  writeJsonFile(manifestPath, manifest);
+}
+
 export function getListingMatchKey(
   platform: Platform,
   url: string,
@@ -221,14 +252,48 @@ export function getListingMatchKey(
   }
 }
 
+function asCoordinates(
+  value: unknown,
+): { lat: number; lng: number } | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const point = value as Record<string, unknown>;
+  const lat = typeof point.lat === 'number' ? point.lat : null;
+  const lng = typeof point.lng === 'number' ? point.lng : null;
+
+  if (lat == null || lng == null) {
+    return null;
+  }
+
+  return { lat, lng };
+}
+
+export interface ListingArtifactPoiFallback {
+  platform: Platform;
+  url: string;
+  lat: number | null;
+  lng: number | null;
+  poiDistanceMeters?: number | null;
+}
+
 export function injectPoiContextIntoListingArtifacts(input: {
   rootDir: string;
   manifest: AnalysisManifest;
   poi: MapPoint | null;
+  fallbackListings?: ListingArtifactPoiFallback[];
 }) {
   if (!input.poi) {
     return;
   }
+
+  const fallbackByKey = new Map(
+    (input.fallbackListings ?? []).map((listing) => [
+      getListingMatchKey(listing.platform, listing.url),
+      listing,
+    ]),
+  );
 
   for (const entry of Object.values(input.manifest.listings)) {
     if (!entry.details.file) {
@@ -241,32 +306,32 @@ export function injectPoiContextIntoListingArtifacts(input: {
       continue;
     }
 
-    const coordinates =
-      listingData.coordinates
-      && typeof listingData.coordinates === 'object'
-      && !Array.isArray(listingData.coordinates)
-      ? listingData.coordinates as { lat?: number; lng?: number }
-      : null;
-
-    const lat =
-      coordinates && typeof coordinates.lat === 'number'
-        ? coordinates.lat
+    const fallback = fallbackByKey.get(
+      getListingMatchKey(entry.platform, entry.url),
+    );
+    const listingCoordinates = asCoordinates(listingData.coordinates);
+    const fallbackCoordinates =
+      fallback && fallback.lat != null && fallback.lng != null
+        ? { lat: fallback.lat, lng: fallback.lng }
         : null;
-    const lng =
-      coordinates && typeof coordinates.lng === 'number'
-        ? coordinates.lng
-        : null;
+    const resolvedCoordinates = listingCoordinates ?? fallbackCoordinates;
 
     const poiDistanceMeters =
-      lat != null && lng != null
-        ? getPoiDistanceMeters(input.poi, { lat, lng })
-        : null;
+      resolvedCoordinates
+        ? getPoiDistanceMeters(input.poi, resolvedCoordinates)
+        : fallback?.poiDistanceMeters ?? null;
 
-    writeJsonFile(listingPath, {
+    const nextListingData: Record<string, unknown> = {
       ...listingData,
       poi: input.poi,
       poiDistanceMeters,
-    });
+    };
+
+    if (!listingCoordinates && fallbackCoordinates) {
+      nextListingData.coordinates = fallbackCoordinates;
+    }
+
+    writeJsonFile(listingPath, nextListingData);
   }
 }
 

@@ -88,6 +88,8 @@ interface BookingListing {
   checkOut: string | null;
   linkedRoomId: string | null;
   rooms: { id: string; name: string; blockIds: string[]; photos?: any[] }[];
+  poi?: { lat: number; lng: number };
+  poiDistanceMeters?: number | null;
   scrapedAt: string;
 }
 
@@ -121,6 +123,8 @@ interface AirbnbListing {
   checkOut: string;
   cancellationPolicy: string | null;
   sleepingArrangements: { room: string; beds: string[] }[];
+  poi?: { lat: number; lng: number };
+  poiDistanceMeters?: number | null;
   scrapedAt: string;
 }
 
@@ -156,6 +160,27 @@ function isGenericTitle(title: string): boolean {
 
 function stripHtml(text: string): string {
   return text.replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ').trim();
+}
+
+function formatPoiDistance(meters: number): string {
+  if (meters < 1000) {
+    return `${Math.round(meters)} m`;
+  }
+
+  return `${(meters / 1000).toFixed(1)} km`;
+}
+
+function appendPoiContext(
+  lines: string[],
+  listing: { poi?: { lat: number; lng: number }; poiDistanceMeters?: number | null },
+): void {
+  if (listing.poiDistanceMeters != null) {
+    lines.push(`Distance to POI: ${formatPoiDistance(listing.poiDistanceMeters)}`);
+  }
+
+  if (listing.poi) {
+    lines.push(`POI: ${listing.poi.lat}, ${listing.poi.lng}`);
+  }
 }
 
 function truncate(text: string, maxLen: number): string {
@@ -355,6 +380,7 @@ export function formatBookingListing(listing: BookingListing): string {
   const lines: string[] = [];
   lines.push(`=== LISTING: ${listing.title} ===`);
   if (listing.address?.full) lines.push(`Address: ${listing.address.full}`);
+  appendPoiContext(lines, listing);
   if (listing.rating) {
     lines.push(`Rating: ${listing.rating} ${listing.ratingText || ''} | ${listing.reviewCount} reviews`);
   }
@@ -377,6 +403,7 @@ export function formatAirbnbListing(listing: AirbnbListing): string {
   const lines: string[] = [];
   lines.push(`=== LISTING: ${listing.title} ===`);
   if (listing.propertyType) lines.push(`Type: ${listing.propertyType}`);
+  appendPoiContext(lines, listing);
 
   const capacityParts: string[] = [];
   if (listing.capacity) capacityParts.push(`${listing.capacity} guests`);

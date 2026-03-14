@@ -35,6 +35,7 @@ import {
   getReportPathFromRoot,
   getReviewJobWorkspaceDir,
   injectPoiContextIntoListingArtifacts,
+  pruneAnalysisManifestToListings,
   readJsonFile,
   summarizeAnalysisStatus,
   summarizeManifestEntryStatus,
@@ -621,8 +622,16 @@ async function runReviewJobAnalysis(reviewJobId: string) {
   const poi = asStoredMapPoint(jobRecord.poi);
   const startedAt = new Date();
 
-  fs.rmSync(artifactRoot, { recursive: true, force: true });
   fs.mkdirSync(artifactRoot, { recursive: true });
+  pruneAnalysisManifestToListings({
+    rootDir: artifactRoot,
+    listings: activeListings,
+    dates: {
+      checkIn: jobRecord.checkin ?? undefined,
+      checkOut: jobRecord.checkout ?? undefined,
+      adults: jobRecord.adults,
+    },
+  });
   fs.writeFileSync(
     urlsFilePath,
     `${activeListings.map((listing) => listing.url).join('\n')}\n`,
@@ -736,6 +745,13 @@ async function runReviewJobAnalysis(reviewJobId: string) {
             rootDir: outputDir,
             manifest,
             poi,
+            fallbackListings: activeListings.map((listing) => ({
+              platform: listing.platform,
+              url: listing.url,
+              lat: listing.lat,
+              lng: listing.lng,
+              poiDistanceMeters: listing.poiDistanceMeters,
+            })),
           });
           await prisma.reviewJob.update({
             where: { id: reviewJobId },
