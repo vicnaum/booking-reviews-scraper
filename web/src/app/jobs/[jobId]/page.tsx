@@ -18,6 +18,9 @@ export default async function ReviewJobPage({ params }: Params) {
       listings: {
         where: { hidden: false },
         orderBy: { createdAt: 'asc' },
+        include: {
+          analysis: true,
+        },
       },
       events: {
         orderBy: { createdAt: 'asc' },

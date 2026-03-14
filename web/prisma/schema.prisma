@@ -20,6 +20,15 @@ enum JobStatus {
   cancelled
 }
 
+enum PhaseStatus {
+  pending
+  running
+  completed
+  failed
+  skipped
+  partial
+}
+
 enum SearchAreaMode {
   window
   rectangle
@@ -87,6 +96,8 @@ model ReviewJob {
   ownerKey       String?
   status         JobStatus       @default(pending)
   currentPhase   String          @default("search")
+  analysisStatus PhaseStatus     @default(pending)
+  analysisCurrentPhase String?
   location       String?
   prompt         String?
   boundingBox    Json?
@@ -106,10 +117,18 @@ model ReviewJob {
   progress       Float           @default(0)
   errorMessage   String?
   queueJobId     String?
+  analysisQueueJobId String?
+  artifactRoot   String?
+  reportPath     String?
   createdAt      DateTime        @default(now())
   startedAt      DateTime?
   completedAt    DateTime?
   durationMs     Int?
+  analysisProgress Float         @default(0)
+  analysisErrorMessage String?
+  analysisStartedAt DateTime?
+  analysisCompletedAt DateTime?
+  analysisDurationMs Int?
   listings       ReviewJobListing[]
   events         ReviewJobEvent[]
 
@@ -145,10 +164,40 @@ model ReviewJobListing {
   freeCancellation Boolean?
   selected         Boolean   @default(false)
   hidden           Boolean   @default(false)
+  poiDistanceMeters Float?
   createdAt        DateTime  @default(now())
+  analysis         ReviewJobListingAnalysis?
 
   @@unique([jobId, listingId, platform])
   @@index([jobId, createdAt])
+}
+
+model ReviewJobListingAnalysis {
+  id              String    @id @default(cuid())
+  jobListingId    String    @unique
+  jobListing      ReviewJobListing @relation(fields: [jobListingId], references: [id], onDelete: Cascade)
+  status          PhaseStatus @default(pending)
+  currentPhase    String      @default("pending")
+  errorMessage    String?
+  detailsStatus   PhaseStatus @default(pending)
+  reviewsStatus   PhaseStatus @default(pending)
+  photosStatus    PhaseStatus @default(pending)
+  aiReviewsStatus PhaseStatus @default(pending)
+  aiPhotosStatus  PhaseStatus @default(pending)
+  triageStatus    PhaseStatus @default(pending)
+  details         Json?
+  aiReviews       Json?
+  aiPhotos        Json?
+  triage          Json?
+  reviewCount     Int?
+  photoCount      Int?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  startedAt       DateTime?
+  completedAt     DateTime?
+  durationMs      Int?
+
+  @@index([status, updatedAt])
 }
 
 model ReviewJobEvent {

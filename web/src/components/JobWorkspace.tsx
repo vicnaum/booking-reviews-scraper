@@ -1,6 +1,7 @@
 'use client';
 
 import dynamic from 'next/dynamic';
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   PriceDisplayMode,
@@ -20,9 +21,19 @@ const JobMap = dynamic(() => import('./JobMap'), {
 
 const JOB_POLL_INTERVAL_MS = 2500;
 
-function statusLabel(status: ReviewJobResponse['job']['status']) {
+function statusLabel(
+  status: ReviewJobResponse['job']['status'],
+  currentPhase: string,
+  analysisStatus: ReviewJobResponse['job']['analysisStatus'],
+  reportReady: boolean,
+) {
   if (status === 'pending') return 'Pending';
-  if (status === 'running') return 'Searching';
+  if (status === 'running') {
+    return currentPhase === 'analysis' ? 'Analyzing' : 'Searching';
+  }
+  if (status === 'completed' && reportReady) return 'Results ready';
+  if (status === 'completed' && analysisStatus === 'completed') return 'Analyzed';
+  if (status === 'completed' && analysisStatus === 'partial') return 'Partial results';
   if (status === 'completed') return 'Ready';
   if (status === 'failed') return 'Failed';
   return 'Cancelled';
@@ -38,6 +49,42 @@ function statusClassName(status: ReviewJobResponse['job']['status']) {
   return 'border-rose-300/20 bg-rose-300/10 text-rose-100';
 }
 
+function phaseStatusLabel(status: ReviewJobResponse['job']['analysisStatus']) {
+  if (status === 'pending') return 'Not started';
+  if (status === 'running') return 'Running';
+  if (status === 'completed') return 'Completed';
+  if (status === 'partial') return 'Partial';
+  if (status === 'failed') return 'Failed';
+  return 'Skipped';
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === 'string');
+}
+
+function getSelectedAnalysisSummary(result: ReviewJobResponse['listings'][number] | null) {
+  const triage =
+    result?.analysis?.triage && typeof result.analysis.triage === 'object'
+      ? result.analysis.triage
+      : null;
+
+  if (!triage) {
+    return null;
+  }
+
+  return {
+    tier: typeof triage.tier === 'string' ? triage.tier : null,
+    fitScore: typeof triage.fitScore === 'number' ? triage.fitScore : null,
+    summary: typeof triage.summary === 'string' ? triage.summary : null,
+    highlights: asStringArray(triage.highlights),
+    concerns: asStringArray(triage.concerns),
+    dealBreakers: asStringArray(triage.dealBreakers),
+  };
+}
+
 interface JobWorkspaceProps {
   initialData: ReviewJobResponse;
 }
@@ -48,6 +95,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   const [priceDisplay, setPriceDisplay] = useState<PriceDisplayMode>('total');
   const [prompt, setPrompt] = useState(initialData.job.prompt ?? '');
   const [isSavingPrompt, setIsSavingPrompt] = useState(false);
+  const [isStartingAnalysis, setIsStartingAnalysis] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
 
   const refreshJob = useCallback(async () => {
@@ -61,7 +109,13 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   }, [data.job.id]);
 
   useEffect(() => {
-    if (data.job.status !== 'pending' && data.job.status !== 'running') {
+    const shouldPoll =
+      data.job.status === 'pending'
+      || data.job.status === 'running'
+      || data.job.analysisStatus === 'running'
+      || data.job.analysisCurrentPhase === 'queued';
+
+    if (!shouldPoll) {
       return;
     }
 
@@ -70,10 +124,10 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     }, JOB_POLL_INTERVAL_MS);
 
     return () => clearInterval(interval);
-  }, [data.job.status, refreshJob]);
+  }, [data.job.analysisCurrentPhase, data.job.analysisStatus, data.job.status, refreshJob]);
 
   const sortedResults = useMemo(() => {
-    const nextResults = [...data.results];
+    const nextResults = [...data.listings];
     nextResults.sort((a, b) => {
       const aAmount = resolveComparablePrice(a, priceDisplay, {
         checkin: data.job.checkin,
@@ -91,7 +145,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     });
 
     return nextResults;
-  }, [data.job.checkin, data.job.checkout, data.results, priceDisplay]);
+  }, [data.job.checkin, data.job.checkout, data.listings, priceDisplay]);
 
   const selectedResult = useMemo(
     () =>
@@ -127,6 +181,40 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     }
   }, [data.job.id, prompt]);
 
+  const startAnalysis = useCallback(async () => {
+    setIsStartingAnalysis(true);
+    setSaveMessage(null);
+
+    try {
+      const saveRes = await fetch(`/api/jobs/${data.job.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+      });
+
+      if (!saveRes.ok) {
+        const payload = await saveRes.json().catch(() => null);
+        throw new Error(payload?.error || 'Failed to save prompt');
+      }
+
+      const analyzeRes = await fetch(`/api/jobs/${data.job.id}/analyze`, {
+        method: 'POST',
+      });
+
+      if (!analyzeRes.ok) {
+        const payload = await analyzeRes.json().catch(() => null);
+        throw new Error(payload?.error || 'Failed to start analysis');
+      }
+
+      await refreshJob();
+      setSaveMessage('Analysis queued');
+    } catch (error) {
+      setSaveMessage(error instanceof Error ? error.message : 'Failed to start analysis');
+    } finally {
+      setIsStartingAnalysis(false);
+    }
+  }, [data.job.id, prompt, refreshJob]);
+
   const resultCardContext = {
     priceDisplay,
     checkin: data.job.checkin,
@@ -134,6 +222,17 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     adults: data.job.adults,
     currency: data.job.currency,
   };
+  const selectedAnalysisSummary = getSelectedAnalysisSummary(selectedResult);
+  const canStartAnalysis =
+    sortedResults.length > 0
+    && (data.job.status === 'completed' || data.job.status === 'failed')
+    && data.job.analysisStatus !== 'running';
+  const analysisButtonLabel =
+    data.job.analysisStatus === 'completed' || data.job.analysisStatus === 'partial'
+      ? 'Re-run analysis'
+      : data.job.analysisStatus === 'running'
+        ? 'Analysis running...'
+        : 'Analyze now';
 
   return (
     <div className="relative flex min-h-screen flex-col overflow-hidden">
@@ -157,7 +256,12 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
 
             <div className="flex flex-col items-start gap-2 lg:items-end">
               <span className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${statusClassName(data.job.status)}`}>
-                {statusLabel(data.job.status)}
+                {statusLabel(
+                  data.job.status,
+                  data.job.currentPhase,
+                  data.job.analysisStatus,
+                  data.job.reportReady,
+                )}
               </span>
               <span className="text-xs text-stone-500">Job ID: {data.job.id}</span>
             </div>
@@ -203,6 +307,9 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                 <span className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5">
                   {data.job.pagesScanned} pages scanned
                 </span>
+                <span className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5">
+                  Analysis: {phaseStatusLabel(data.job.analysisStatus)}
+                </span>
               </div>
               {(data.job.status === 'pending' || data.job.status === 'running') && (
                 <div className="mt-4">
@@ -218,6 +325,20 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                   </div>
                 </div>
               )}
+              {(data.job.analysisStatus === 'pending' || data.job.analysisStatus === 'running') && (
+                <div className="mt-4">
+                  <div className="flex items-center justify-between text-xs font-medium text-stone-400">
+                    <span>{data.job.analysisCurrentPhase || 'analysis'}</span>
+                    <span>{Math.round(data.job.analysisProgress * 100)}%</span>
+                  </div>
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/[0.08]">
+                    <div
+                      className="h-full rounded-full bg-[linear-gradient(90deg,#ff8b6e,#ffd18a)] transition-all"
+                      style={{ width: `${Math.max(4, Math.round(data.job.analysisProgress * 100))}%` }}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
@@ -225,7 +346,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                 <div>
                   <p className="text-sm font-semibold text-white">Analysis Brief</p>
                   <p className="mt-1 text-xs text-stone-500">
-                    Save preferences here now; queued analysis wiring is the next milestone.
+                    Saved preferences feed the full CLI-equivalent analysis run.
                   </p>
                 </div>
                 <button
@@ -247,14 +368,27 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
               />
               <div className="mt-3 flex items-center justify-between gap-3">
                 <span className="text-xs text-stone-500">
-                  {saveMessage ?? 'This prompt will feed the later analysis phase.'}
+                  {saveMessage ?? 'Details, reviews, photos, AI summaries, and triage all reuse this brief.'}
                 </span>
-                <button
-                  disabled
-                  className="rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-2 text-xs font-semibold text-stone-500"
-                >
-                  Analyze next
-                </button>
+                <div className="flex items-center gap-2">
+                  {data.job.reportReady && (
+                    <Link
+                      href={`/jobs/${data.job.id}/results`}
+                      className="rounded-2xl border border-emerald-300/20 bg-emerald-300/10 px-4 py-2 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-300/15"
+                    >
+                      Open results
+                    </Link>
+                  )}
+                  <button
+                    onClick={() => {
+                      void startAnalysis();
+                    }}
+                    disabled={!canStartAnalysis || isStartingAnalysis}
+                    className="rounded-2xl border border-white/10 bg-[#ff6b5f]/12 px-4 py-2 text-xs font-semibold text-[#ffcabf] transition hover:bg-[#ff6b5f]/18 disabled:cursor-not-allowed disabled:border-white/[0.08] disabled:bg-white/[0.03] disabled:text-stone-500"
+                  >
+                    {isStartingAnalysis ? 'Queueing…' : analysisButtonLabel}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -310,10 +444,88 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
           </main>
 
           <aside className="min-h-0 overflow-y-auto border-l border-white/10 bg-[linear-gradient(180deg,rgba(18,15,13,0.94),rgba(12,10,9,0.92))] p-4">
+            {selectedResult && (
+              <div className="mb-4 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                <p className="text-sm font-semibold text-white">
+                  {selectedResult.name}
+                </p>
+                <p className="mt-1 text-xs text-stone-500">
+                  {selectedResult.platform} listing
+                  {selectedResult.poiDistanceMeters != null && (
+                    <> · {Math.round(selectedResult.poiDistanceMeters)}m from POI</>
+                  )}
+                </p>
+
+                {selectedAnalysisSummary ? (
+                  <div className="mt-4 space-y-3">
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      {selectedAnalysisSummary.tier && (
+                        <span className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2.5 py-1 font-semibold uppercase tracking-[0.14em] text-emerald-100">
+                          {selectedAnalysisSummary.tier.replace(/_/g, ' ')}
+                        </span>
+                      )}
+                      {selectedAnalysisSummary.fitScore != null && (
+                        <span className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 font-medium text-stone-300">
+                          Fit {selectedAnalysisSummary.fitScore}
+                        </span>
+                      )}
+                    </div>
+                    {selectedAnalysisSummary.summary && (
+                      <p className="text-sm leading-6 text-stone-200">
+                        {selectedAnalysisSummary.summary}
+                      </p>
+                    )}
+                    {selectedAnalysisSummary.highlights.length > 0 && (
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
+                          Highlights
+                        </p>
+                        <ul className="mt-2 space-y-2 text-sm text-stone-300">
+                          {selectedAnalysisSummary.highlights.slice(0, 3).map((item) => (
+                            <li key={item}>• {item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {selectedAnalysisSummary.concerns.length > 0 && (
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
+                          Concerns
+                        </p>
+                        <ul className="mt-2 space-y-2 text-sm text-stone-300">
+                          {selectedAnalysisSummary.concerns.slice(0, 3).map((item) => (
+                            <li key={item}>• {item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {selectedAnalysisSummary.dealBreakers.length > 0 && (
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-rose-300/70">
+                          Deal-breakers
+                        </p>
+                        <ul className="mt-2 space-y-2 text-sm text-rose-100">
+                          {selectedAnalysisSummary.dealBreakers.slice(0, 3).map((item) => (
+                            <li key={item}>• {item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-3 text-sm text-stone-500">
+                    {selectedResult.analysis
+                      ? `Analysis phase: ${selectedResult.analysis.currentPhase} (${selectedResult.analysis.status})`
+                      : 'Analysis has not run for this listing yet.'}
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="mb-3">
               <p className="text-sm font-semibold text-white">Job timeline</p>
               <p className="mt-1 text-xs text-stone-500">
-                Structured events already persist here; live analysis events will reuse this.
+                Search and analysis events persist here, so the job can be reopened later.
               </p>
             </div>
             <div className="space-y-3">

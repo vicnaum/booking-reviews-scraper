@@ -19,6 +19,9 @@ export async function GET(_request: Request, { params }: Params) {
       listings: {
         where: { hidden: false },
         orderBy: { createdAt: 'asc' },
+        include: {
+          analysis: true,
+        },
       },
       events: {
         orderBy: { createdAt: 'asc' },
@@ -58,6 +61,9 @@ export async function PATCH(request: Request, { params }: Params) {
       listings: {
         where: { hidden: false },
         orderBy: { createdAt: 'asc' },
+        include: {
+          analysis: true,
+        },
       },
       events: {
         orderBy: { createdAt: 'asc' },

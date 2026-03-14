@@ -3,6 +3,7 @@ import type {
   ReviewJob as ReviewJobModel,
   ReviewJobEvent as ReviewJobEventModel,
   ReviewJobListing as ReviewJobListingModel,
+  ReviewJobListingAnalysis as ReviewJobListingAnalysisModel,
 } from '@prisma/client';
 import type {
   AirbnbSearchParams,
@@ -14,6 +15,8 @@ import type {
   FullSearchRequest,
   MapPoint,
   ReviewJobEvent,
+  ReviewJobListing,
+  ReviewJobListingAnalysis,
   ReviewJobResponse,
   ReviewJobState,
   SearchPricing,
@@ -24,6 +27,8 @@ import {
   parseSearchFilters,
   parseStoredBoundingBox,
 } from './searchJobs.js';
+
+const EARTH_RADIUS_METERS = 6371000;
 
 function asNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -95,10 +100,33 @@ function asSearchPricing(value: unknown): SearchPricing | null {
   return { nightly, total, display };
 }
 
+function toRadians(value: number): number {
+  return (value * Math.PI) / 180;
+}
+
+function getDistanceMeters(a: MapPoint, b: MapPoint): number {
+  const lat1 = toRadians(a.lat);
+  const lat2 = toRadians(b.lat);
+  const dLat = lat2 - lat1;
+  const dLng = toRadians(b.lng - a.lng);
+  const hav =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 2 * EARTH_RADIUS_METERS * Math.atan2(Math.sqrt(hav), Math.sqrt(1 - hav));
+}
+
 export function toReviewJobListingRecord(
   jobId: string,
   result: SearchResult,
+  options: {
+    poi?: MapPoint | null;
+  } = {},
 ): Prisma.ReviewJobListingCreateManyInput {
+  const poiDistanceMeters =
+    options.poi && result.coordinates
+      ? getDistanceMeters(options.poi, result.coordinates)
+      : null;
+
   return {
     jobId,
     listingId: result.id,
@@ -128,10 +156,41 @@ export function toReviewJobListingRecord(
     hostId: result.hostId ?? null,
     stars: result.stars ?? null,
     freeCancellation: result.freeCancellation ?? null,
+    poiDistanceMeters,
   };
 }
 
-export function toWebReviewJobResult(row: ReviewJobListingModel): SearchResult {
+function toReviewJobListingAnalysisState(
+  row: ReviewJobListingAnalysisModel,
+): ReviewJobListingAnalysis {
+  return {
+    id: row.id,
+    status: row.status,
+    currentPhase: row.currentPhase,
+    errorMessage: row.errorMessage ?? null,
+    detailsStatus: row.detailsStatus,
+    reviewsStatus: row.reviewsStatus,
+    photosStatus: row.photosStatus,
+    aiReviewsStatus: row.aiReviewsStatus,
+    aiPhotosStatus: row.aiPhotosStatus,
+    triageStatus: row.triageStatus,
+    details: asJsonObject(row.details),
+    aiReviews: asJsonObject(row.aiReviews),
+    aiPhotos: asJsonObject(row.aiPhotos),
+    triage: asJsonObject(row.triage),
+    reviewCount: row.reviewCount ?? null,
+    photoCount: row.photoCount ?? null,
+    durationMs: row.durationMs ?? null,
+    startedAt: row.startedAt?.toISOString() ?? null,
+    completedAt: row.completedAt?.toISOString() ?? null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+export function toWebReviewJobListing(
+  row: ReviewJobListingModel & { analysis?: ReviewJobListingAnalysisModel | null },
+): ReviewJobListing {
   const pricing =
     asSearchPricing((row as ReviewJobListingModel & { pricing?: Prisma.JsonValue | null }).pricing)
     ?? (
@@ -181,6 +240,10 @@ export function toWebReviewJobResult(row: ReviewJobListingModel): SearchResult {
     hostId: row.hostId ?? undefined,
     stars: row.stars ?? undefined,
     freeCancellation: row.freeCancellation ?? undefined,
+    selected: row.selected,
+    hidden: row.hidden,
+    poiDistanceMeters: row.poiDistanceMeters ?? null,
+    analysis: row.analysis ? toReviewJobListingAnalysisState(row.analysis) : null,
   };
 }
 
@@ -190,6 +253,8 @@ export function toReviewJobState(job: ReviewJobModel): ReviewJobState {
     ownerKey: job.ownerKey ?? null,
     status: job.status,
     currentPhase: job.currentPhase,
+    analysisStatus: job.analysisStatus,
+    analysisCurrentPhase: job.analysisCurrentPhase ?? null,
     location: job.location ?? null,
     prompt: job.prompt ?? null,
     boundingBox: parseStoredBoundingBox(job.boundingBox) ?? null,
@@ -208,9 +273,15 @@ export function toReviewJobState(job: ReviewJobModel): ReviewJobState {
     pagesScanned: job.pagesScanned,
     progress: job.progress,
     errorMessage: job.errorMessage ?? null,
+    analysisProgress: job.analysisProgress,
+    analysisErrorMessage: job.analysisErrorMessage ?? null,
+    analysisDurationMs: job.analysisDurationMs ?? null,
+    analysisStartedAt: job.analysisStartedAt?.toISOString() ?? null,
+    analysisCompletedAt: job.analysisCompletedAt?.toISOString() ?? null,
     durationMs: job.durationMs ?? null,
     startedAt: job.startedAt?.toISOString() ?? null,
     completedAt: job.completedAt?.toISOString() ?? null,
+    reportReady: !!job.reportPath,
     createdAt: job.createdAt.toISOString(),
   };
 }
@@ -230,12 +301,12 @@ export function toReviewJobEvent(row: ReviewJobEventModel): ReviewJobEvent {
 
 export function toReviewJobResponse(input: {
   job: ReviewJobModel;
-  listings: ReviewJobListingModel[];
+  listings: Array<ReviewJobListingModel & { analysis?: ReviewJobListingAnalysisModel | null }>;
   events: ReviewJobEventModel[];
 }): ReviewJobResponse {
   return {
     job: toReviewJobState(input.job),
-    results: input.listings.map(toWebReviewJobResult),
+    listings: input.listings.map(toWebReviewJobListing),
     events: input.events.map(toReviewJobEvent),
   };
 }

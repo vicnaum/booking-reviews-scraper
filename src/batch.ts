@@ -38,6 +38,8 @@ export interface BatchOptions {
   downloadPhotosAll: boolean;
   outputDir?: string;
   print: boolean;
+  programmatic?: boolean;
+  hooks?: BatchHooks;
 }
 
 // --- Manifest types ---
@@ -74,6 +76,24 @@ export interface BatchManifest {
   updatedAt: string;
   dates: { checkIn?: string; checkOut?: string; adults?: number };
   listings: Record<string, ManifestEntry>;
+}
+
+export interface BatchEvent {
+  phase: 'batch' | 'scrape' | 'ai-reviews' | 'ai-photos' | 'triage';
+  level: 'info' | 'warning' | 'error';
+  message: string;
+  manifestKey?: string;
+  platform?: 'airbnb' | 'booking';
+  listingId?: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface BatchHooks {
+  onEvent?: (event: BatchEvent) => void | Promise<void>;
+  onScrapeComplete?: (input: {
+    outputDir: string;
+    manifest: BatchManifest;
+  }) => void | Promise<void>;
 }
 
 interface PhaseResult {
@@ -249,6 +269,17 @@ function newPlatformResult(total: number): PlatformResult {
   };
 }
 
+async function emitBatchEvent(
+  options: BatchOptions,
+  event: BatchEvent,
+): Promise<void> {
+  if (!options.hooks?.onEvent) {
+    return;
+  }
+
+  await options.hooks.onEvent(event);
+}
+
 // --- Main batch function ---
 
 export async function runBatch(filePaths: string[], options: BatchOptions): Promise<BatchResult> {
@@ -339,6 +370,12 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
   if (options.aiPhotos) phases.push('ai-photos');
   if (options.triage) phases.push('triage');
   console.log(`Phases: ${phases.join(', ')}\n`);
+  await emitBatchEvent(options, {
+    phase: 'batch',
+    level: 'info',
+    message: `Batch started (${phases.join(', ')})`,
+    payload: { phases, checkIn, checkOut, adults },
+  });
 
   const dateOpts = { checkIn, checkOut, adults };
   const airbnbResult = newPlatformResult(preprocessed.airbnb.count);
@@ -350,6 +387,12 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
   if (preprocessed.airbnb.count > 0) {
     const airbnbOutputDir = options.outputDir || 'data/airbnb/output';
     let apiKey: string | null = null;
+    await emitBatchEvent(options, {
+      phase: 'scrape',
+      level: 'info',
+      message: 'Starting Airbnb scrape phases',
+      payload: { platform: 'airbnb', listings: preprocessed.airbnb.count },
+    });
 
     // Get API key once if needed for details or reviews
     if (options.fetchDetails || options.fetchReviews) {
@@ -553,6 +596,15 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
       }
 
       console.log(`${prefix} \u2014 ${statusParts.join(' | ')}`);
+      await emitBatchEvent(options, {
+        phase: 'scrape',
+        level: 'info',
+        message: statusParts.join(' | '),
+        manifestKey,
+        platform: 'airbnb',
+        listingId: roomId,
+        payload: { url },
+      });
 
       // Save manifest after each listing
       saveManifest(manifest, manifestPath);
@@ -567,6 +619,12 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
   // 7. Process Booking listings
   if (preprocessed.booking.count > 0) {
     const bookingOutputDir = options.outputDir || 'data/booking/output';
+    await emitBatchEvent(options, {
+      phase: 'scrape',
+      level: 'info',
+      message: 'Starting Booking scrape phases',
+      payload: { platform: 'booking', listings: preprocessed.booking.count },
+    });
 
     for (const url of preprocessed.booking.urls) {
       currentIndex++;
@@ -740,11 +798,27 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
       }
 
       console.log(`${prefix} \u2014 ${statusParts.join(' | ')}`);
+      await emitBatchEvent(options, {
+        phase: 'scrape',
+        level: 'info',
+        message: statusParts.join(' | '),
+        manifestKey,
+        platform: 'booking',
+        listingId: id,
+        payload: { url },
+      });
 
       // Save manifest after each listing
       saveManifest(manifest, manifestPath);
       // No artificial delay for Booking (Playwright is already slow)
     }
+  }
+
+  if (options.hooks?.onScrapeComplete) {
+    await options.hooks.onScrapeComplete({
+      outputDir: options.outputDir || 'data',
+      manifest,
+    });
   }
 
   // 8. AI review analysis phase (runs after all scraping)
@@ -759,13 +833,27 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
     if (!aiApiKey) {
       const keyName = PROVIDER_KEY_NAMES[modelConfig.provider];
       if (options.aiReviewsExplicit) {
-        console.error(`Error: ${keyName} (or LLM_API_KEY) required for --ai-reviews. Set it in your environment.`);
+        const message = `${keyName} (or LLM_API_KEY) required for --ai-reviews. Set it in your environment.`;
+        console.error(`Error: ${message}`);
+        await emitBatchEvent(options, {
+          phase: 'ai-reviews',
+          level: 'error',
+          message,
+        });
+        if (options.programmatic) {
+          throw new Error(message);
+        }
         process.exit(1);
       } else {
         console.warn(`Warning: ${keyName} not set \u2014 skipping AI review analysis.`);
       }
     } else {
       console.log(`\nAI review analysis (${modelConfig.model}):`);
+      await emitBatchEvent(options, {
+        phase: 'ai-reviews',
+        level: 'info',
+        message: `Starting AI review analysis (${modelConfig.model})`,
+      });
       if (!fs.existsSync(aiReviewsDir)) fs.mkdirSync(aiReviewsDir, { recursive: true });
 
       let aiIndex = 0;
@@ -783,6 +871,14 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           if (!(options.retryFailed && shouldRetryPhase(manifest, manifestKey, 'aiReviews'))) {
             console.log(`${prefix} \u2014 ai-reviews \u2298 skip`);
             platformResult.aiReviews.skipped++;
+            await emitBatchEvent(options, {
+              phase: 'ai-reviews',
+              level: 'info',
+              message: 'ai-reviews \u2298 skip',
+              manifestKey,
+              platform: entry.platform,
+              listingId: entry.id,
+            });
             continue;
           }
         }
@@ -792,6 +888,14 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         if (options.retryFailed && entry.aiReviews?.status === 'fetched') {
           console.log(`${prefix} \u2014 ai-reviews \u2298 skip`);
           platformResult.aiReviews.skipped++;
+          await emitBatchEvent(options, {
+            phase: 'ai-reviews',
+            level: 'info',
+            message: 'ai-reviews \u2298 skip',
+            manifestKey,
+            platform: entry.platform,
+            listingId: entry.id,
+          });
           continue;
         }
 
@@ -800,6 +904,14 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} \u2014 ai-reviews \u2298 skip (no reviews)`);
           platformResult.aiReviews.skipped++;
           entry.aiReviews = { status: 'skipped', reason: 'no reviews' };
+          await emitBatchEvent(options, {
+            phase: 'ai-reviews',
+            level: 'info',
+            message: 'ai-reviews \u2298 skip (no reviews)',
+            manifestKey,
+            platform: entry.platform,
+            listingId: entry.id,
+          });
           continue;
         }
 
@@ -811,6 +923,14 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} \u2014 ai-reviews \u2298 skip (reviews file missing)`);
           platformResult.aiReviews.skipped++;
           entry.aiReviews = { status: 'skipped', reason: 'reviews file missing' };
+          await emitBatchEvent(options, {
+            phase: 'ai-reviews',
+            level: 'warning',
+            message: 'ai-reviews \u2298 skip (reviews file missing)',
+            manifestKey,
+            platform: entry.platform,
+            listingId: entry.id,
+          });
           continue;
         }
 
@@ -829,11 +949,27 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} \u2014 ai-reviews \u2713 (${formatDuration(Date.now() - t)})`);
           platformResult.aiReviews.fetched++;
           entry.aiReviews = { status: 'fetched', file: `ai-reviews/${entry.id}.json`, model: result.model, cost: result.usage?.cost };
+          await emitBatchEvent(options, {
+            phase: 'ai-reviews',
+            level: 'info',
+            message: `ai-reviews \u2713 (${formatDuration(Date.now() - t)})`,
+            manifestKey,
+            platform: entry.platform,
+            listingId: entry.id,
+          });
         } catch (err: any) {
           console.log(`${prefix} \u2014 ai-reviews \u2717 ${err.message}`);
           platformResult.aiReviews.failed++;
           platformResult.errors.push({ id: entry.id, phase: 'ai-reviews', message: err.message });
           entry.aiReviews = { status: 'failed', error: err.message, model: modelConfig.model };
+          await emitBatchEvent(options, {
+            phase: 'ai-reviews',
+            level: 'error',
+            message: `ai-reviews \u2717 ${err.message}`,
+            manifestKey,
+            platform: entry.platform,
+            listingId: entry.id,
+          });
         }
 
         saveManifest(manifest, manifestPath);
@@ -853,13 +989,27 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
     if (!aiApiKey) {
       const keyName = PROVIDER_KEY_NAMES[modelConfig.provider];
       if (options.aiPhotosExplicit) {
-        console.error(`Error: ${keyName} (or LLM_API_KEY) required for --ai-photos. Set it in your environment.`);
+        const message = `${keyName} (or LLM_API_KEY) required for --ai-photos. Set it in your environment.`;
+        console.error(`Error: ${message}`);
+        await emitBatchEvent(options, {
+          phase: 'ai-photos',
+          level: 'error',
+          message,
+        });
+        if (options.programmatic) {
+          throw new Error(message);
+        }
         process.exit(1);
       } else {
         console.warn(`Warning: ${keyName} not set — skipping AI photo analysis.`);
       }
     } else {
       console.log(`\nAI photo analysis (${modelConfig.model}):`);
+      await emitBatchEvent(options, {
+        phase: 'ai-photos',
+        level: 'info',
+        message: `Starting AI photo analysis (${modelConfig.model})`,
+      });
       if (!fs.existsSync(aiPhotosOutputDir)) fs.mkdirSync(aiPhotosOutputDir, { recursive: true });
 
       let aiIndex = 0;
@@ -876,6 +1026,14 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           if (!(options.retryFailed && shouldRetryPhase(manifest, manifestKey, 'aiPhotos'))) {
             console.log(`${prefix} — ai-photos ⊘ skip`);
             platformResult.aiPhotos.skipped++;
+            await emitBatchEvent(options, {
+              phase: 'ai-photos',
+              level: 'info',
+              message: 'ai-photos ⊘ skip',
+              manifestKey,
+              platform: entry.platform,
+              listingId: entry.id,
+            });
             continue;
           }
         }
@@ -884,6 +1042,14 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         if (options.retryFailed && entry.aiPhotos?.status === 'fetched') {
           console.log(`${prefix} — ai-photos ⊘ skip`);
           platformResult.aiPhotos.skipped++;
+          await emitBatchEvent(options, {
+            phase: 'ai-photos',
+            level: 'info',
+            message: 'ai-photos ⊘ skip',
+            manifestKey,
+            platform: entry.platform,
+            listingId: entry.id,
+          });
           continue;
         }
 
@@ -892,6 +1058,14 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} — ai-photos ⊘ skip (no photos)`);
           platformResult.aiPhotos.skipped++;
           entry.aiPhotos = { status: 'skipped', reason: 'no photos' };
+          await emitBatchEvent(options, {
+            phase: 'ai-photos',
+            level: 'info',
+            message: 'ai-photos ⊘ skip (no photos)',
+            manifestKey,
+            platform: entry.platform,
+            listingId: entry.id,
+          });
           continue;
         }
 
@@ -901,6 +1075,14 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} — ai-photos ⊘ skip (photos dir empty/missing)`);
           platformResult.aiPhotos.skipped++;
           entry.aiPhotos = { status: 'skipped', reason: 'photos dir empty' };
+          await emitBatchEvent(options, {
+            phase: 'ai-photos',
+            level: 'warning',
+            message: 'ai-photos ⊘ skip (photos dir empty/missing)',
+            manifestKey,
+            platform: entry.platform,
+            listingId: entry.id,
+          });
           continue;
         }
 
@@ -921,11 +1103,27 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} — ai-photos ✓ ${result.photoCount} photos (${formatDuration(Date.now() - t)})`);
           platformResult.aiPhotos.fetched++;
           entry.aiPhotos = { status: 'fetched', file: `ai-photos/${entry.id}.json`, model: result.model, count: result.photoCount, cost: result.usage?.cost };
+          await emitBatchEvent(options, {
+            phase: 'ai-photos',
+            level: 'info',
+            message: `ai-photos ✓ ${result.photoCount} photos (${formatDuration(Date.now() - t)})`,
+            manifestKey,
+            platform: entry.platform,
+            listingId: entry.id,
+          });
         } catch (err: any) {
           console.log(`${prefix} — ai-photos ✗ ${err.message}`);
           platformResult.aiPhotos.failed++;
           platformResult.errors.push({ id: entry.id, phase: 'ai-photos', message: err.message });
           entry.aiPhotos = { status: 'failed', error: err.message, model: modelConfig.model };
+          await emitBatchEvent(options, {
+            phase: 'ai-photos',
+            level: 'error',
+            message: `ai-photos ✗ ${err.message}`,
+            manifestKey,
+            platform: entry.platform,
+            listingId: entry.id,
+          });
         }
 
         saveManifest(manifest, manifestPath);
@@ -945,13 +1143,27 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
     if (!aiApiKey) {
       const keyName = PROVIDER_KEY_NAMES[modelConfig.provider];
       if (options.triageExplicit) {
-        console.error(`Error: ${keyName} (or LLM_API_KEY) required for --triage. Set it in your environment.`);
+        const message = `${keyName} (or LLM_API_KEY) required for --triage. Set it in your environment.`;
+        console.error(`Error: ${message}`);
+        await emitBatchEvent(options, {
+          phase: 'triage',
+          level: 'error',
+          message,
+        });
+        if (options.programmatic) {
+          throw new Error(message);
+        }
         process.exit(1);
       } else {
         console.warn(`Warning: ${keyName} not set — skipping AI triage.`);
       }
     } else {
       console.log(`\nAI triage (${modelConfig.model}):`);
+      await emitBatchEvent(options, {
+        phase: 'triage',
+        level: 'info',
+        message: `Starting AI triage (${modelConfig.model})`,
+      });
       if (!fs.existsSync(triageOutputDir)) fs.mkdirSync(triageOutputDir, { recursive: true });
 
       let triageIndex = 0;
@@ -968,6 +1180,14 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           if (!(options.retryFailed && shouldRetryPhase(manifest, manifestKey, 'triage'))) {
             console.log(`${prefix} — triage ⊘ skip`);
             platformResult.triage.skipped++;
+            await emitBatchEvent(options, {
+              phase: 'triage',
+              level: 'info',
+              message: 'triage ⊘ skip',
+              manifestKey,
+              platform: entry.platform,
+              listingId: entry.id,
+            });
             continue;
           }
         }
@@ -976,6 +1196,14 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         if (options.retryFailed && entry.triage?.status === 'fetched') {
           console.log(`${prefix} — triage ⊘ skip`);
           platformResult.triage.skipped++;
+          await emitBatchEvent(options, {
+            phase: 'triage',
+            level: 'info',
+            message: 'triage ⊘ skip',
+            manifestKey,
+            platform: entry.platform,
+            listingId: entry.id,
+          });
           continue;
         }
 
@@ -984,6 +1212,14 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} — triage ⊘ skip (no listing details)`);
           platformResult.triage.skipped++;
           entry.triage = { status: 'skipped', reason: 'no listing details' };
+          await emitBatchEvent(options, {
+            phase: 'triage',
+            level: 'warning',
+            message: 'triage ⊘ skip (no listing details)',
+            manifestKey,
+            platform: entry.platform,
+            listingId: entry.id,
+          });
           continue;
         }
 
@@ -992,6 +1228,14 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} — triage ⊘ skip (listing file missing)`);
           platformResult.triage.skipped++;
           entry.triage = { status: 'skipped', reason: 'listing file missing' };
+          await emitBatchEvent(options, {
+            phase: 'triage',
+            level: 'warning',
+            message: 'triage ⊘ skip (listing file missing)',
+            manifestKey,
+            platform: entry.platform,
+            listingId: entry.id,
+          });
           continue;
         }
 
@@ -1017,11 +1261,27 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           console.log(`${prefix} — triage ✓ ${tier} (${fitScore}) (${formatDuration(Date.now() - t)})`);
           platformResult.triage.fetched++;
           entry.triage = { status: 'fetched', file: `triage/${entry.id}.json`, model: result.model, cost: result.usage?.cost };
+          await emitBatchEvent(options, {
+            phase: 'triage',
+            level: 'info',
+            message: `triage ✓ ${tier} (${fitScore}) (${formatDuration(Date.now() - t)})`,
+            manifestKey,
+            platform: entry.platform,
+            listingId: entry.id,
+          });
         } catch (err: any) {
           console.log(`${prefix} — triage ✗ ${err.message}`);
           platformResult.triage.failed++;
           platformResult.errors.push({ id: entry.id, phase: 'triage', message: err.message });
           entry.triage = { status: 'failed', error: err.message, model: modelConfig.model };
+          await emitBatchEvent(options, {
+            phase: 'triage',
+            level: 'error',
+            message: `triage ✗ ${err.message}`,
+            manifestKey,
+            platform: entry.platform,
+            listingId: entry.id,
+          });
         }
 
         saveManifest(manifest, manifestPath);
@@ -1097,10 +1357,26 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
   // Auto-retry once if there are failures and this isn't already a retry pass
   if (failureCount > 0 && !options.retryFailed) {
     console.log(`\n  ${failureCount} listing${failureCount > 1 ? 's' : ''} with failures \u2014 auto-retrying...\n`);
+    await emitBatchEvent(options, {
+      phase: 'batch',
+      level: 'warning',
+      message: `${failureCount} listing${failureCount > 1 ? 's' : ''} with failures \u2014 auto-retrying`,
+      payload: { failureCount },
+    });
     await runBatch([], { ...options, retryFailed: true });
   } else if (failureCount > 0) {
     console.log(`  ${failureCount} listing${failureCount > 1 ? 's' : ''} still failing \u2014 retry with: reviewr batch ${manifestPath} --retry`);
   }
+
+  await emitBatchEvent(options, {
+    phase: 'batch',
+    level: failureCount > 0 ? 'warning' : 'info',
+    message:
+      failureCount > 0
+        ? `Batch finished with ${failureCount} remaining failing listing${failureCount > 1 ? 's' : ''}`
+        : 'Batch finished successfully',
+    payload: { failureCount, manifestPath, totalTimeMs },
+  });
 
   return { airbnb: airbnbResult, booking: bookingResult, totalTimeMs };
 }

@@ -5,7 +5,7 @@ export const REVIEW_JOB_QUEUE_NAME = 'stayreviewr-review-job';
 
 export interface ReviewJobQueueData {
   reviewJobId: string;
-  phase: 'search';
+  phase: 'search' | 'analyze';
 }
 
 const globalForReviewJobQueue = globalThis as unknown as {
@@ -34,5 +34,12 @@ export async function enqueueReviewJobSearch(reviewJobId: string) {
   return getReviewJobQueue().add('run-review-job-search', {
     reviewJobId,
     phase: 'search',
+  });
+}
+
+export async function enqueueReviewJobAnalysis(reviewJobId: string) {
+  return getReviewJobQueue().add('run-review-job-analysis', {
+    reviewJobId,
+    phase: 'analyze',
   });
 }

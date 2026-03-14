@@ -49,6 +49,14 @@ export type SearchJobStatus =
   | 'failed'
   | 'cancelled';
 
+export type PhaseStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'skipped'
+  | 'partial';
+
 export interface SearchResult {
   id: string;
   platform: Platform;
@@ -166,11 +174,44 @@ export interface ReviewJobEvent {
   createdAt: string;
 }
 
+export interface ReviewJobListingAnalysis {
+  id: string;
+  status: PhaseStatus;
+  currentPhase: string;
+  errorMessage: string | null;
+  detailsStatus: PhaseStatus;
+  reviewsStatus: PhaseStatus;
+  photosStatus: PhaseStatus;
+  aiReviewsStatus: PhaseStatus;
+  aiPhotosStatus: PhaseStatus;
+  triageStatus: PhaseStatus;
+  details: Record<string, unknown> | null;
+  aiReviews: Record<string, unknown> | null;
+  aiPhotos: Record<string, unknown> | null;
+  triage: Record<string, unknown> | null;
+  reviewCount: number | null;
+  photoCount: number | null;
+  durationMs: number | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReviewJobListing extends SearchResult {
+  selected: boolean;
+  hidden: boolean;
+  poiDistanceMeters: number | null;
+  analysis: ReviewJobListingAnalysis | null;
+}
+
 export interface ReviewJobState {
   id: string;
   ownerKey: string | null;
   status: SearchJobStatus;
   currentPhase: string;
+  analysisStatus: PhaseStatus;
+  analysisCurrentPhase: string | null;
   location: string | null;
   prompt: string | null;
   boundingBox: BoundingBox | null;
@@ -189,15 +230,21 @@ export interface ReviewJobState {
   pagesScanned: number;
   progress: number;
   errorMessage: string | null;
+  analysisProgress: number;
+  analysisErrorMessage: string | null;
+  analysisDurationMs: number | null;
+  analysisStartedAt: string | null;
+  analysisCompletedAt: string | null;
   durationMs: number | null;
   startedAt: string | null;
   completedAt: string | null;
+  reportReady: boolean;
   createdAt: string;
 }
 
 export interface ReviewJobResponse {
   job: ReviewJobState;
-  results: SearchResult[];
+  listings: ReviewJobListing[];
   events: ReviewJobEvent[];
 }
 
