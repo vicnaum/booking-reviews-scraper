@@ -1,6 +1,6 @@
 'use client';
 
-import { forwardRef } from 'react';
+import { forwardRef, type ReactNode } from 'react';
 import type { SearchResult } from '@/types';
 import { getPriceDisplayInfo, formatRating } from '@/lib/format';
 import { buildListingUrl } from '@/lib/listingLinks';
@@ -12,6 +12,7 @@ interface ResultCardProps {
   result: SearchResult;
   isSelected: boolean;
   onClick: () => void;
+  actions?: ReactNode;
   selectionControl?: {
     active: boolean;
     label?: string;
@@ -28,7 +29,7 @@ interface ResultCardProps {
 }
 
 const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
-  function ResultCard({ result, isSelected, onClick, selectionControl, context }, ref) {
+  function ResultCard({ result, isSelected, onClick, actions, selectionControl, context }, ref) {
     const storePriceDisplay = useSearchStore((s) => s.priceDisplay);
     const storeCheckin = useSearchStore((s) => s.checkin);
     const storeCheckout = useSearchStore((s) => s.checkout);
@@ -80,17 +81,20 @@ const ResultCard = forwardRef<HTMLDivElement, ResultCardProps>(
                   {result.name}
                 </h3>
               </div>
-              <a
-                href={listingUrl}
-                target="_blank"
-                rel="noreferrer"
-                onClick={(event) => event.stopPropagation()}
-                className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-xs text-stone-300 transition hover:border-white/20 hover:bg-white/[0.08] hover:text-white"
-                aria-label={`Open ${result.name} in a new tab`}
-                title="Open listing"
-              >
-                ↗
-              </a>
+              <div className="flex flex-shrink-0 items-center gap-1">
+                {actions}
+                <a
+                  href={listingUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={(event) => event.stopPropagation()}
+                  className="flex h-7 w-7 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-xs text-stone-300 transition hover:border-white/20 hover:bg-white/[0.08] hover:text-white"
+                  aria-label={`Open ${result.name} in a new tab`}
+                  title="Open listing"
+                >
+                  ↗
+                </a>
+              </div>
             </div>
 
             <div className="mt-1.5 flex items-center gap-2 text-xs text-stone-400">

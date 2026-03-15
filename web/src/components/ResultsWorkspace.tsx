@@ -2,7 +2,7 @@
 
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
 import type { PriceDisplayMode, ReviewJobResponse } from '@/types';
 import { getPriceDisplayInfo, resolveComparablePrice } from '@/lib/pricing';
 import { buildListingUrl } from '@/lib/listingLinks';
@@ -29,8 +29,69 @@ const JobMap = dynamic(() => import('./JobMap'), {
   ),
 });
 
+const RESULTS_PICKS_STORAGE_PREFIX = 'stayreviewr-results-picks';
+const MIN_MAP_HEIGHT = 280;
+const MAX_MAP_HEIGHT = 900;
+
+interface StoredResultsPicks {
+  liked: string[];
+  hidden: string[];
+}
+
 function listingKey(listing: Pick<ReviewJobResponse['listings'][number], 'id' | 'platform'>) {
   return `${listing.platform}:${listing.id}`;
+}
+
+function getResultsPicksStorageKey(jobId: string) {
+  return `${RESULTS_PICKS_STORAGE_PREFIX}:${jobId}`;
+}
+
+function readStoredResultsPicks(jobId: string): StoredResultsPicks {
+  if (typeof window === 'undefined') {
+    return { liked: [], hidden: [] };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(getResultsPicksStorageKey(jobId));
+    if (!raw) {
+      return { liked: [], hidden: [] };
+    }
+    const parsed = JSON.parse(raw) as Partial<StoredResultsPicks>;
+    return {
+      liked: Array.isArray(parsed.liked) ? parsed.liked.filter((item): item is string => typeof item === 'string') : [],
+      hidden: Array.isArray(parsed.hidden) ? parsed.hidden.filter((item): item is string => typeof item === 'string') : [],
+    };
+  } catch {
+    return { liked: [], hidden: [] };
+  }
+}
+
+function ActionButton({
+  title,
+  active = false,
+  onClick,
+  children,
+}: {
+  title: string;
+  active?: boolean;
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex h-7 w-7 items-center justify-center rounded-full border text-xs transition ${
+        active
+          ? 'border-rose-300/30 bg-rose-300/16 text-rose-100'
+          : 'border-white/10 bg-white/[0.04] text-stone-300 hover:border-white/20 hover:bg-white/[0.08] hover:text-white'
+      }`}
+      aria-label={title}
+      title={title}
+    >
+      {children}
+    </button>
+  );
 }
 
 function tierLabel(tier: string | null): string {
@@ -186,6 +247,10 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     getStoredReviewJobPriceDisplay(initialData.job),
   );
   const [activePhotoIndex, setActivePhotoIndex] = useState(0);
+  const [likedIds, setLikedIds] = useState<Set<string>>(() => new Set());
+  const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => new Set());
+  const [showHidden, setShowHidden] = useState(false);
+  const [mapHeight, setMapHeight] = useState(520);
 
   const applyJobUpdate = useCallback((nextData: ReviewJobResponse) => {
     setData(nextData);
@@ -197,6 +262,26 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   }, [applyJobUpdate, data.job.id]);
 
   useReviewJobPolling(data.job, refreshJob, applyJobUpdate);
+
+  useEffect(() => {
+    const storedPicks = readStoredResultsPicks(data.job.id);
+    setLikedIds(new Set(storedPicks.liked));
+    setHiddenIds(new Set(storedPicks.hidden));
+  }, [data.job.id]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    window.localStorage.setItem(
+      getResultsPicksStorageKey(data.job.id),
+      JSON.stringify({
+        liked: [...likedIds],
+        hidden: [...hiddenIds],
+      }),
+    );
+  }, [data.job.id, hiddenIds, likedIds]);
 
   const sortedResults = useMemo(() => {
     const next = [...data.listings];
@@ -235,23 +320,47 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     return next;
   }, [data.job.checkin, data.job.checkout, data.listings, priceDisplay]);
 
+  const visibleResults = useMemo(
+    () =>
+      sortedResults.filter((result) =>
+        showHidden ? true : !hiddenIds.has(listingKey(result))),
+    [hiddenIds, showHidden, sortedResults],
+  );
+
+  const likedResults = useMemo(
+    () => visibleResults.filter((result) => likedIds.has(listingKey(result))),
+    [likedIds, visibleResults],
+  );
+
+  const rankedResults = useMemo(
+    () => visibleResults.filter((result) => !likedIds.has(listingKey(result))),
+    [likedIds, visibleResults],
+  );
+
+  const topPickResults = useMemo(() => {
+    const topPicks = visibleResults.filter(
+      (listing) => getListingResultsSnapshot(listing).triage?.tier === 'top_pick',
+    );
+    return topPicks.length >= 3 ? topPicks.slice(0, 5) : visibleResults.slice(0, 5);
+  }, [visibleResults]);
+
   useEffect(() => {
-    if (sortedResults.length === 0) {
+    if (visibleResults.length === 0) {
       setSelectedId(null);
       return;
     }
 
-    if (!selectedId || !sortedResults.some((result) => listingKey(result) === selectedId)) {
-      setSelectedId(listingKey(sortedResults[0]));
+    if (!selectedId || !visibleResults.some((result) => listingKey(result) === selectedId)) {
+      setSelectedId(listingKey(visibleResults[0]));
     }
-  }, [selectedId, sortedResults]);
+  }, [selectedId, visibleResults]);
 
   const selectedResult = useMemo(
     () =>
       selectedId != null
-        ? sortedResults.find((result) => listingKey(result) === selectedId) ?? null
+        ? visibleResults.find((result) => listingKey(result) === selectedId) ?? null
         : null,
-    [selectedId, sortedResults],
+    [selectedId, visibleResults],
   );
 
   const selectedSnapshot = useMemo(
@@ -265,24 +374,24 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
 
   const tierCounts = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const listing of sortedResults) {
+    for (const listing of visibleResults) {
       const tier = getListingResultsSnapshot(listing).triage?.tier ?? 'unscored';
       counts.set(tier, (counts.get(tier) ?? 0) + 1);
     }
     return counts;
-  }, [sortedResults]);
+  }, [visibleResults]);
 
   const analyzedCount = useMemo(
     () =>
-      sortedResults.filter((listing) => {
+      visibleResults.filter((listing) => {
         const status = listing.analysis?.status;
         return status === 'completed' || status === 'partial';
       }).length,
-    [sortedResults],
+    [visibleResults],
   );
 
   const averageFitScore = useMemo(() => {
-    const scores = sortedResults
+    const scores = visibleResults
       .map((listing) => getListingResultsSnapshot(listing).triage?.fitScore)
       .filter((value): value is number => value != null);
 
@@ -293,7 +402,71 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     return Math.round(
       scores.reduce((total, score) => total + score, 0) / scores.length,
     );
-  }, [sortedResults]);
+  }, [visibleResults]);
+
+  const toggleLike = useCallback((key: string) => {
+    setLikedIds((current) => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+    setHiddenIds((current) => {
+      if (!current.has(key)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
+  }, []);
+
+  const toggleHidden = useCallback((key: string) => {
+    setHiddenIds((current) => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+    setLikedIds((current) => {
+      if (!current.has(key)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
+  }, []);
+
+  const beginMapResize = useCallback(
+    (direction: 1 | -1) => (event: MouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      const startY = event.clientY;
+      const startHeight = mapHeight;
+
+      const handleMove = (moveEvent: globalThis.MouseEvent) => {
+        const delta = (moveEvent.clientY - startY) * direction;
+        setMapHeight(
+          Math.max(MIN_MAP_HEIGHT, Math.min(MAX_MAP_HEIGHT, startHeight + delta)),
+        );
+      };
+
+      const handleUp = () => {
+        window.removeEventListener('mousemove', handleMove);
+        window.removeEventListener('mouseup', handleUp);
+      };
+
+      window.addEventListener('mousemove', handleMove);
+      window.addEventListener('mouseup', handleUp);
+    },
+    [mapHeight],
+  );
 
   const selectedPhotos = selectedSnapshot?.details?.photos ?? [];
   const activePhoto = selectedPhotos[activePhotoIndex] ?? selectedPhotos[0] ?? selectedResult?.photoUrl ?? null;
@@ -311,6 +484,40 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         currency: data.job.currency,
       })
     : null;
+  const hiddenCount = hiddenIds.size;
+
+  const renderListingActions = useCallback(
+    (listing: ReviewJobResponse['listings'][number]) => {
+      const key = listingKey(listing);
+      const liked = likedIds.has(key);
+      const hidden = hiddenIds.has(key);
+
+      return (
+        <>
+          <ActionButton
+            title={liked ? 'Remove from liked' : 'Add to liked'}
+            active={liked}
+            onClick={(event) => {
+              event.stopPropagation();
+              toggleLike(key);
+            }}
+          >
+            ♥
+          </ActionButton>
+          <ActionButton
+            title={hidden ? 'Restore listing' : 'Hide listing'}
+            onClick={(event) => {
+              event.stopPropagation();
+              toggleHidden(key);
+            }}
+          >
+            {hidden ? '↺' : '×'}
+          </ActionButton>
+        </>
+      );
+    },
+    [hiddenIds, likedIds, toggleHidden, toggleLike],
+  );
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#0b0908] px-4 py-6 text-white md:px-6">
@@ -319,7 +526,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       <div className="relative mx-auto flex w-full max-w-[1760px] flex-col gap-4">
         <header className="rounded-[28px] border border-white/10 bg-black/[0.28] px-5 py-5 shadow-[0_24px_70px_rgba(0,0,0,0.32)] backdrop-blur-xl">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-            <div className="max-w-3xl">
+            <div className="min-w-0 flex-1">
               <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-stone-500">
                 Native Results
               </p>
@@ -330,14 +537,6 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 Persisted results for this review job. The map, listings, and analysis below
                 are driven directly from saved job state instead of the legacy iframe report.
               </p>
-              {data.job.prompt && (
-                <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm leading-6 text-stone-300">
-                  <span className="mr-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
-                    Brief
-                  </span>
-                  {data.job.prompt}
-                </div>
-              )}
             </div>
 
             <div className="flex flex-col items-start gap-3 xl:items-end">
@@ -377,10 +576,19 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
             </div>
           </div>
 
+          {data.job.prompt && (
+            <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-4 text-sm leading-7 text-stone-300">
+              <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
+                Brief
+              </p>
+              {data.job.prompt}
+            </div>
+          )}
+
           <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
             <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
               <p className="text-[11px] uppercase tracking-[0.18em] text-stone-500">Listings</p>
-              <p className="mt-2 text-2xl font-semibold text-white">{sortedResults.length}</p>
+              <p className="mt-2 text-2xl font-semibold text-white">{visibleResults.length}</p>
               <p className="mt-1 text-xs text-stone-500">{analyzedCount} with analysis data</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
@@ -406,52 +614,145 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
           </div>
         </header>
 
-        <div className="grid gap-4 xl:grid-cols-[360px_minmax(0,1fr)_440px]">
-          <aside className="min-h-[42rem] overflow-hidden rounded-[28px] border border-white/10 bg-black/[0.24] shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl">
-            <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
+        {topPickResults.length > 0 && (
+          <section className="rounded-[28px] border border-white/10 bg-black/[0.24] px-5 py-5 shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl">
+            <div className="flex items-end justify-between gap-4">
               <div>
-                <p className="text-sm font-semibold text-white">Ranked listings</p>
+                <p className="text-sm font-semibold text-white">Top picks</p>
                 <p className="mt-1 text-xs text-stone-500">
-                  Sorted by fit score, then tier, then price
+                  Legacy-style hero row for the strongest matches first
                 </p>
               </div>
+              <span className="text-xs text-stone-500">{topPickResults.length} shown</span>
             </div>
-            <div className="max-h-[calc(100vh-15rem)] space-y-4 overflow-y-auto p-3">
-              {sortedResults.map((listing, index) => {
-                const triage = getListingResultsSnapshot(listing).triage;
-                return (
-                  <div key={listingKey(listing)} className="space-y-2">
-                    <div className="flex items-center justify-between px-2">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-semibold text-stone-500">#{index + 1}</span>
-                        <span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] ${tierClassName(triage?.tier ?? null)}`}>
-                          {tierLabel(triage?.tier ?? null)}
-                        </span>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-xs font-semibold text-white">{triage?.fitScore ?? '—'}</p>
-                        <p className="text-[10px] text-stone-500">fit score</p>
-                      </div>
-                    </div>
-                    <ResultCard
-                      result={listing}
-                      isSelected={listingKey(listing) === selectedId}
-                      onClick={() => setSelectedId(listingKey(listing))}
-                      context={{
-                        priceDisplay,
-                        checkin: data.job.checkin,
-                        checkout: data.job.checkout,
-                        adults: data.job.adults,
-                        currency: data.job.currency,
-                      }}
-                    />
-                  </div>
-                );
-              })}
+            <div className="mt-4 grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
+              {topPickResults.map((listing) => (
+                <ResultCard
+                  key={`hero:${listingKey(listing)}`}
+                  result={listing}
+                  isSelected={listingKey(listing) === selectedId}
+                  onClick={() => setSelectedId(listingKey(listing))}
+                  actions={renderListingActions(listing)}
+                  context={{
+                    priceDisplay,
+                    checkin: data.job.checkin,
+                    checkout: data.job.checkout,
+                    adults: data.job.adults,
+                    currency: data.job.currency,
+                  }}
+                />
+              ))}
             </div>
-          </aside>
+          </section>
+        )}
 
+        {likedResults.length > 0 && (
+          <section className="rounded-[28px] border border-rose-300/20 bg-rose-300/[0.06] px-5 py-5 shadow-[0_28px_90px_rgba(0,0,0,0.28)] backdrop-blur-xl">
+            <div className="flex items-end justify-between gap-4">
+              <div>
+                <p className="text-sm font-semibold text-rose-100">Liked</p>
+                <p className="mt-1 text-xs text-rose-200/70">
+                  Shortlisted manually, like in the legacy report
+                </p>
+              </div>
+              <span className="text-xs text-rose-200/70">{likedResults.length} liked</span>
+            </div>
+            <div className="mt-4 grid gap-3 lg:grid-cols-2">
+              {likedResults.map((listing) => (
+                <ResultCard
+                  key={`liked:${listingKey(listing)}`}
+                  result={listing}
+                  isSelected={listingKey(listing) === selectedId}
+                  onClick={() => setSelectedId(listingKey(listing))}
+                  actions={renderListingActions(listing)}
+                  context={{
+                    priceDisplay,
+                    checkin: data.job.checkin,
+                    checkout: data.job.checkout,
+                    adults: data.job.adults,
+                    currency: data.job.currency,
+                  }}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
+        <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(420px,560px)]">
           <div className="space-y-4">
+            <section className="rounded-[28px] border border-white/10 bg-black/[0.24] shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-5 py-4">
+                <div>
+                  <p className="text-sm font-semibold text-white">All listings</p>
+                  <p className="mt-1 text-xs text-stone-500">
+                    Full ranked set, mirroring the legacy report structure
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-xs text-stone-400">
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    Liked: {likedResults.length}
+                  </span>
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    Hidden: {hiddenCount}
+                  </span>
+                  {hiddenCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowHidden((current) => !current)}
+                      className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 font-semibold text-stone-300 transition hover:bg-white/[0.08] hover:text-white"
+                    >
+                      {showHidden ? 'Hide hidden' : 'Show hidden'}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-4 p-4">
+                {rankedResults.length > 0 ? (
+                  rankedResults.map((listing, index) => {
+                    const triage = getListingResultsSnapshot(listing).triage;
+                    return (
+                      <div key={listingKey(listing)} className="space-y-2">
+                        <div className="flex items-center justify-between px-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-semibold text-stone-500">#{index + 1}</span>
+                            <span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] ${tierClassName(triage?.tier ?? null)}`}>
+                              {tierLabel(triage?.tier ?? null)}
+                            </span>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-xs font-semibold text-white">{triage?.fitScore ?? '—'}</p>
+                            <p className="text-[10px] text-stone-500">fit score</p>
+                          </div>
+                        </div>
+                        <ResultCard
+                          result={listing}
+                          isSelected={listingKey(listing) === selectedId}
+                          onClick={() => setSelectedId(listingKey(listing))}
+                          actions={renderListingActions(listing)}
+                          context={{
+                            priceDisplay,
+                            checkin: data.job.checkin,
+                            checkout: data.job.checkout,
+                            adults: data.job.adults,
+                            currency: data.job.currency,
+                          }}
+                        />
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.03] px-4 py-8 text-center text-sm text-stone-400">
+                    {hiddenCount > 0 && !showHidden
+                      ? 'All listings are hidden. Use “Show hidden” to bring them back.'
+                      : 'No listings to show.'}
+                  </div>
+                )}
+              </div>
+            </section>
+          </div>
+
+          <div className="space-y-4 xl:sticky xl:top-6">
             <div className="overflow-hidden rounded-[28px] border border-white/10 bg-black/[0.24] shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl">
               <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
                 <div>
@@ -465,9 +766,20 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 </span>
               </div>
               <div className="p-4">
-                <div className="relative aspect-square w-full overflow-hidden rounded-[24px] border border-white/10 bg-black/[0.18]">
+                <button
+                  type="button"
+                  onMouseDown={beginMapResize(-1)}
+                  className="mb-2 flex h-4 w-full items-center justify-center rounded-t-xl border border-white/10 bg-white/[0.03] text-xs text-stone-500 transition hover:bg-white/[0.06]"
+                  title="Drag to resize map"
+                >
+                  ⋯
+                </button>
+                <div
+                  className="relative w-full overflow-hidden border-x border-white/10 bg-black/[0.18]"
+                  style={{ height: mapHeight }}
+                >
                   <JobMap
-                    results={sortedResults}
+                    results={visibleResults}
                     selectedId={selectedId}
                     onSelect={setSelectedId}
                     searchAreaMode={data.job.searchAreaMode}
@@ -482,6 +794,14 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                     checkout={data.job.checkout}
                   />
                 </div>
+                <button
+                  type="button"
+                  onMouseDown={beginMapResize(1)}
+                  className="mt-2 flex h-4 w-full items-center justify-center rounded-b-xl border border-white/10 bg-white/[0.03] text-xs text-stone-500 transition hover:bg-white/[0.06]"
+                  title="Drag to resize map"
+                >
+                  ⋯
+                </button>
               </div>
             </div>
 
@@ -548,14 +868,17 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                           )}
                         </div>
                       </div>
-                      <a
-                        href={selectedListingUrl ?? selectedResult.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="rounded-2xl border border-white/10 bg-white/[0.05] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"
-                      >
-                        Open listing
-                      </a>
+                      <div className="flex items-center gap-2">
+                        {renderListingActions(selectedResult)}
+                        <a
+                          href={selectedListingUrl ?? selectedResult.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="rounded-2xl border border-white/10 bg-white/[0.05] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"
+                        >
+                          Open listing
+                        </a>
+                      </div>
                     </div>
                   </div>
 
