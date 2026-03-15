@@ -21,6 +21,7 @@ import type {
   ReviewJobListing,
 } from '@/types';
 import { getPriceDisplayInfo } from '@/lib/format';
+import { getListingResultsSnapshot } from '@/lib/results';
 import MapListingTooltip from './MapListingTooltip';
 
 const poiIcon = L.divIcon({
@@ -38,12 +39,31 @@ const poiIcon = L.divIcon({
 });
 
 function createPriceIcon(
-  price: string,
-  platform: ReviewJobListing['platform'],
-  isSelected: boolean,
+  options: {
+    price: string;
+    platform: ReviewJobListing['platform'];
+    isSelected: boolean;
+    photoUrl: string | null;
+    tier: string | null;
+  },
 ) {
-  const borderColor = platform === 'airbnb' ? '#ff5a5f' : '#003580';
-  const scale = isSelected ? 1.1 : 1;
+  const borderColor = options.platform === 'airbnb' ? '#ff5a5f' : '#003580';
+  const tierColor =
+    options.tier === 'top_pick'
+      ? '#22c55e'
+      : options.tier === 'shortlist'
+        ? '#3b82f6'
+        : options.tier === 'consider'
+          ? '#f59e0b'
+          : options.tier === 'unlikely'
+            ? '#f97316'
+            : options.tier === 'no_go'
+              ? '#ef4444'
+              : '#6b7280';
+  const scale = options.isSelected ? 1.06 : 1;
+  const photo = options.photoUrl
+    ? `<img src="${options.photoUrl}" style="width:100%;height:44px;object-fit:cover;display:block;background:#e5e7eb;" />`
+    : `<div style="width:100%;height:44px;background:#e5e7eb;"></div>`;
 
   return L.divIcon({
     className: '',
@@ -52,21 +72,42 @@ function createPriceIcon(
       left: 50%;
       top: 50%;
       transform: translate(-50%, -50%) scale(${scale});
-      background: ${isSelected ? borderColor : '#fff'};
-      color: ${isSelected ? '#fff' : '#222'};
+      width: 68px;
+      overflow: hidden;
+      background: #fff;
+      color: #111827;
       border: 2px solid ${borderColor};
-      border-radius: 20px;
-      padding: 2px 7px;
-      font-size: 11px;
-      font-weight: 700;
-      white-space: nowrap;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-      transition: transform 0.15s, background 0.15s;
+      border-radius: 10px;
+      box-shadow: ${options.isSelected ? '0 8px 16px rgba(59,130,246,0.24)' : '0 2px 8px rgba(0,0,0,0.28)'};
+      transition: transform 0.15s, box-shadow 0.15s;
       cursor: pointer;
-      line-height: 1.4;
-    ">${price}</div>`,
-    iconSize: [0, 0],
-    iconAnchor: [0, 0],
+      line-height: 1.2;
+    ">
+      <div style="position:relative;">
+        ${photo}
+        <div style="
+          position:absolute;
+          top:4px;
+          right:4px;
+          width:9px;
+          height:9px;
+          border-radius:999px;
+          background:${tierColor};
+          border:1px solid #fff;
+        "></div>
+      </div>
+      <div style="
+        font-size:10px;
+        font-weight:700;
+        text-align:center;
+        padding:3px 4px;
+        white-space:nowrap;
+        overflow:hidden;
+        text-overflow:ellipsis;
+      ">${options.price}</div>
+    </div>`,
+    iconSize: [68, 62],
+    iconAnchor: [34, 62],
   });
 }
 
@@ -316,6 +357,7 @@ export default function JobMap({
           return null;
         }
 
+        const snapshot = getListingResultsSnapshot(result);
         const priceLabel = getPriceDisplayInfo(result, priceDisplay, {
           checkin,
           checkout,
@@ -325,11 +367,13 @@ export default function JobMap({
           <Marker
             key={`${result.platform}:${result.id}`}
             position={[result.coordinates.lat, result.coordinates.lng]}
-            icon={createPriceIcon(
-              priceLabel,
-              result.platform,
-              `${result.platform}:${result.id}` === selectedId,
-            )}
+            icon={createPriceIcon({
+              price: priceLabel,
+              platform: result.platform,
+              isSelected: `${result.platform}:${result.id}` === selectedId,
+              photoUrl: result.photoUrl,
+              tier: snapshot.triage?.tier ?? null,
+            })}
             zIndexOffset={`${result.platform}:${result.id}` === selectedId ? 200 : 0}
             eventHandlers={{
               click: () => onSelect(`${result.platform}:${result.id}`),

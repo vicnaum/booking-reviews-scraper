@@ -1,9 +1,17 @@
 'use client';
 
-import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
-import type { PriceDisplayMode, ReviewJobResponse } from '@/types';
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from 'react';
+import type { PriceDisplayMode, ReviewJobListing, ReviewJobResponse } from '@/types';
 import { getPriceDisplayInfo, resolveComparablePrice } from '@/lib/pricing';
 import { buildListingUrl } from '@/lib/listingLinks';
 import {
@@ -17,28 +25,31 @@ import {
   getStoredReviewJobPriceDisplay,
 } from '@/lib/reviewJobClient';
 import { useReviewJobPolling } from '@/hooks/useReviewJobPolling';
-import ResultCard from './ResultCard';
 import PlatformBadge from './PlatformBadge';
-
-const JobMap = dynamic(() => import('./JobMap'), {
-  ssr: false,
-  loading: () => (
-    <div className="flex h-full items-center justify-center bg-neutral-900 text-neutral-600">
-      Loading map...
-    </div>
-  ),
-});
+import ResultsJobMap from './ResultsJobMap';
 
 const RESULTS_PICKS_STORAGE_PREFIX = 'stayreviewr-results-picks';
 const MIN_MAP_HEIGHT = 280;
-const MAX_MAP_HEIGHT = 900;
+const MAX_MAP_HEIGHT = 920;
+const TIER_ORDER = ['top_pick', 'shortlist', 'consider', 'unlikely', 'no_go'] as const;
+const SCORE_ORDER = [
+  'fit',
+  'location',
+  'sleepQuality',
+  'cleanliness',
+  'modernity',
+  'valueForMoney',
+] as const;
+
+type SortKey = 'rank' | 'title' | 'tier' | 'fitScore' | 'price';
+type DetailTab = 'triage' | 'reviews' | 'photos' | 'snapshot';
 
 interface StoredResultsPicks {
   liked: string[];
   hidden: string[];
 }
 
-function listingKey(listing: Pick<ReviewJobResponse['listings'][number], 'id' | 'platform'>) {
+function listingKey(listing: Pick<ReviewJobListing, 'id' | 'platform'>) {
   return `${listing.platform}:${listing.id}`;
 }
 
@@ -56,42 +67,19 @@ function readStoredResultsPicks(jobId: string): StoredResultsPicks {
     if (!raw) {
       return { liked: [], hidden: [] };
     }
+
     const parsed = JSON.parse(raw) as Partial<StoredResultsPicks>;
     return {
-      liked: Array.isArray(parsed.liked) ? parsed.liked.filter((item): item is string => typeof item === 'string') : [],
-      hidden: Array.isArray(parsed.hidden) ? parsed.hidden.filter((item): item is string => typeof item === 'string') : [],
+      liked: Array.isArray(parsed.liked)
+        ? parsed.liked.filter((item): item is string => typeof item === 'string')
+        : [],
+      hidden: Array.isArray(parsed.hidden)
+        ? parsed.hidden.filter((item): item is string => typeof item === 'string')
+        : [],
     };
   } catch {
     return { liked: [], hidden: [] };
   }
-}
-
-function ActionButton({
-  title,
-  active = false,
-  onClick,
-  children,
-}: {
-  title: string;
-  active?: boolean;
-  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`flex h-7 w-7 items-center justify-center rounded-full border text-xs transition ${
-        active
-          ? 'border-rose-300/30 bg-rose-300/16 text-rose-100'
-          : 'border-white/10 bg-white/[0.04] text-stone-300 hover:border-white/20 hover:bg-white/[0.08] hover:text-white'
-      }`}
-      aria-label={title}
-      title={title}
-    >
-      {children}
-    </button>
-  );
 }
 
 function tierLabel(tier: string | null): string {
@@ -132,6 +120,147 @@ function phaseBadgeClassName(status: string) {
   }
 }
 
+function scoreLabel(key: string) {
+  switch (key) {
+    case 'fit':
+      return 'Fit';
+    case 'location':
+      return 'Location';
+    case 'sleepQuality':
+      return 'Sleep';
+    case 'cleanliness':
+      return 'Clean';
+    case 'modernity':
+      return 'Modern';
+    case 'valueForMoney':
+      return 'Value';
+    default:
+      return key;
+  }
+}
+
+function scoreColor(value: number) {
+  if (value >= 7) {
+    return 'bg-emerald-400';
+  }
+  if (value >= 4) {
+    return 'bg-amber-400';
+  }
+  return 'bg-rose-400';
+}
+
+function hasAmenity(amenities: string[], patterns: RegExp[]) {
+  const haystack = amenities.join('|').toLowerCase();
+  return patterns.some((pattern) => pattern.test(haystack));
+}
+
+function getAmenityFlags(amenities: string[]) {
+  return {
+    parking: hasAmenity(amenities, [/parking/, /garage/]),
+    wifi: hasAmenity(amenities, [/wifi/, /wi-fi/, /internet/]),
+    elevator: hasAmenity(amenities, [/elevator/, /lift/]),
+    ac: hasAmenity(amenities, [/air.?condition/, /\bac\b/, /cooling/]),
+    balcony: hasAmenity(amenities, [/balcon/, /terrace/, /patio/]),
+  };
+}
+
+function buildExportPayload(
+  listings: ReviewJobListing[],
+  likedIds: Set<string>,
+  hiddenIds: Set<string>,
+) {
+  const byKey = new Map(listings.map((listing) => [listingKey(listing), listing]));
+
+  const serialize = (key: string) => {
+    const listing = byKey.get(key);
+    if (!listing) {
+      return { id: key };
+    }
+
+    const snapshot = getListingResultsSnapshot(listing);
+
+    return {
+      id: listing.id,
+      platform: listing.platform,
+      url: listing.url,
+      title: listing.name,
+      fitScore: snapshot.triage?.fitScore ?? null,
+      tier: snapshot.triage?.tier ?? null,
+      priceTotal: snapshot.triage?.priceTotal ?? null,
+      pricePerNight: snapshot.triage?.pricePerNight ?? null,
+    };
+  };
+
+  return {
+    liked: [...likedIds].map(serialize),
+    hidden: [...hiddenIds].map(serialize),
+  };
+}
+
+async function copyJson(value: unknown) {
+  const text = JSON.stringify(value, null, 2);
+
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  if (typeof document === 'undefined') {
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  document.body.removeChild(textarea);
+}
+
+function downloadJson(filename: string, value: unknown) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const blob = new Blob([JSON.stringify(value, null, 2)], {
+    type: 'application/json',
+  });
+  const url = window.URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  window.URL.revokeObjectURL(url);
+}
+
+function ActionButton({
+  title,
+  active = false,
+  onClick,
+  children,
+}: {
+  title: string;
+  active?: boolean;
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex h-8 w-8 items-center justify-center rounded-full border text-sm transition ${
+        active
+          ? 'border-rose-300/30 bg-rose-300/16 text-rose-100'
+          : 'border-white/10 bg-white/[0.04] text-stone-300 hover:border-white/20 hover:bg-white/[0.08] hover:text-white'
+      }`}
+      aria-label={title}
+      title={title}
+    >
+      {children}
+    </button>
+  );
+}
+
 function DetailList({
   title,
   items,
@@ -155,11 +284,11 @@ function DetailList({
           : 'bg-white/[0.05] text-stone-200';
 
   return (
-    <section className="rounded-[24px] border border-white/10 bg-white/[0.03] p-5">
-      <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-stone-500">
+    <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+      <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
         {title}
       </h3>
-      <div className="mt-4 flex flex-wrap gap-2">
+      <div className="mt-3 flex flex-wrap gap-2">
         {items.map((item) => (
           <span
             key={`${title}:${item}`}
@@ -196,11 +325,11 @@ function ThemeSection({
           : 'border-white/10';
 
   return (
-    <section className="rounded-[24px] border border-white/10 bg-white/[0.03] p-5">
-      <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-stone-500">
+    <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+      <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
         {title}
       </h3>
-      <div className="mt-4 space-y-3">
+      <div className="mt-3 space-y-3">
         {themes.map((theme) => (
           <div
             key={`${title}:${theme.title}`}
@@ -212,7 +341,15 @@ function ThemeSection({
                 <span className="text-[11px] text-stone-500">{theme.frequency}</span>
               )}
               {theme.severity && (
-                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${phaseBadgeClassName(theme.severity === 'high' ? 'failed' : theme.severity === 'medium' ? 'partial' : 'running')}`}>
+                <span
+                  className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${phaseBadgeClassName(
+                    theme.severity === 'high'
+                      ? 'failed'
+                      : theme.severity === 'medium'
+                        ? 'partial'
+                        : 'running',
+                  )}`}
+                >
                   {theme.severity}
                 </span>
               )}
@@ -236,6 +373,625 @@ function ThemeSection({
   );
 }
 
+function MiniScoreBars({ listing }: { listing: ReviewJobListing }) {
+  const snapshot = getListingResultsSnapshot(listing);
+  const scoreMap = new Map(
+    (snapshot.triage?.scores ?? []).map((item) => [item.key, item.value]),
+  );
+
+  return (
+    <div
+      className="flex gap-1"
+      title={SCORE_ORDER.map((key) => `${scoreLabel(key)}: ${scoreMap.get(key) ?? '-'}`).join(', ')}
+    >
+      {SCORE_ORDER.map((key) => {
+        const value = scoreMap.get(key) ?? 0;
+        return (
+          <div
+            key={key}
+            className="relative h-7 w-2 overflow-hidden rounded-full bg-white/10"
+          >
+            <div
+              className={`absolute inset-x-0 bottom-0 rounded-full ${scoreColor(value)}`}
+              style={{ height: `${Math.max(10, value * 10)}%` }}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function RequirementDots({ listing }: { listing: ReviewJobListing }) {
+  const snapshot = getListingResultsSnapshot(listing);
+  const requirements = snapshot.triage?.requirements ?? [];
+
+  if (requirements.length === 0) {
+    return <span className="text-xs text-stone-500">—</span>;
+  }
+
+  return (
+    <div className="flex flex-wrap gap-1">
+      {requirements.map((requirement) => {
+        const color =
+          requirement.status === 'met'
+            ? 'bg-emerald-400'
+            : requirement.status === 'partial'
+              ? 'bg-amber-400'
+              : requirement.status === 'unmet'
+                ? 'bg-rose-400'
+                : 'bg-stone-500';
+
+        return (
+          <span
+            key={`${listingKey(listing)}:${requirement.requirement}`}
+            className={`h-2.5 w-2.5 rounded-full ${color}`}
+            title={`${requirement.requirement}: ${requirement.status ?? 'unknown'}`}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function HeroCard({
+  listing,
+  job,
+  priceDisplay,
+  onJump,
+}: {
+  listing: ReviewJobListing;
+  job: ReviewJobResponse['job'];
+  priceDisplay: PriceDisplayMode;
+  onJump: () => void;
+}) {
+  const snapshot = getListingResultsSnapshot(listing);
+  const priceInfo = getPriceDisplayInfo(listing, priceDisplay, {
+    checkin: job.checkin,
+    checkout: job.checkout,
+  });
+
+  const metaParts = [
+    priceInfo.primary,
+    listing.poiDistanceMeters != null
+      ? `${formatPoiDistance(listing.poiDistanceMeters) ?? ''} from POI`
+      : null,
+    listing.bedrooms != null || listing.beds != null
+      ? `${listing.bedrooms ?? '?'}BR ${listing.beds ?? '?'} beds`
+      : null,
+    snapshot.triage?.bedSetup ?? null,
+  ].filter(Boolean);
+
+  return (
+    <button
+      type="button"
+      onClick={onJump}
+      className="group min-w-[280px] max-w-[320px] flex-shrink-0 overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] text-left transition hover:border-white/20 hover:bg-white/[0.07]"
+    >
+      {listing.photoUrl ? (
+        <img
+          src={listing.photoUrl}
+          alt={listing.name}
+          className="h-44 w-full object-cover"
+          loading="lazy"
+        />
+      ) : (
+        <div className="h-44 w-full bg-white/5" />
+      )}
+      <div className="space-y-3 p-4">
+        <div className="flex items-center gap-2">
+          <span className="rounded-lg bg-white text-black px-2 py-1 text-xs font-bold">
+            {snapshot.triage?.fitScore ?? '—'}
+          </span>
+          <span
+            className={`rounded-lg border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] ${tierClassName(
+              snapshot.triage?.tier ?? null,
+            )}`}
+          >
+            {tierLabel(snapshot.triage?.tier ?? null)}
+          </span>
+        </div>
+
+        <div>
+          <div className="mb-1">
+            <PlatformBadge platform={listing.platform} />
+          </div>
+          <p className="line-clamp-2 text-sm font-semibold text-white group-hover:text-white/90">
+            {listing.name}
+          </p>
+          <p className="mt-1 text-xs leading-5 text-stone-400">
+            {metaParts.join(' · ')}
+          </p>
+        </div>
+
+        {snapshot.triage?.summary && (
+          <p className="line-clamp-3 text-xs leading-5 text-stone-400">
+            {snapshot.triage.summary}
+          </p>
+        )}
+
+        <RequirementDots listing={listing} />
+      </div>
+    </button>
+  );
+}
+
+function ListingDetailPanel({
+  listing,
+  job,
+  priceDisplay,
+}: {
+  listing: ReviewJobListing;
+  job: ReviewJobResponse['job'];
+  priceDisplay: PriceDisplayMode;
+}) {
+  const snapshot = useMemo(() => getListingResultsSnapshot(listing), [listing]);
+  const [activeTab, setActiveTab] = useState<DetailTab>('triage');
+  const [activePhotoIndex, setActivePhotoIndex] = useState(0);
+
+  useEffect(() => {
+    setActiveTab('triage');
+    setActivePhotoIndex(0);
+  }, [listing.id, listing.platform]);
+
+  const photos = snapshot.details?.photos ?? [];
+  const activePhoto = photos[activePhotoIndex] ?? photos[0] ?? listing.photoUrl ?? null;
+  const priceInfo = getPriceDisplayInfo(listing, priceDisplay, {
+    checkin: job.checkin,
+    checkout: job.checkout,
+  });
+  const listingUrl = buildListingUrl(listing.url, listing.platform, {
+    checkin: job.checkin,
+    checkout: job.checkout,
+    adults: job.adults,
+    currency: job.currency,
+  });
+  const amenities = snapshot.details?.amenities ?? [];
+  const amenityFlags = getAmenityFlags(amenities);
+  const triage = snapshot.triage;
+  const aiReviews = snapshot.aiReviews;
+  const aiPhotos = snapshot.aiPhotos;
+
+  return (
+    <div className="border-t border-white/10 bg-black/25 px-4 py-5 md:px-5">
+      <div className="flex flex-col gap-5 xl:flex-row">
+        <div className="xl:w-[540px] xl:flex-none">
+          {activePhoto ? (
+            <img
+              src={activePhoto}
+              alt={listing.name}
+              className="aspect-[4/3] w-full rounded-2xl border border-white/10 bg-white/5 object-cover"
+              loading="lazy"
+            />
+          ) : (
+            <div className="flex aspect-[4/3] w-full items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-sm text-stone-500">
+              No photos available
+            </div>
+          )}
+          {photos.length > 0 && (
+            <>
+              <p className="mt-2 text-center text-xs text-stone-500">
+                {activePhotoIndex + 1} / {photos.length}
+              </p>
+              <div className="mt-3 grid max-h-[280px] grid-cols-4 gap-2 overflow-y-auto sm:grid-cols-5">
+                {photos.map((photo, index) => (
+                  <button
+                    type="button"
+                    key={`${photo}:${index}`}
+                    onMouseEnter={() => setActivePhotoIndex(index)}
+                    onClick={() => setActivePhotoIndex(index)}
+                    className={`overflow-hidden rounded-xl border transition ${
+                      index === activePhotoIndex
+                        ? 'border-sky-300/50'
+                        : 'border-white/10 hover:border-white/20'
+                    }`}
+                  >
+                    <img
+                      src={photo}
+                      alt={`${listing.name} ${index + 1}`}
+                      className="aspect-[4/3] w-full object-cover"
+                      loading="lazy"
+                    />
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2 border-b border-white/10 pb-3">
+            {([
+              ['triage', 'Triage'],
+              ['reviews', 'Reviews AI'],
+              ['photos', 'Photos AI'],
+              ['snapshot', 'Snapshot'],
+            ] as const).map(([tab, label]) => (
+              <button
+                key={tab}
+                type="button"
+                onClick={() => setActiveTab(tab)}
+                className={`border-b-2 px-3 py-2 text-xs font-semibold uppercase tracking-[0.16em] transition ${
+                  activeTab === tab
+                    ? 'border-sky-300 text-white'
+                    : 'border-transparent text-stone-500 hover:text-stone-300'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {activeTab === 'triage' && (
+            <div className="space-y-4 pt-4">
+              <div className="flex flex-wrap gap-2 text-xs text-stone-300">
+                <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                  {priceInfo.primary}
+                  {priceInfo.secondary ? ` (${priceInfo.secondary})` : ''}
+                </span>
+                {listing.poiDistanceMeters != null && (
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    {formatPoiDistance(listing.poiDistanceMeters)} from POI
+                  </span>
+                )}
+                {listing.bedrooms != null && (
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    {listing.bedrooms} bedrooms
+                  </span>
+                )}
+                {listing.beds != null && (
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    {listing.beds} beds
+                  </span>
+                )}
+                {listing.bathrooms != null && (
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    {listing.bathrooms} baths
+                  </span>
+                )}
+                {listing.maxGuests != null && (
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    {listing.maxGuests} guests
+                  </span>
+                )}
+                {snapshot.details?.checkIn && (
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    Check-in {snapshot.details.checkIn}
+                  </span>
+                )}
+                {snapshot.details?.checkOut && (
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    Check-out {snapshot.details.checkOut}
+                  </span>
+                )}
+                {amenityFlags.parking && (
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    Parking
+                  </span>
+                )}
+                {amenityFlags.elevator && (
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    Elevator
+                  </span>
+                )}
+                {amenityFlags.balcony && (
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    Balcony
+                  </span>
+                )}
+              </div>
+
+              {triage?.bedSetup && (
+                <p className="text-sm leading-6 text-stone-300">{triage.bedSetup}</p>
+              )}
+
+              {triage?.requirements && triage.requirements.length > 0 && (
+                <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
+                    Requirements
+                  </h3>
+                  <div className="mt-3 overflow-x-auto">
+                    <table className="min-w-full text-left text-xs text-stone-300">
+                      <thead className="text-stone-500">
+                        <tr>
+                          <th className="px-3 py-2 font-semibold">Need</th>
+                          <th className="px-3 py-2 font-semibold">Type</th>
+                          <th className="px-3 py-2 font-semibold">Status</th>
+                          <th className="px-3 py-2 font-semibold">Confidence</th>
+                          <th className="px-3 py-2 font-semibold">Note</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {triage.requirements.map((requirement) => (
+                          <tr key={requirement.requirement} className="border-t border-white/5">
+                            <td className="px-3 py-2 text-white">{requirement.requirement}</td>
+                            <td className="px-3 py-2 text-stone-400">
+                              {requirement.type?.replace(/_/g, ' ') ?? '—'}
+                            </td>
+                            <td className="px-3 py-2">
+                              <span
+                                className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${phaseBadgeClassName(
+                                  requirement.status === 'met'
+                                    ? 'completed'
+                                    : requirement.status === 'partial'
+                                      ? 'partial'
+                                      : requirement.status === 'unmet'
+                                        ? 'failed'
+                                        : 'pending',
+                                )}`}
+                              >
+                                {requirement.status ?? 'unknown'}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-stone-400">{requirement.confidence ?? '—'}</td>
+                            <td className="px-3 py-2 text-stone-400">{requirement.note ?? '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              )}
+
+              {triage?.scores && triage.scores.length > 0 && (
+                <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
+                    Scores
+                  </h3>
+                  <div className="mt-3 space-y-2">
+                    {SCORE_ORDER.map((key) => {
+                      const item = triage.scores.find((score) => score.key === key);
+                      if (!item) {
+                        return null;
+                      }
+                      return (
+                        <div key={key} className="flex items-center gap-3 text-xs">
+                          <span className="w-24 text-right text-stone-500">{scoreLabel(key)}</span>
+                          <div className="h-2 flex-1 overflow-hidden rounded-full bg-white/10">
+                            <div
+                              className={`h-full rounded-full ${scoreColor(item.value)}`}
+                              style={{ width: `${item.value * 10}%` }}
+                            />
+                          </div>
+                          <span className="w-8 font-semibold text-white">{item.value}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
+
+              <DetailList title="Highlights" items={triage?.highlights ?? []} tone="positive" />
+              <DetailList title="Concerns" items={triage?.concerns ?? []} tone="warning" />
+              <DetailList
+                title="Deal breakers"
+                items={triage?.dealBreakers ?? []}
+                tone="danger"
+              />
+
+              {triage?.summary && (
+                <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
+                    Summary
+                  </h3>
+                  <p className="mt-3 text-sm leading-7 text-stone-300">{triage.summary}</p>
+                  {triage.tierReason && (
+                    <p className="mt-3 text-xs leading-6 text-stone-500">{triage.tierReason}</p>
+                  )}
+                </section>
+              )}
+
+              {listing.analysis && (
+                <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
+                    Analysis status
+                  </h3>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {[
+                      ['details', listing.analysis.detailsStatus],
+                      ['reviews', listing.analysis.reviewsStatus],
+                      ['photos', listing.analysis.photosStatus],
+                      ['ai reviews', listing.analysis.aiReviewsStatus],
+                      ['ai photos', listing.analysis.aiPhotosStatus],
+                      ['triage', listing.analysis.triageStatus],
+                    ].map(([label, status]) => (
+                      <span
+                        key={label}
+                        className={`rounded-full border px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${phaseBadgeClassName(status)}`}
+                      >
+                        {label}: {status}
+                      </span>
+                    ))}
+                  </div>
+                </section>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'reviews' && (
+            <div className="space-y-4 pt-4">
+              {!aiReviews ? (
+                <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-stone-400">
+                  No AI review analysis available for this listing.
+                </section>
+              ) : (
+                <>
+                  {(aiReviews.overallSentiment ||
+                    aiReviews.summaryScore != null ||
+                    aiReviews.trends ||
+                    aiReviews.guestDemographics) && (
+                    <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                      <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
+                        Review intelligence
+                      </h3>
+                      <div className="mt-3 space-y-3 text-sm leading-6 text-stone-300">
+                        {aiReviews.summaryScore != null && (
+                          <p className="text-white">
+                            Review score {aiReviews.summaryScore}/10
+                            {aiReviews.summaryJustification && (
+                              <span className="ml-2 text-stone-400">
+                                {aiReviews.summaryJustification}
+                              </span>
+                            )}
+                          </p>
+                        )}
+                        {aiReviews.overallSentiment && <p>{aiReviews.overallSentiment}</p>}
+                        {aiReviews.trends && (
+                          <p>
+                            <span className="text-stone-500">Trend:</span> {aiReviews.trends}
+                          </p>
+                        )}
+                        {aiReviews.guestDemographics && (
+                          <p>
+                            <span className="text-stone-500">Guests:</span>{' '}
+                            {aiReviews.guestDemographics}
+                          </p>
+                        )}
+                      </div>
+                    </section>
+                  )}
+
+                  <ThemeSection
+                    title="Strengths"
+                    themes={aiReviews.strengths}
+                    tone="positive"
+                  />
+                  <ThemeSection
+                    title="Weaknesses"
+                    themes={aiReviews.weaknesses}
+                    tone="warning"
+                  />
+                  <ThemeSection
+                    title="Red flags"
+                    themes={aiReviews.redFlags}
+                    tone="danger"
+                  />
+                  <ThemeSection
+                    title="Deal breakers"
+                    themes={aiReviews.dealBreakers}
+                    tone="danger"
+                  />
+                </>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'photos' && (
+            <div className="space-y-4 pt-4">
+              {!aiPhotos ? (
+                <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-stone-400">
+                  No AI photo analysis available for this listing.
+                </section>
+              ) : (
+                <>
+                  <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                    <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
+                      Photo intelligence
+                    </h3>
+                    <div className="mt-3 space-y-3 text-sm leading-6 text-stone-300">
+                      {aiPhotos.overallImpression && <p>{aiPhotos.overallImpression}</p>}
+                      <div className="flex flex-wrap gap-2 text-xs text-stone-200">
+                        {aiPhotos.overallCleanliness != null && (
+                          <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                            Cleanliness {aiPhotos.overallCleanliness}/10
+                          </span>
+                        )}
+                        {aiPhotos.overallModernity != null && (
+                          <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                            Modernity {aiPhotos.overallModernity}/10
+                          </span>
+                        )}
+                        {aiPhotos.listingAccuracyScore != null && (
+                          <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                            Accuracy {aiPhotos.listingAccuracyScore}/10
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </section>
+
+                  <DetailList
+                    title="Photo highlights"
+                    items={aiPhotos.highlights}
+                    tone="positive"
+                  />
+                  <DetailList
+                    title="Photo concerns"
+                    items={aiPhotos.concerns}
+                    tone="warning"
+                  />
+                  <DetailList
+                    title="Discrepancies"
+                    items={aiPhotos.listingAccuracyDiscrepancies}
+                    tone="warning"
+                  />
+                </>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'snapshot' && (
+            <div className="space-y-4 pt-4">
+              <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
+                  Listing snapshot
+                </h3>
+                {snapshot.details?.description ? (
+                  <p className="mt-3 text-sm leading-7 text-stone-300">
+                    {snapshot.details.description}
+                  </p>
+                ) : (
+                  <p className="mt-3 text-sm text-stone-400">
+                    No detailed description was captured for this listing.
+                  </p>
+                )}
+                <div className="mt-4 flex flex-wrap gap-2 text-xs text-stone-300">
+                  {snapshot.details?.address && (
+                    <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                      {snapshot.details.address}
+                    </span>
+                  )}
+                  {snapshot.details?.checkIn && (
+                    <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                      Check-in: {snapshot.details.checkIn}
+                    </span>
+                  )}
+                  {snapshot.details?.checkOut && (
+                    <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                      Check-out: {snapshot.details.checkOut}
+                    </span>
+                  )}
+                </div>
+              </section>
+
+              <DetailList title="Amenities" items={amenities} />
+
+              <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
+                      Source
+                    </h3>
+                    <p className="mt-2 text-sm text-stone-300">{listing.name}</p>
+                  </div>
+                  <a
+                    href={listingUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded-xl border border-white/10 bg-white/[0.05] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"
+                  >
+                    Open listing ↗
+                  </a>
+                </div>
+              </section>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface ResultsWorkspaceProps {
   initialData: ReviewJobResponse;
 }
@@ -243,14 +999,20 @@ interface ResultsWorkspaceProps {
 export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps) {
   const [data, setData] = useState(initialData);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [priceDisplay, setPriceDisplay] = useState<PriceDisplayMode>(
     getStoredReviewJobPriceDisplay(initialData.job),
   );
-  const [activePhotoIndex, setActivePhotoIndex] = useState(0);
   const [likedIds, setLikedIds] = useState<Set<string>>(() => new Set());
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => new Set());
   const [showHidden, setShowHidden] = useState(false);
-  const [mapHeight, setMapHeight] = useState(520);
+  const [mapHeight, setMapHeight] = useState(500);
+  const [activeTiers, setActiveTiers] = useState<Set<string>>(
+    () => new Set(TIER_ORDER),
+  );
+  const [sortKey, setSortKey] = useState<SortKey>('fitScore');
+  const [sortAsc, setSortAsc] = useState(false);
+  const rowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
 
   const applyJobUpdate = useCallback((nextData: ReviewJobResponse) => {
     setData(nextData);
@@ -283,7 +1045,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     );
   }, [data.job.id, hiddenIds, likedIds]);
 
-  const sortedResults = useMemo(() => {
+  const baseRankedResults = useMemo(() => {
     const next = [...data.listings];
     next.sort((a, b) => {
       const triageA = getListingResultsSnapshot(a).triage;
@@ -313,96 +1075,150 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       if (priceA == null && priceB == null) {
         return a.name.localeCompare(b.name);
       }
-      if (priceA == null) return 1;
-      if (priceB == null) return -1;
+      if (priceA == null) {
+        return 1;
+      }
+      if (priceB == null) {
+        return -1;
+      }
       return priceA - priceB;
     });
     return next;
   }, [data.job.checkin, data.job.checkout, data.listings, priceDisplay]);
 
-  const visibleResults = useMemo(
+  const sortableResults = useMemo(() => {
+    const next = [...baseRankedResults];
+
+    if (sortKey === 'rank') {
+      return sortAsc ? [...next].reverse() : next;
+    }
+
+    next.sort((a, b) => {
+      if (sortKey === 'title') {
+        return sortAsc
+          ? a.name.localeCompare(b.name)
+          : b.name.localeCompare(a.name);
+      }
+
+      if (sortKey === 'tier') {
+        const value = getTierRank(getListingResultsSnapshot(a).triage?.tier ?? null)
+          - getTierRank(getListingResultsSnapshot(b).triage?.tier ?? null);
+        return sortAsc ? value : -value;
+      }
+
+      if (sortKey === 'fitScore') {
+        const value =
+          (getListingResultsSnapshot(a).triage?.fitScore ?? -1)
+          - (getListingResultsSnapshot(b).triage?.fitScore ?? -1);
+        return sortAsc ? value : -value;
+      }
+
+      const priceA = resolveComparablePrice(a, priceDisplay, {
+        checkin: data.job.checkin,
+        checkout: data.job.checkout,
+      })?.amount;
+      const priceB = resolveComparablePrice(b, priceDisplay, {
+        checkin: data.job.checkin,
+        checkout: data.job.checkout,
+      })?.amount;
+      const value = (priceA ?? Number.POSITIVE_INFINITY) - (priceB ?? Number.POSITIVE_INFINITY);
+      return sortAsc ? value : -value;
+    });
+
+    return next;
+  }, [
+    baseRankedResults,
+    data.job.checkin,
+    data.job.checkout,
+    priceDisplay,
+    sortAsc,
+    sortKey,
+  ]);
+
+  const displayableResults = useMemo(
     () =>
-      sortedResults.filter((result) =>
-        showHidden ? true : !hiddenIds.has(listingKey(result))),
-    [hiddenIds, showHidden, sortedResults],
+      showHidden
+        ? sortableResults
+        : sortableResults.filter((listing) => !hiddenIds.has(listingKey(listing))),
+    [hiddenIds, showHidden, sortableResults],
+  );
+
+  const filteredResults = useMemo(
+    () =>
+      displayableResults.filter((listing) => {
+        const tier = getListingResultsSnapshot(listing).triage?.tier ?? 'unscored';
+        return activeTiers.has(tier);
+      }),
+    [activeTiers, displayableResults],
   );
 
   const likedResults = useMemo(
-    () => visibleResults.filter((result) => likedIds.has(listingKey(result))),
-    [likedIds, visibleResults],
+    () => filteredResults.filter((listing) => likedIds.has(listingKey(listing))),
+    [filteredResults, likedIds],
   );
 
-  const rankedResults = useMemo(
-    () => visibleResults.filter((result) => !likedIds.has(listingKey(result))),
-    [likedIds, visibleResults],
+  const mainResults = useMemo(
+    () => filteredResults.filter((listing) => !likedIds.has(listingKey(listing))),
+    [filteredResults, likedIds],
   );
 
-  const topPickResults = useMemo(() => {
-    const topPicks = visibleResults.filter(
+  const heroResults = useMemo(() => {
+    const topPicks = displayableResults.filter(
       (listing) => getListingResultsSnapshot(listing).triage?.tier === 'top_pick',
     );
-    return topPicks.length >= 3 ? topPicks.slice(0, 5) : visibleResults.slice(0, 5);
-  }, [visibleResults]);
-
-  useEffect(() => {
-    if (visibleResults.length === 0) {
-      setSelectedId(null);
-      return;
-    }
-
-    if (!selectedId || !visibleResults.some((result) => listingKey(result) === selectedId)) {
-      setSelectedId(listingKey(visibleResults[0]));
-    }
-  }, [selectedId, visibleResults]);
-
-  const selectedResult = useMemo(
-    () =>
-      selectedId != null
-        ? visibleResults.find((result) => listingKey(result) === selectedId) ?? null
-        : null,
-    [selectedId, visibleResults],
-  );
-
-  const selectedSnapshot = useMemo(
-    () => (selectedResult ? getListingResultsSnapshot(selectedResult) : null),
-    [selectedResult],
-  );
-
-  useEffect(() => {
-    setActivePhotoIndex(0);
-  }, [selectedId]);
+    return topPicks.length >= 3 ? topPicks.slice(0, 5) : displayableResults.slice(0, 5);
+  }, [displayableResults]);
 
   const tierCounts = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const listing of visibleResults) {
+    for (const listing of displayableResults) {
       const tier = getListingResultsSnapshot(listing).triage?.tier ?? 'unscored';
       counts.set(tier, (counts.get(tier) ?? 0) + 1);
     }
     return counts;
-  }, [visibleResults]);
+  }, [displayableResults]);
 
-  const analyzedCount = useMemo(
-    () =>
-      visibleResults.filter((listing) => {
-        const status = listing.analysis?.status;
-        return status === 'completed' || status === 'partial';
-      }).length,
-    [visibleResults],
-  );
-
-  const averageFitScore = useMemo(() => {
-    const scores = visibleResults
-      .map((listing) => getListingResultsSnapshot(listing).triage?.fitScore)
-      .filter((value): value is number => value != null);
-
-    if (scores.length === 0) {
-      return null;
+  useEffect(() => {
+    if (filteredResults.length === 0) {
+      setSelectedId(null);
+      setExpandedId(null);
+      return;
     }
 
-    return Math.round(
-      scores.reduce((total, score) => total + score, 0) / scores.length,
-    );
-  }, [visibleResults]);
+    if (!selectedId || !filteredResults.some((listing) => listingKey(listing) === selectedId)) {
+      const nextKey = listingKey(filteredResults[0]);
+      setSelectedId(nextKey);
+      setExpandedId(nextKey);
+    }
+  }, [filteredResults, selectedId]);
+
+  useEffect(() => {
+    if (expandedId && !filteredResults.some((listing) => listingKey(listing) === expandedId)) {
+      setExpandedId(null);
+    }
+  }, [expandedId, filteredResults]);
+
+  const handleSelect = useCallback(
+    (key: string, options?: { scroll?: boolean; toggle?: boolean }) => {
+      setSelectedId(key);
+      setExpandedId((current) => {
+        if (options?.toggle && current === key) {
+          return null;
+        }
+        return key;
+      });
+
+      if (options?.scroll) {
+        window.setTimeout(() => {
+          rowRefs.current[key]?.scrollIntoView({
+            behavior: 'smooth',
+            block: 'start',
+          });
+        }, 60);
+      }
+    },
+    [],
+  );
 
   const toggleLike = useCallback((key: string) => {
     setLikedIds((current) => {
@@ -414,6 +1230,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       }
       return next;
     });
+
     setHiddenIds((current) => {
       if (!current.has(key)) {
         return current;
@@ -434,6 +1251,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       }
       return next;
     });
+
     setLikedIds((current) => {
       if (!current.has(key)) {
         return current;
@@ -468,55 +1286,240 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     [mapHeight],
   );
 
-  const selectedPhotos = selectedSnapshot?.details?.photos ?? [];
-  const activePhoto = selectedPhotos[activePhotoIndex] ?? selectedPhotos[0] ?? selectedResult?.photoUrl ?? null;
-  const selectedPrice = selectedResult
-    ? getPriceDisplayInfo(selectedResult, priceDisplay, {
-        checkin: data.job.checkin,
-        checkout: data.job.checkout,
-      })
-    : null;
-  const selectedListingUrl = selectedResult
-    ? buildListingUrl(selectedResult.url, selectedResult.platform, {
-        checkin: data.job.checkin,
-        checkout: data.job.checkout,
-        adults: data.job.adults,
-        currency: data.job.currency,
-      })
-    : null;
-  const hiddenCount = hiddenIds.size;
+  const handleSort = useCallback((nextKey: SortKey) => {
+    setSortKey((current) => {
+      if (current === nextKey) {
+        setSortAsc((value) => !value);
+        return current;
+      }
+      setSortAsc(false);
+      return nextKey;
+    });
+  }, []);
 
-  const renderListingActions = useCallback(
-    (listing: ReviewJobResponse['listings'][number]) => {
-      const key = listingKey(listing);
-      const liked = likedIds.has(key);
-      const hidden = hiddenIds.has(key);
+  const handleSavePicks = useCallback(() => {
+    downloadJson('picks.json', {
+      liked: [...likedIds],
+      hidden: [...hiddenIds],
+    });
+  }, [hiddenIds, likedIds]);
 
-      return (
-        <>
-          <ActionButton
-            title={liked ? 'Remove from liked' : 'Add to liked'}
-            active={liked}
-            onClick={(event) => {
-              event.stopPropagation();
-              toggleLike(key);
-            }}
-          >
-            ♥
-          </ActionButton>
-          <ActionButton
-            title={hidden ? 'Restore listing' : 'Hide listing'}
-            onClick={(event) => {
-              event.stopPropagation();
-              toggleHidden(key);
-            }}
-          >
-            {hidden ? '↺' : '×'}
-          </ActionButton>
-        </>
-      );
+  const handleCopyList = useCallback(
+    async (kind: 'liked' | 'hidden' | 'all') => {
+      const payload = buildExportPayload(data.listings, likedIds, hiddenIds);
+      if (kind === 'liked') {
+        await copyJson({ liked: payload.liked });
+        return;
+      }
+      if (kind === 'hidden') {
+        await copyJson({ hidden: payload.hidden });
+        return;
+      }
+      await copyJson(payload);
     },
-    [hiddenIds, likedIds, toggleHidden, toggleLike],
+    [data.listings, hiddenIds, likedIds],
+  );
+
+  const renderRows = useCallback(
+    (rows: ReviewJobListing[]) =>
+      rows.map((listing, index) => {
+        const key = listingKey(listing);
+        const snapshot = getListingResultsSnapshot(listing);
+        const priceInfo = getPriceDisplayInfo(listing, priceDisplay, {
+          checkin: data.job.checkin,
+          checkout: data.job.checkout,
+        });
+        const listingUrl = buildListingUrl(listing.url, listing.platform, {
+          checkin: data.job.checkin,
+          checkout: data.job.checkout,
+          adults: data.job.adults,
+          currency: data.job.currency,
+        });
+        const amenities = snapshot.details?.amenities ?? [];
+        const amenityFlags = getAmenityFlags(amenities);
+        const issueCount = Math.max(
+          snapshot.triage?.dealBreakers.length ?? 0,
+          snapshot.aiReviews?.redFlags.length ?? 0,
+        );
+        const isLiked = likedIds.has(key);
+        const isHidden = hiddenIds.has(key);
+        const isExpanded = expandedId === key;
+        const isSelected = selectedId === key;
+
+        return (
+          <Fragment key={key}>
+            <tr
+              ref={(node) => {
+                rowRefs.current[key] = node;
+              }}
+              onClick={() => handleSelect(key, { toggle: true })}
+              className={`cursor-pointer border-b border-white/6 transition ${
+                isSelected
+                  ? 'bg-sky-400/[0.08]'
+                  : isLiked
+                    ? 'bg-rose-400/[0.06] hover:bg-rose-400/[0.09]'
+                    : 'hover:bg-white/[0.04]'
+              } ${isHidden && showHidden ? 'opacity-45' : ''}`}
+            >
+              <td className="px-3 py-3 align-top">
+                <ActionButton
+                  title={isLiked ? 'Remove from liked' : 'Add to liked'}
+                  active={isLiked}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    toggleLike(key);
+                  }}
+                >
+                  ♥
+                </ActionButton>
+              </td>
+              <td className="px-3 py-3 align-top text-sm font-semibold text-stone-400">
+                {index + 1}
+              </td>
+              <td className="px-3 py-3 align-top">
+                {listing.photoUrl ? (
+                  <img
+                    src={listing.photoUrl}
+                    alt={listing.name}
+                    className="h-24 w-36 rounded-lg object-cover"
+                    loading="lazy"
+                  />
+                ) : (
+                  <div className="h-24 w-36 rounded-lg bg-white/5" />
+                )}
+              </td>
+              <td className="px-3 py-3 align-top">
+                <div className="space-y-2">
+                  <PlatformBadge platform={listing.platform} />
+                  <div>
+                    <a
+                      href={listingUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(event) => event.stopPropagation()}
+                      className="text-sm font-semibold text-white transition hover:text-[#ff9a7d]"
+                    >
+                      {listing.name}
+                    </a>
+                    <div className="mt-1 flex flex-wrap gap-2 text-xs text-stone-400">
+                      {listing.propertyType && <span>{listing.propertyType}</span>}
+                      {listing.rating != null && (
+                        <span>
+                          {listing.platform === 'airbnb'
+                            ? `★ ${listing.rating}`
+                            : `${listing.rating}/10`}
+                        </span>
+                      )}
+                      {listing.reviewCount > 0 && <span>({listing.reviewCount})</span>}
+                      {listing.poiDistanceMeters != null && (
+                        <span>{formatPoiDistance(listing.poiDistanceMeters)} from POI</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </td>
+              <td className="px-3 py-3 align-top">
+                <span
+                  className={`inline-flex rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] ${tierClassName(
+                    snapshot.triage?.tier ?? null,
+                  )}`}
+                >
+                  {tierLabel(snapshot.triage?.tier ?? null)}
+                </span>
+              </td>
+              <td className="px-3 py-3 align-top text-sm font-semibold text-white">
+                {snapshot.triage?.fitScore ?? '—'}
+              </td>
+              <td className="px-3 py-3 align-top">
+                <div className="text-sm font-semibold text-white">{priceInfo.primary}</div>
+                {priceInfo.secondary && (
+                  <div className="mt-1 text-xs text-stone-500">{priceInfo.secondary}</div>
+                )}
+              </td>
+              <td className="px-3 py-3 align-top">
+                <div className="space-y-2 text-xs text-stone-400">
+                  <div className="flex flex-wrap gap-2">
+                    {listing.bedrooms != null && <span>{listing.bedrooms}bd</span>}
+                    {listing.beds != null && <span>{listing.beds}bed</span>}
+                    {listing.bathrooms != null && <span>{listing.bathrooms}ba</span>}
+                    {listing.maxGuests != null && <span>{listing.maxGuests}g</span>}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      ['P', amenityFlags.parking],
+                      ['W', amenityFlags.wifi],
+                      ['E', amenityFlags.elevator],
+                      ['AC', amenityFlags.ac],
+                      ['B', amenityFlags.balcony],
+                    ].map(([label, enabled]) => (
+                      <span
+                        key={`${key}:${label}`}
+                        className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
+                          enabled
+                            ? 'border-white/15 bg-white/[0.08] text-white'
+                            : 'border-white/5 bg-white/[0.02] text-stone-600'
+                        }`}
+                      >
+                        {label}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </td>
+              <td className="px-3 py-3 align-top">
+                <MiniScoreBars listing={listing} />
+              </td>
+              <td className="px-3 py-3 align-top">
+                <RequirementDots listing={listing} />
+              </td>
+              <td className="px-3 py-3 align-top">
+                {issueCount > 0 ? (
+                  <span className="inline-flex rounded-full bg-rose-500 px-2.5 py-1 text-xs font-bold text-white">
+                    {issueCount}
+                  </span>
+                ) : (
+                  <span className="text-xs text-stone-500">0</span>
+                )}
+              </td>
+              <td className="px-3 py-3 align-top">
+                <ActionButton
+                  title={isHidden ? 'Restore listing' : 'Hide listing'}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    toggleHidden(key);
+                  }}
+                >
+                  {isHidden ? '↺' : '×'}
+                </ActionButton>
+              </td>
+            </tr>
+
+            {isExpanded && (
+              <tr className="border-b border-white/10">
+                <td colSpan={12} className="p-0">
+                  <ListingDetailPanel
+                    listing={listing}
+                    job={data.job}
+                    priceDisplay={priceDisplay}
+                  />
+                </td>
+              </tr>
+            )}
+          </Fragment>
+        );
+      }),
+    [
+      data.job,
+      expandedId,
+      handleSelect,
+      hiddenIds,
+      likedIds,
+      priceDisplay,
+      selectedId,
+      showHidden,
+      toggleHidden,
+      toggleLike,
+    ],
   );
 
   return (
@@ -528,14 +1531,14 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
           <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
             <div className="min-w-0 flex-1">
               <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-stone-500">
-                Native Results
+                Native results
               </p>
               <h1 className="mt-2 text-3xl font-semibold tracking-tight text-white">
                 {data.job.location || 'Review job results'}
               </h1>
               <p className="mt-3 text-sm leading-6 text-stone-400">
-                Persisted results for this review job. The map, listings, and analysis below
-                are driven directly from saved job state instead of the legacy iframe report.
+                Persisted results driven from saved job state, reshaped to match the legacy
+                HTML report flow.
               </p>
             </div>
 
@@ -562,6 +1565,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 {(['total', 'perNight'] as PriceDisplayMode[]).map((mode) => (
                   <button
                     key={mode}
+                    type="button"
                     onClick={() => setPriceDisplay(mode)}
                     className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
                       priceDisplay === mode
@@ -584,536 +1588,292 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
               {data.job.prompt}
             </div>
           )}
-
-          <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-              <p className="text-[11px] uppercase tracking-[0.18em] text-stone-500">Listings</p>
-              <p className="mt-2 text-2xl font-semibold text-white">{visibleResults.length}</p>
-              <p className="mt-1 text-xs text-stone-500">{analyzedCount} with analysis data</p>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-              <p className="text-[11px] uppercase tracking-[0.18em] text-stone-500">Average fit</p>
-              <p className="mt-2 text-2xl font-semibold text-white">{averageFitScore ?? '—'}</p>
-              <p className="mt-1 text-xs text-stone-500">Derived from triage scores</p>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-              <p className="text-[11px] uppercase tracking-[0.18em] text-stone-500">Top picks</p>
-              <p className="mt-2 text-2xl font-semibold text-white">{tierCounts.get('top_pick') ?? 0}</p>
-              <p className="mt-1 text-xs text-stone-500">Highest-confidence matches</p>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-              <p className="text-[11px] uppercase tracking-[0.18em] text-stone-500">Shortlist</p>
-              <p className="mt-2 text-2xl font-semibold text-white">{tierCounts.get('shortlist') ?? 0}</p>
-              <p className="mt-1 text-xs text-stone-500">Worth comparing closely</p>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-              <p className="text-[11px] uppercase tracking-[0.18em] text-stone-500">No-go</p>
-              <p className="mt-2 text-2xl font-semibold text-white">{tierCounts.get('no_go') ?? 0}</p>
-              <p className="mt-1 text-xs text-stone-500">Clear deal-breaker candidates</p>
-            </div>
-          </div>
         </header>
 
-        {topPickResults.length > 0 && (
+        {heroResults.length > 0 && (
           <section className="rounded-[28px] border border-white/10 bg-black/[0.24] px-5 py-5 shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl">
-            <div className="flex items-end justify-between gap-4">
-              <div>
-                <p className="text-sm font-semibold text-white">Top picks</p>
-                <p className="mt-1 text-xs text-stone-500">
-                  Legacy-style hero row for the strongest matches first
-                </p>
-              </div>
-              <span className="text-xs text-stone-500">{topPickResults.length} shown</span>
-            </div>
-            <div className="mt-4 grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
-              {topPickResults.map((listing) => (
-                <ResultCard
+            <h2 className="text-lg font-semibold text-white">Top picks</h2>
+            <div className="mt-4 flex gap-4 overflow-x-auto pb-2">
+              {heroResults.map((listing) => (
+                <HeroCard
                   key={`hero:${listingKey(listing)}`}
-                  result={listing}
-                  isSelected={listingKey(listing) === selectedId}
-                  onClick={() => setSelectedId(listingKey(listing))}
-                  actions={renderListingActions(listing)}
-                  context={{
-                    priceDisplay,
-                    checkin: data.job.checkin,
-                    checkout: data.job.checkout,
-                    adults: data.job.adults,
-                    currency: data.job.currency,
-                  }}
+                  listing={listing}
+                  job={data.job}
+                  priceDisplay={priceDisplay}
+                  onJump={() => handleSelect(listingKey(listing), { scroll: true })}
                 />
               ))}
             </div>
           </section>
         )}
+
+        <section className="sticky top-4 z-20 rounded-[24px] border border-white/10 bg-[#0f0c0b]/90 px-4 py-3 shadow-[0_18px_50px_rgba(0,0,0,0.25)] backdrop-blur-xl">
+          <div className="flex flex-wrap gap-2">
+            {TIER_ORDER.map((tier) => {
+              const active = activeTiers.has(tier);
+              return (
+                <button
+                  key={tier}
+                  type="button"
+                  onClick={() =>
+                    setActiveTiers((current) => {
+                      const next = new Set(current);
+                      if (next.has(tier)) {
+                        next.delete(tier);
+                      } else {
+                        next.add(tier);
+                      }
+                      return next;
+                    })
+                  }
+                  className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold capitalize transition ${
+                    active
+                      ? 'border-white/30 bg-white text-black'
+                      : 'border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08] hover:text-white'
+                  }`}
+                >
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      tier === 'top_pick'
+                        ? 'bg-emerald-400'
+                        : tier === 'shortlist'
+                          ? 'bg-sky-400'
+                          : tier === 'consider'
+                            ? 'bg-amber-400'
+                            : tier === 'unlikely'
+                              ? 'bg-orange-400'
+                              : 'bg-rose-400'
+                    }`}
+                  />
+                  {tier.replace(/_/g, ' ')}
+                  <span className="text-[11px] opacity-70">{tierCounts.get(tier) ?? 0}</span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
 
         {likedResults.length > 0 && (
-          <section className="rounded-[28px] border border-rose-300/20 bg-rose-300/[0.06] px-5 py-5 shadow-[0_28px_90px_rgba(0,0,0,0.28)] backdrop-blur-xl">
-            <div className="flex items-end justify-between gap-4">
-              <div>
-                <p className="text-sm font-semibold text-rose-100">Liked</p>
-                <p className="mt-1 text-xs text-rose-200/70">
-                  Shortlisted manually, like in the legacy report
-                </p>
-              </div>
-              <span className="text-xs text-rose-200/70">{likedResults.length} liked</span>
+          <section className="rounded-[28px] border border-rose-300/20 bg-rose-300/[0.06] shadow-[0_28px_90px_rgba(0,0,0,0.28)] backdrop-blur-xl">
+            <div className="border-b border-rose-300/15 px-5 py-4">
+              <h2 className="text-lg font-semibold text-rose-100">♥ Liked</h2>
             </div>
-            <div className="mt-4 grid gap-3 lg:grid-cols-2">
-              {likedResults.map((listing) => (
-                <ResultCard
-                  key={`liked:${listingKey(listing)}`}
-                  result={listing}
-                  isSelected={listingKey(listing) === selectedId}
-                  onClick={() => setSelectedId(listingKey(listing))}
-                  actions={renderListingActions(listing)}
-                  context={{
-                    priceDisplay,
-                    checkin: data.job.checkin,
-                    checkout: data.job.checkout,
-                    adults: data.job.adults,
-                    currency: data.job.currency,
-                  }}
-                />
-              ))}
+            <div className="overflow-x-auto px-5 py-4">
+              <table className="min-w-full border-collapse text-left text-sm">
+                <thead>
+                  <tr className="border-b border-white/10 text-[11px] uppercase tracking-[0.16em] text-stone-500">
+                    <th className="w-12 px-3 py-3" />
+                    <th className="w-12 px-3 py-3">#</th>
+                    <th className="px-3 py-3">Photo</th>
+                    <th className="px-3 py-3">Title</th>
+                    <th className="px-3 py-3">Tier</th>
+                    <th className="px-3 py-3">Score</th>
+                    <th className="px-3 py-3">Total</th>
+                    <th className="px-3 py-3">Info</th>
+                    <th className="px-3 py-3">Scores</th>
+                    <th className="px-3 py-3">Requirements</th>
+                    <th className="px-3 py-3">Issues</th>
+                    <th className="w-12 px-3 py-3" />
+                  </tr>
+                </thead>
+                <tbody>{renderRows(likedResults)}</tbody>
+              </table>
             </div>
           </section>
         )}
 
-        <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(420px,560px)]">
-          <div className="space-y-4">
-            <section className="rounded-[28px] border border-white/10 bg-black/[0.24] shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-5 py-4">
-                <div>
-                  <p className="text-sm font-semibold text-white">All listings</p>
-                  <p className="mt-1 text-xs text-stone-500">
-                    Full ranked set, mirroring the legacy report structure
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2 text-xs text-stone-400">
-                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
-                    Liked: {likedResults.length}
-                  </span>
-                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
-                    Hidden: {hiddenCount}
-                  </span>
-                  {hiddenCount > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setShowHidden((current) => !current)}
-                      className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 font-semibold text-stone-300 transition hover:bg-white/[0.08] hover:text-white"
-                    >
-                      {showHidden ? 'Hide hidden' : 'Show hidden'}
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="space-y-4 p-4">
-                {rankedResults.length > 0 ? (
-                  rankedResults.map((listing, index) => {
-                    const triage = getListingResultsSnapshot(listing).triage;
-                    return (
-                      <div key={listingKey(listing)} className="space-y-2">
-                        <div className="flex items-center justify-between px-2">
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-semibold text-stone-500">#{index + 1}</span>
-                            <span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] ${tierClassName(triage?.tier ?? null)}`}>
-                              {tierLabel(triage?.tier ?? null)}
-                            </span>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-xs font-semibold text-white">{triage?.fitScore ?? '—'}</p>
-                            <p className="text-[10px] text-stone-500">fit score</p>
-                          </div>
-                        </div>
-                        <ResultCard
-                          result={listing}
-                          isSelected={listingKey(listing) === selectedId}
-                          onClick={() => setSelectedId(listingKey(listing))}
-                          actions={renderListingActions(listing)}
-                          context={{
-                            priceDisplay,
-                            checkin: data.job.checkin,
-                            checkout: data.job.checkout,
-                            adults: data.job.adults,
-                            currency: data.job.currency,
-                          }}
-                        />
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.03] px-4 py-8 text-center text-sm text-stone-400">
-                    {hiddenCount > 0 && !showHidden
-                      ? 'All listings are hidden. Use “Show hidden” to bring them back.'
-                      : 'No listings to show.'}
-                  </div>
-                )}
-              </div>
-            </section>
+        <section className="rounded-[28px] border border-white/10 bg-black/[0.24] shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl">
+          <div className="flex items-center justify-between px-5 pt-4">
+            <div>
+              <h2 className="text-lg font-semibold text-white">Map</h2>
+              <p className="mt-1 text-xs text-stone-500">
+                Saved search geometry and persisted analyzed listings
+              </p>
+            </div>
+            <span
+              className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${phaseBadgeClassName(data.job.analysisStatus)}`}
+            >
+              {data.job.analysisStatus}
+            </span>
           </div>
 
-          <div className="space-y-4 xl:sticky xl:top-6">
-            <div className="overflow-hidden rounded-[28px] border border-white/10 bg-black/[0.24] shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl">
-              <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
-                <div>
-                  <p className="text-sm font-semibold text-white">Map</p>
-                  <p className="mt-1 text-xs text-stone-500">
-                    Saved search geometry and persisted analyzed listings
-                  </p>
-                </div>
-                <span className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${phaseBadgeClassName(data.job.analysisStatus)}`}>
-                  {data.job.analysisStatus}
-                </span>
-              </div>
-              <div className="p-4">
-                <button
-                  type="button"
-                  onMouseDown={beginMapResize(-1)}
-                  className="mb-2 flex h-4 w-full items-center justify-center rounded-t-xl border border-white/10 bg-white/[0.03] text-xs text-stone-500 transition hover:bg-white/[0.06]"
-                  title="Drag to resize map"
-                >
-                  ⋯
-                </button>
-                <div
-                  className="relative w-full overflow-hidden border-x border-white/10 bg-black/[0.18]"
-                  style={{ height: mapHeight }}
-                >
-                  <JobMap
-                    results={visibleResults}
-                    selectedId={selectedId}
-                    onSelect={setSelectedId}
-                    searchAreaMode={data.job.searchAreaMode}
-                    boundingBox={data.job.boundingBox}
-                    mapBounds={data.job.mapBounds}
-                    circle={data.job.circle}
-                    poi={data.job.poi}
-                    mapCenter={data.job.mapCenter}
-                    mapZoom={data.job.mapZoom}
-                    priceDisplay={priceDisplay}
-                    checkin={data.job.checkin}
-                    checkout={data.job.checkout}
-                  />
-                </div>
-                <button
-                  type="button"
-                  onMouseDown={beginMapResize(1)}
-                  className="mt-2 flex h-4 w-full items-center justify-center rounded-b-xl border border-white/10 bg-white/[0.03] text-xs text-stone-500 transition hover:bg-white/[0.06]"
-                  title="Drag to resize map"
-                >
-                  ⋯
-                </button>
-              </div>
+          <div className="px-5 pb-5 pt-4">
+            <button
+              type="button"
+              onMouseDown={beginMapResize(-1)}
+              className="flex h-4 w-full items-center justify-center rounded-t-xl border border-white/10 bg-white/[0.03] text-xs text-stone-500 transition hover:bg-white/[0.06]"
+              title="Drag to resize map"
+            >
+              ⋯
+            </button>
+            <div
+              className="relative w-full overflow-hidden border-x border-white/10 bg-black/[0.18]"
+              style={{ height: mapHeight }}
+            >
+              <ResultsJobMap
+                results={filteredResults}
+                selectedId={selectedId}
+                onSelect={(key) => handleSelect(key, { scroll: true })}
+                searchAreaMode={data.job.searchAreaMode}
+                boundingBox={data.job.boundingBox}
+                mapBounds={data.job.mapBounds}
+                circle={data.job.circle}
+                poi={data.job.poi}
+                mapCenter={data.job.mapCenter}
+                mapZoom={data.job.mapZoom}
+                priceDisplay={priceDisplay}
+                checkin={data.job.checkin}
+                checkout={data.job.checkout}
+              />
+            </div>
+            <button
+              type="button"
+              onMouseDown={beginMapResize(1)}
+              className="flex h-4 w-full items-center justify-center rounded-b-xl border border-white/10 bg-white/[0.03] text-xs text-stone-500 transition hover:bg-white/[0.06]"
+              title="Drag to resize map"
+            >
+              ⋯
+            </button>
+          </div>
+        </section>
+
+        <section className="rounded-[28px] border border-white/10 bg-black/[0.24] shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-5 py-4">
+            <div>
+              <h2 className="text-lg font-semibold text-white">All listings</h2>
+              <p className="mt-1 text-xs text-stone-500">
+                Same structure as the legacy report: ranked table with inline detail rows
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-stone-400">
+              <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                Showing {filteredResults.length}
+              </span>
+              <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                Liked {likedIds.size}
+              </span>
+              <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                Hidden {hiddenIds.size}
+              </span>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto px-5 py-4">
+            <table className="min-w-full border-collapse text-left text-sm">
+              <thead>
+                <tr className="border-b border-white/10 text-[11px] uppercase tracking-[0.16em] text-stone-500">
+                  <th className="w-12 px-3 py-3" />
+                  <th
+                    className="w-12 cursor-pointer px-3 py-3 hover:text-stone-300"
+                    onClick={() => handleSort('rank')}
+                  >
+                    #
+                    {sortKey === 'rank' && <span>{sortAsc ? ' ▲' : ' ▼'}</span>}
+                  </th>
+                  <th className="px-3 py-3">Photo</th>
+                  <th
+                    className="cursor-pointer px-3 py-3 hover:text-stone-300"
+                    onClick={() => handleSort('title')}
+                  >
+                    Title
+                    {sortKey === 'title' && <span>{sortAsc ? ' ▲' : ' ▼'}</span>}
+                  </th>
+                  <th
+                    className="cursor-pointer px-3 py-3 hover:text-stone-300"
+                    onClick={() => handleSort('tier')}
+                  >
+                    Tier
+                    {sortKey === 'tier' && <span>{sortAsc ? ' ▲' : ' ▼'}</span>}
+                  </th>
+                  <th
+                    className="cursor-pointer px-3 py-3 hover:text-stone-300"
+                    onClick={() => handleSort('fitScore')}
+                  >
+                    Score
+                    {sortKey === 'fitScore' && <span>{sortAsc ? ' ▲' : ' ▼'}</span>}
+                  </th>
+                  <th
+                    className="cursor-pointer px-3 py-3 hover:text-stone-300"
+                    onClick={() => handleSort('price')}
+                  >
+                    Total
+                    {sortKey === 'price' && <span>{sortAsc ? ' ▲' : ' ▼'}</span>}
+                  </th>
+                  <th className="px-3 py-3">Info</th>
+                  <th className="px-3 py-3">Scores</th>
+                  <th className="px-3 py-3">Requirements</th>
+                  <th className="px-3 py-3">Issues</th>
+                  <th className="w-12 px-3 py-3" />
+                </tr>
+              </thead>
+              <tbody>
+                {mainResults.length > 0 ? (
+                  renderRows(mainResults)
+                ) : (
+                  <tr>
+                    <td
+                      colSpan={12}
+                      className="px-4 py-10 text-center text-sm text-stone-400"
+                    >
+                      {hiddenIds.size > 0 && !showHidden
+                        ? 'All listings are hidden. Use “Show hidden” to bring them back.'
+                        : 'No listings to show.'}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <div className="sticky bottom-0 z-20 rounded-[24px] border border-white/10 bg-[#110d0c]/92 px-5 py-4 shadow-[0_-16px_40px_rgba(0,0,0,0.25)] backdrop-blur-xl">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+            <div className="flex flex-wrap items-center gap-4 text-sm text-stone-300">
+              <span>
+                Liked: <strong className="text-white">{likedIds.size}</strong>
+              </span>
+              <span>
+                Hidden: <strong className="text-white">{hiddenIds.size}</strong>
+              </span>
             </div>
 
-            {selectedSnapshot?.triage?.requirements && selectedSnapshot.triage.requirements.length > 0 && (
-              <section className="rounded-[28px] border border-white/10 bg-black/[0.24] p-5 shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl">
-                <h2 className="text-sm font-semibold uppercase tracking-[0.18em] text-stone-500">
-                  Requirement check
-                </h2>
-                <div className="mt-4 space-y-3">
-                  {selectedSnapshot.triage.requirements.map((requirement) => (
-                    <div
-                      key={requirement.requirement}
-                      className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"
-                    >
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="text-sm font-semibold text-white">{requirement.requirement}</p>
-                        {requirement.status && (
-                          <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${phaseBadgeClassName(requirement.status === 'met' ? 'completed' : requirement.status === 'partial' ? 'partial' : 'failed')}`}>
-                            {requirement.status}
-                          </span>
-                        )}
-                        {requirement.confidence && (
-                          <span className="text-[11px] text-stone-500">{requirement.confidence} confidence</span>
-                        )}
-                      </div>
-                      {requirement.note && (
-                        <p className="mt-2 text-sm leading-6 text-stone-300">{requirement.note}</p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </section>
-            )}
-          </div>
-
-          <div className="space-y-4">
-            {selectedResult ? (
-              <>
-                <section className="overflow-hidden rounded-[28px] border border-white/10 bg-black/[0.24] shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl">
-                  <div className="border-b border-white/10 px-5 py-4">
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="min-w-0">
-                        <PlatformBadge platform={selectedResult.platform} />
-                        <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">
-                          {selectedResult.name}
-                        </h2>
-                        <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-stone-400">
-                          {selectedSnapshot?.triage?.fitScore != null && (
-                            <span className="font-semibold text-white">
-                              {selectedSnapshot.triage.fitScore}/100 fit
-                            </span>
-                          )}
-                          {selectedSnapshot?.triage?.tier && (
-                            <span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] ${tierClassName(selectedSnapshot.triage.tier)}`}>
-                              {tierLabel(selectedSnapshot.triage.tier)}
-                            </span>
-                          )}
-                          {selectedResult.rating != null && (
-                            <span>{selectedResult.platform === 'airbnb' ? `★ ${selectedResult.rating}` : `${selectedResult.rating}/10`}</span>
-                          )}
-                          {selectedResult.reviewCount > 0 && <span>({selectedResult.reviewCount} reviews)</span>}
-                          {formatPoiDistance(selectedResult.poiDistanceMeters) && (
-                            <span>{formatPoiDistance(selectedResult.poiDistanceMeters)} from POI</span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {renderListingActions(selectedResult)}
-                        <a
-                          href={selectedListingUrl ?? selectedResult.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="rounded-2xl border border-white/10 bg-white/[0.05] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"
-                        >
-                          Open listing
-                        </a>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="p-5">
-                    {activePhoto && (
-                      <div className="overflow-hidden rounded-[24px] border border-white/10 bg-black/20">
-                        <img
-                          src={activePhoto}
-                          alt={selectedResult.name}
-                          className="h-[260px] w-full object-cover"
-                          loading="lazy"
-                        />
-                      </div>
-                    )}
-                    {selectedPhotos.length > 1 && (
-                      <div className="mt-3 grid grid-cols-5 gap-2">
-                        {selectedPhotos.slice(0, 10).map((photo, index) => (
-                          <button
-                            type="button"
-                            key={photo}
-                            onClick={() => setActivePhotoIndex(index)}
-                            className={`overflow-hidden rounded-xl border transition ${
-                              index === activePhotoIndex
-                                ? 'border-white/40'
-                                : 'border-white/10 opacity-80 hover:opacity-100'
-                            }`}
-                          >
-                            <img
-                              src={photo}
-                              alt={`${selectedResult.name} ${index + 1}`}
-                              className="h-14 w-full object-cover"
-                              loading="lazy"
-                            />
-                          </button>
-                        ))}
-                      </div>
-                    )}
-
-                    <div className="mt-4 flex flex-wrap gap-2 text-xs text-stone-400">
-                      {selectedResult.bedrooms != null && (
-                        <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
-                          {selectedResult.bedrooms} bedrooms
-                        </span>
-                      )}
-                      {selectedResult.beds != null && (
-                        <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
-                          {selectedResult.beds} beds
-                        </span>
-                      )}
-                      {selectedResult.bathrooms != null && (
-                        <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
-                          {selectedResult.bathrooms} bathrooms
-                        </span>
-                      )}
-                      {selectedResult.maxGuests != null && (
-                        <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
-                          Up to {selectedResult.maxGuests} guests
-                        </span>
-                      )}
-                      {selectedPrice && (
-                        <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-stone-200">
-                          {selectedPrice.primary}
-                        </span>
-                      )}
-                    </div>
-
-                    {selectedSnapshot?.triage?.summary && (
-                      <p className="mt-4 text-sm leading-7 text-stone-300">
-                        {selectedSnapshot.triage.summary}
-                      </p>
-                    )}
-                    {selectedSnapshot?.triage?.tierReason && (
-                      <p className="mt-3 text-xs leading-6 text-stone-500">
-                        {selectedSnapshot.triage.tierReason}
-                      </p>
-                    )}
-                  </div>
-                </section>
-
-                {selectedSnapshot?.details?.description && (
-                  <section className="rounded-[24px] border border-white/10 bg-white/[0.03] p-5">
-                    <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-stone-500">
-                      Listing snapshot
-                    </h3>
-                    <p className="mt-4 text-sm leading-7 text-stone-300">
-                      {selectedSnapshot.details.description}
-                    </p>
-                    <div className="mt-4 flex flex-wrap gap-2 text-xs text-stone-400">
-                      {selectedSnapshot.details.address && (
-                        <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
-                          {selectedSnapshot.details.address}
-                        </span>
-                      )}
-                      {selectedSnapshot.details.checkIn && (
-                        <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
-                          Check-in: {selectedSnapshot.details.checkIn}
-                        </span>
-                      )}
-                      {selectedSnapshot.details.checkOut && (
-                        <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
-                          Check-out: {selectedSnapshot.details.checkOut}
-                        </span>
-                      )}
-                    </div>
-                  </section>
-                )}
-
-                <DetailList
-                  title="Highlights"
-                  items={selectedSnapshot?.triage?.highlights ?? []}
-                  tone="positive"
-                />
-                <DetailList
-                  title="Concerns"
-                  items={selectedSnapshot?.triage?.concerns ?? []}
-                  tone="warning"
-                />
-                <DetailList
-                  title="Deal-breakers"
-                  items={selectedSnapshot?.triage?.dealBreakers ?? []}
-                  tone="danger"
-                />
-                <DetailList
-                  title="Amenities"
-                  items={selectedSnapshot?.details?.amenities.slice(0, 12) ?? []}
-                />
-
-                {selectedSnapshot?.aiReviews && (
-                  <>
-                    {(selectedSnapshot.aiReviews.overallSentiment
-                      || selectedSnapshot.aiReviews.summaryScore != null
-                      || selectedSnapshot.aiReviews.trends
-                      || selectedSnapshot.aiReviews.guestDemographics) && (
-                      <section className="rounded-[24px] border border-white/10 bg-white/[0.03] p-5">
-                        <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-stone-500">
-                          Review intelligence
-                        </h3>
-                        <div className="mt-4 space-y-3 text-sm leading-6 text-stone-300">
-                          {selectedSnapshot.aiReviews.overallSentiment && (
-                            <p>{selectedSnapshot.aiReviews.overallSentiment}</p>
-                          )}
-                          {selectedSnapshot.aiReviews.summaryScore != null && (
-                            <p className="text-white">
-                              Review score: {selectedSnapshot.aiReviews.summaryScore}/10
-                              {selectedSnapshot.aiReviews.summaryJustification && (
-                                <span className="ml-2 text-stone-400">
-                                  {selectedSnapshot.aiReviews.summaryJustification}
-                                </span>
-                              )}
-                            </p>
-                          )}
-                          {selectedSnapshot.aiReviews.trends && (
-                            <p><span className="text-stone-500">Trend:</span> {selectedSnapshot.aiReviews.trends}</p>
-                          )}
-                          {selectedSnapshot.aiReviews.guestDemographics && (
-                            <p><span className="text-stone-500">Guests:</span> {selectedSnapshot.aiReviews.guestDemographics}</p>
-                          )}
-                        </div>
-                      </section>
-                    )}
-                    <ThemeSection title="Review strengths" themes={selectedSnapshot.aiReviews.strengths} tone="positive" />
-                    <ThemeSection title="Review weaknesses" themes={selectedSnapshot.aiReviews.weaknesses} tone="warning" />
-                    <ThemeSection title="Review red flags" themes={selectedSnapshot.aiReviews.redFlags} tone="danger" />
-                  </>
-                )}
-
-                {selectedSnapshot?.aiPhotos && (
-                  <>
-                    <section className="rounded-[24px] border border-white/10 bg-white/[0.03] p-5">
-                      <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-stone-500">
-                        Photo intelligence
-                      </h3>
-                      <div className="mt-4 space-y-3 text-sm leading-6 text-stone-300">
-                        {selectedSnapshot.aiPhotos.overallImpression && (
-                          <p>{selectedSnapshot.aiPhotos.overallImpression}</p>
-                        )}
-                        <div className="flex flex-wrap gap-2">
-                          {selectedSnapshot.aiPhotos.overallCleanliness != null && (
-                            <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs">
-                              Cleanliness {selectedSnapshot.aiPhotos.overallCleanliness}/10
-                            </span>
-                          )}
-                          {selectedSnapshot.aiPhotos.overallModernity != null && (
-                            <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs">
-                              Modernity {selectedSnapshot.aiPhotos.overallModernity}/10
-                            </span>
-                          )}
-                          {selectedSnapshot.aiPhotos.listingAccuracyScore != null && (
-                            <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs">
-                              Accuracy {selectedSnapshot.aiPhotos.listingAccuracyScore}/10
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </section>
-                    <DetailList title="Photo highlights" items={selectedSnapshot.aiPhotos.highlights} tone="positive" />
-                    <DetailList title="Photo concerns" items={selectedSnapshot.aiPhotos.concerns} tone="warning" />
-                    <DetailList
-                      title="Photo discrepancies"
-                      items={selectedSnapshot.aiPhotos.listingAccuracyDiscrepancies}
-                      tone="warning"
-                    />
-                  </>
-                )}
-
-                {selectedResult.analysis && (
-                  <section className="rounded-[24px] border border-white/10 bg-white/[0.03] p-5">
-                    <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-stone-500">
-                      Analysis status
-                    </h3>
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      {[
-                        ['details', selectedResult.analysis.detailsStatus],
-                        ['reviews', selectedResult.analysis.reviewsStatus],
-                        ['photos', selectedResult.analysis.photosStatus],
-                        ['ai reviews', selectedResult.analysis.aiReviewsStatus],
-                        ['ai photos', selectedResult.analysis.aiPhotosStatus],
-                        ['triage', selectedResult.analysis.triageStatus],
-                      ].map(([label, status]) => (
-                        <span
-                          key={label}
-                          className={`rounded-full border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] ${phaseBadgeClassName(status)}`}
-                        >
-                          {label}: {status}
-                        </span>
-                      ))}
-                    </div>
-                  </section>
-                )}
-              </>
-            ) : (
-              <section className="rounded-[28px] border border-white/10 bg-black/[0.24] p-8 text-center text-stone-400 shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl">
-                Select a listing to inspect its native results.
-              </section>
-            )}
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setShowHidden((current) => !current)}
+                className="rounded-xl border border-white/10 bg-white/[0.05] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"
+              >
+                {showHidden ? 'Hide hidden' : 'Show hidden'}
+              </button>
+              <button
+                type="button"
+                onClick={handleSavePicks}
+                className="rounded-xl border border-white/10 bg-white/[0.05] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"
+              >
+                Save picks.json
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleCopyList('liked')}
+                className="rounded-xl border border-white/10 bg-white/[0.05] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"
+              >
+                Copy liked
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleCopyList('hidden')}
+                className="rounded-xl border border-white/10 bg-white/[0.05] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"
+              >
+                Copy hidden
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleCopyList('all')}
+                className="rounded-xl border border-white/10 bg-white/[0.05] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"
+              >
+                Copy all
+              </button>
+            </div>
           </div>
         </div>
       </div>
