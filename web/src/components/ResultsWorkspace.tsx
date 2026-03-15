@@ -39,7 +39,7 @@ const SCORE_ORDER = [
   'valueForMoney',
 ] as const;
 
-type SortKey = 'rank' | 'title' | 'tier' | 'fitScore' | 'price';
+type SortKey = 'rank' | 'title' | 'tier' | 'fitScore' | 'price' | 'poiDistance';
 type DetailTab = 'triage' | 'reviews' | 'photos' | 'snapshot';
 
 function listingKey(listing: Pick<ReviewJobListing, 'id' | 'platform'>) {
@@ -995,6 +995,8 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   const [activeTiers, setActiveTiers] = useState<Set<string>>(
     () => new Set(TIER_ORDER),
   );
+  const [maxPriceFilter, setMaxPriceFilter] = useState('');
+  const [maxPoiDistanceFilter, setMaxPoiDistanceFilter] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('fitScore');
   const [sortAsc, setSortAsc] = useState(false);
   const [isUpdatingSharing, setIsUpdatingSharing] = useState(false);
@@ -1194,6 +1196,13 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         return sortAsc ? value : -value;
       }
 
+      if (sortKey === 'poiDistance') {
+        const value =
+          (a.poiDistanceMeters ?? Number.POSITIVE_INFINITY)
+          - (b.poiDistanceMeters ?? Number.POSITIVE_INFINITY);
+        return sortAsc ? value : -value;
+      }
+
       const priceA = resolveComparablePrice(a, priceDisplay, {
         checkin: data.job.checkin,
         checkout: data.job.checkout,
@@ -1228,9 +1237,43 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     () =>
       displayableResults.filter((listing) => {
         const tier = getListingResultsSnapshot(listing).triage?.tier ?? 'unscored';
-        return activeTiers.has(tier);
+        if (!activeTiers.has(tier)) {
+          return false;
+        }
+
+        const maxPriceValue = Number(maxPriceFilter);
+        if (maxPriceFilter.trim() && Number.isFinite(maxPriceValue)) {
+          const amount = resolveComparablePrice(listing, priceDisplay, {
+            checkin: data.job.checkin,
+            checkout: data.job.checkout,
+          })?.amount;
+
+          if (amount == null || amount > maxPriceValue) {
+            return false;
+          }
+        }
+
+        const maxPoiDistanceValue = Number(maxPoiDistanceFilter);
+        if (maxPoiDistanceFilter.trim() && Number.isFinite(maxPoiDistanceValue)) {
+          if (
+            listing.poiDistanceMeters == null
+            || listing.poiDistanceMeters > maxPoiDistanceValue
+          ) {
+            return false;
+          }
+        }
+
+        return true;
       }),
-    [activeTiers, displayableResults],
+    [
+      activeTiers,
+      data.job.checkin,
+      data.job.checkout,
+      displayableResults,
+      maxPoiDistanceFilter,
+      maxPriceFilter,
+      priceDisplay,
+    ],
   );
 
   const likedResults = useMemo(
@@ -1244,11 +1287,11 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   );
 
   const heroResults = useMemo(() => {
-    const topPicks = displayableResults.filter(
+    const topPicks = filteredResults.filter(
       (listing) => getListingResultsSnapshot(listing).triage?.tier === 'top_pick',
     );
-    return topPicks.length >= 3 ? topPicks.slice(0, 5) : displayableResults.slice(0, 5);
-  }, [displayableResults]);
+    return topPicks.length >= 3 ? topPicks.slice(0, 5) : filteredResults.slice(0, 5);
+  }, [filteredResults]);
 
   const tierCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -1507,13 +1550,6 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                       )}
                       {listing.reviewCount > 0 && <span>({listing.reviewCount})</span>}
                     </div>
-                    {listing.poiDistanceMeters != null && (
-                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-stone-300">
-                        <span className="rounded-full border border-sky-300/20 bg-sky-300/10 px-2.5 py-1 text-sky-100">
-                          POI {formatPoiDistance(listing.poiDistanceMeters)} away
-                        </span>
-                      </div>
-                    )}
                     <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-stone-500">
                       {listing.poiDistanceMeters != null && (
                         <button
@@ -1548,10 +1584,15 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 {priceInfo.secondary && (
                   <div className="mt-1 text-xs text-stone-500">{priceInfo.secondary}</div>
                 )}
+              </td>
+              <td className="px-3 py-3 align-top">
+                <div className="text-sm font-semibold text-white">
+                  {listing.poiDistanceMeters != null
+                    ? formatPoiDistance(listing.poiDistanceMeters)
+                    : '—'}
+                </div>
                 {listing.poiDistanceMeters != null && (
-                  <div className="mt-2 text-xs text-stone-400">
-                    {formatPoiDistance(listing.poiDistanceMeters)} from POI
-                  </div>
+                  <div className="mt-1 text-xs text-stone-500">from POI</div>
                 )}
               </td>
               <td className="px-3 py-3 align-top">
@@ -1798,48 +1839,92 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         )}
 
         <section className="sticky top-4 z-20 rounded-[24px] border border-white/10 bg-[#0f0c0b]/90 px-4 py-3 shadow-[0_18px_50px_rgba(0,0,0,0.25)] backdrop-blur-xl">
-          <div className="flex flex-wrap gap-2">
-            {TIER_ORDER.map((tier) => {
-              const active = activeTiers.has(tier);
-              return (
-                <button
-                  key={tier}
-                  type="button"
-                  onClick={() =>
-                    setActiveTiers((current) => {
-                      const next = new Set(current);
-                      if (next.has(tier)) {
-                        next.delete(tier);
-                      } else {
-                        next.add(tier);
-                      }
-                      return next;
-                    })
-                  }
-                  className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold capitalize transition ${
-                    active
-                      ? 'border-white/30 bg-white text-black'
-                      : 'border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08] hover:text-white'
-                  }`}
-                >
-                  <span
-                    className={`h-2 w-2 rounded-full ${
-                      tier === 'top_pick'
-                        ? 'bg-emerald-400'
-                        : tier === 'shortlist'
-                          ? 'bg-sky-400'
-                          : tier === 'consider'
-                            ? 'bg-amber-400'
-                            : tier === 'unlikely'
-                              ? 'bg-orange-400'
-                              : 'bg-rose-400'
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-wrap gap-2">
+              {TIER_ORDER.map((tier) => {
+                const active = activeTiers.has(tier);
+                return (
+                  <button
+                    key={tier}
+                    type="button"
+                    onClick={() =>
+                      setActiveTiers((current) => {
+                        const next = new Set(current);
+                        if (next.has(tier)) {
+                          next.delete(tier);
+                        } else {
+                          next.add(tier);
+                        }
+                        return next;
+                      })
+                    }
+                    className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold capitalize transition ${
+                      active
+                        ? 'border-white/30 bg-white text-black'
+                        : 'border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08] hover:text-white'
                     }`}
+                  >
+                    <span
+                      className={`h-2 w-2 rounded-full ${
+                        tier === 'top_pick'
+                          ? 'bg-emerald-400'
+                          : tier === 'shortlist'
+                            ? 'bg-sky-400'
+                            : tier === 'consider'
+                              ? 'bg-amber-400'
+                              : tier === 'unlikely'
+                                ? 'bg-orange-400'
+                                : 'bg-rose-400'
+                      }`}
+                    />
+                    {tier.replace(/_/g, ' ')}
+                    <span className="text-[11px] opacity-70">{tierCounts.get(tier) ?? 0}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <label className="flex min-w-[180px] flex-col gap-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">
+                {priceDisplay === 'perNight' ? 'Max Per Night' : 'Max Total'}
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  inputMode="numeric"
+                  value={maxPriceFilter}
+                  onChange={(event) => setMaxPriceFilter(event.target.value)}
+                  placeholder={priceDisplay === 'perNight' ? 'e.g. 450' : 'e.g. 4000'}
+                  className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm font-medium tracking-normal text-white outline-none transition placeholder:text-stone-500 focus:border-white/20 focus:bg-white/[0.06]"
+                />
+              </label>
+              {data.job.poi && (
+                <label className="flex min-w-[200px] flex-col gap-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">
+                  Max POI Distance (m)
+                  <input
+                    type="number"
+                    min="0"
+                    step="10"
+                    inputMode="numeric"
+                    value={maxPoiDistanceFilter}
+                    onChange={(event) => setMaxPoiDistanceFilter(event.target.value)}
+                    placeholder="e.g. 800"
+                    className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm font-medium tracking-normal text-white outline-none transition placeholder:text-stone-500 focus:border-white/20 focus:bg-white/[0.06]"
                   />
-                  {tier.replace(/_/g, ' ')}
-                  <span className="text-[11px] opacity-70">{tierCounts.get(tier) ?? 0}</span>
+                </label>
+              )}
+              {(maxPriceFilter || maxPoiDistanceFilter) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMaxPriceFilter('');
+                    setMaxPoiDistanceFilter('');
+                  }}
+                  className="self-end rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"
+                >
+                  Clear filters
                 </button>
-              );
-            })}
+              )}
+            </div>
           </div>
         </section>
 
@@ -1858,7 +1943,20 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                     <th className="px-3 py-3">Title</th>
                     <th className="px-3 py-3">Tier</th>
                     <th className="px-3 py-3">Score</th>
-                    <th className="px-3 py-3">Total</th>
+                    <th
+                      className="cursor-pointer px-3 py-3 hover:text-stone-300"
+                      onClick={() => handleSort('price')}
+                    >
+                      {priceDisplay === 'perNight' ? 'Per night' : 'Total'}
+                      {sortKey === 'price' && <span>{sortAsc ? ' ▲' : ' ▼'}</span>}
+                    </th>
+                    <th
+                      className="cursor-pointer px-3 py-3 hover:text-stone-300"
+                      onClick={() => handleSort('poiDistance')}
+                    >
+                      POI
+                      {sortKey === 'poiDistance' && <span>{sortAsc ? ' ▲' : ' ▼'}</span>}
+                    </th>
                     <th className="px-3 py-3">Info</th>
                     <th className="px-3 py-3">Scores</th>
                     <th className="px-3 py-3">Requirements</th>
@@ -1987,8 +2085,15 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                     className="cursor-pointer px-3 py-3 hover:text-stone-300"
                     onClick={() => handleSort('price')}
                   >
-                    Total
+                    {priceDisplay === 'perNight' ? 'Per night' : 'Total'}
                     {sortKey === 'price' && <span>{sortAsc ? ' ▲' : ' ▼'}</span>}
+                  </th>
+                  <th
+                    className="cursor-pointer px-3 py-3 hover:text-stone-300"
+                    onClick={() => handleSort('poiDistance')}
+                  >
+                    POI
+                    {sortKey === 'poiDistance' && <span>{sortAsc ? ' ▲' : ' ▼'}</span>}
                   </th>
                   <th className="px-3 py-3">Info</th>
                   <th className="px-3 py-3">Scores</th>
@@ -2003,7 +2108,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 ) : (
                   <tr>
                     <td
-                      colSpan={12}
+                      colSpan={13}
                       className="px-4 py-10 text-center text-sm text-stone-400"
                     >
                       {hiddenIds.size > 0 && !showHidden
