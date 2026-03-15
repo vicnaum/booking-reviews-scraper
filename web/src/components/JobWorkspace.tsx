@@ -8,7 +8,10 @@ import type {
   ReviewJobResponse,
 } from '@/types';
 import { resolveComparablePrice } from '@/lib/pricing';
-import { fetchReviewJobResponse } from '@/lib/reviewJobClient';
+import {
+  fetchReviewJobResponse,
+  getStoredReviewJobPriceDisplay,
+} from '@/lib/reviewJobClient';
 import { useReviewJobPolling } from '@/hooks/useReviewJobPolling';
 import ResultCard from './ResultCard';
 
@@ -131,7 +134,9 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   const initialPrompt = initialData.job.prompt ?? '';
   const [data, setData] = useState(initialData);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [priceDisplay, setPriceDisplay] = useState<PriceDisplayMode>('total');
+  const [priceDisplay, setPriceDisplay] = useState<PriceDisplayMode>(
+    getStoredReviewJobPriceDisplay(initialData.job),
+  );
   const [prompt, setPrompt] = useState(initialPrompt);
   const [savedPrompt, setSavedPrompt] = useState(initialPrompt);
   const [isSavingPrompt, setIsSavingPrompt] = useState(false);
@@ -183,7 +188,11 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   );
 
   const selectedCount = selectedListings.length;
-  const analysisLocked = data.job.analysisStatus === 'running';
+  const analysisQueued = data.job.analysisCurrentPhase === 'queued';
+  const analysisLocked =
+    isStartingAnalysis
+    || data.job.analysisStatus === 'running'
+    || analysisQueued;
   const isPromptDirty = prompt !== savedPrompt;
 
   const persistSelection = useCallback(
@@ -199,7 +208,6 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            prompt,
             selectedListings: nextSelectedListings.map((listing) => ({
               id: listing.id,
               platform: listing.platform,
@@ -224,7 +232,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
         setIsSavingSelection(false);
       }
     },
-    [data.job.id, prompt],
+    [data.job.id],
   );
 
   const savePrompt = useCallback(async () => {
@@ -331,9 +339,12 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     sortedResults.length > 0
     && (data.job.status === 'completed' || data.job.status === 'failed')
     && data.job.analysisStatus !== 'running'
+    && !analysisQueued
     && !isSavingSelection;
   const analysisButtonLabel =
-    data.job.analysisStatus === 'completed' || data.job.analysisStatus === 'partial'
+    analysisQueued
+      ? 'Analysis queued...'
+      : data.job.analysisStatus === 'completed' || data.job.analysisStatus === 'partial'
       ? selectedCount > 0
         ? `Re-run analysis (${selectedCount} selected)`
         : `Re-run analysis (${sortedResults.length} listings)`
@@ -481,7 +492,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                   {saveMessage
                     ?? (
                       analysisLocked
-                        ? 'Brief and selection are locked while analysis is running.'
+                        ? 'Brief and selection are locked while analysis is queued or running.'
                         : isPromptDirty
                         ? 'Unsaved brief changes'
                         : selectedCount > 0

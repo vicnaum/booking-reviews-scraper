@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
 import { getReviewJobOwnerKey } from '@/lib/reviewJobOwner';
 import {
@@ -69,6 +70,7 @@ export async function PATCH(request: Request, { params }: Params) {
     select: {
       id: true,
       analysisStatus: true,
+      analysisCurrentPhase: true,
     },
   });
 
@@ -76,7 +78,10 @@ export async function PATCH(request: Request, { params }: Params) {
     return NextResponse.json({ error: 'Review job not found' }, { status: 404 });
   }
 
-  if (existingJob.analysisStatus === 'running') {
+  if (
+    existingJob.analysisStatus === 'running'
+    || existingJob.analysisCurrentPhase === 'queued'
+  ) {
     return NextResponse.json(
       { error: 'Wait for the current analysis run to finish before changing brief or selection' },
       { status: 409 },
@@ -84,12 +89,17 @@ export async function PATCH(request: Request, { params }: Params) {
   }
 
   const job = await prisma.$transaction(async (tx) => {
+    const updateData: Prisma.ReviewJobUpdateInput = {};
+    if (Object.prototype.hasOwnProperty.call(body, 'prompt')) {
+      updateData.prompt = body.prompt?.trim() || null;
+    }
+
+    if (Object.keys(updateData).length > 0) {
       await tx.reviewJob.update({
         where: { id: jobId },
-        data: {
-          prompt: body.prompt?.trim() || null,
-      },
-    });
+        data: updateData,
+      });
+    }
 
     if (selectedListings) {
       await tx.reviewJobListing.updateMany({
@@ -111,8 +121,8 @@ export async function PATCH(request: Request, { params }: Params) {
       }
     }
 
-      return tx.reviewJob.findFirstOrThrow(buildOwnedReviewJobQuery(jobId, ownerKey));
-    });
+    return tx.reviewJob.findFirstOrThrow(buildOwnedReviewJobQuery(jobId, ownerKey));
+  });
 
   const response: ReviewJobResponse = toReviewJobResponseRecord(job);
 

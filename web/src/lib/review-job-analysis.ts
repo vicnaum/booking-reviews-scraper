@@ -23,6 +23,10 @@ export function getReviewJobWorkspaceDir(jobId: string): string {
   return path.join(os.tmpdir(), 'stayreviewr-review-jobs', jobId);
 }
 
+export function getReviewJobRunDir(jobId: string, runId: string): string {
+  return path.join(getReviewJobWorkspaceDir(jobId), 'runs', sanitize(runId));
+}
+
 export function ensureReviewJobWorkspace(jobId: string): string {
   const dir = getReviewJobWorkspaceDir(jobId);
   fs.mkdirSync(dir, { recursive: true });
@@ -66,6 +70,12 @@ export function removeDirIfExists(dirPath: string) {
   }
 }
 
+export function removeFileIfExists(filePath: string) {
+  if (fs.existsSync(filePath)) {
+    fs.rmSync(filePath, { force: true });
+  }
+}
+
 export function asJson(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
 }
@@ -103,7 +113,11 @@ export function summarizeAnalysisStatus(
     return 'failed';
   }
 
-  if (failedCount > 0 || partialCount > 0) {
+  if (
+    failedCount > 0
+    || partialCount > 0
+    || analyses.some((item) => item.status === 'pending' || item.status === 'running')
+  ) {
     return 'partial';
   }
 
@@ -227,6 +241,83 @@ export function pruneAnalysisManifestToListings(input: {
   }
 
   writeJsonFile(manifestPath, manifest);
+}
+
+export function invalidateAnalysisOutputsForListings(input: {
+  rootDir: string;
+  listings: Array<Pick<ReviewJobListing, 'platform' | 'url'>>;
+}) {
+  const manifestPath = getManifestPathFromRoot(input.rootDir);
+  const manifest = readJsonFile<AnalysisManifest>(manifestPath);
+  if (!manifest) {
+    removeFileIfExists(getReportPathFromRoot(input.rootDir));
+    return;
+  }
+
+  const allowedKeys = new Set(
+    input.listings.map((listing) => getListingMatchKey(listing.platform, listing.url)),
+  );
+
+  for (const entry of Object.values(manifest.listings)) {
+    if (!allowedKeys.has(getListingMatchKey(entry.platform, entry.url))) {
+      continue;
+    }
+
+    if (entry.aiReviews.file) {
+      removeFileIfExists(path.join(input.rootDir, entry.aiReviews.file));
+    }
+    if (entry.aiPhotos.file) {
+      removeFileIfExists(path.join(input.rootDir, entry.aiPhotos.file));
+    }
+    if (entry.triage.file) {
+      removeFileIfExists(path.join(input.rootDir, entry.triage.file));
+    }
+
+    entry.aiReviews = { status: 'not_requested' };
+    entry.aiPhotos = { status: 'not_requested' };
+    entry.triage = { status: 'not_requested' };
+  }
+
+  manifest.updatedAt = new Date().toISOString();
+  writeJsonFile(manifestPath, manifest);
+  removeFileIfExists(getReportPathFromRoot(input.rootDir));
+}
+
+export function prepareReviewJobRunWorkspace(input: {
+  jobId: string;
+  runId: string;
+  previousArtifactRoot?: string | null;
+  listings: Array<Pick<ReviewJobListing, 'platform' | 'url'>>;
+  dates?: { checkIn?: string; checkOut?: string; adults?: number };
+}) {
+  const runRoot = getReviewJobRunDir(input.jobId, input.runId);
+  removeDirIfExists(runRoot);
+  fs.mkdirSync(runRoot, { recursive: true });
+
+  if (input.previousArtifactRoot && fs.existsSync(input.previousArtifactRoot)) {
+    fs.cpSync(input.previousArtifactRoot, runRoot, {
+      recursive: true,
+      force: true,
+      filter(src) {
+        return path.basename(src) !== 'runs';
+      },
+    });
+  }
+
+  pruneAnalysisManifestToListings({
+    rootDir: runRoot,
+    listings: input.listings,
+    dates: input.dates,
+  });
+  invalidateAnalysisOutputsForListings({
+    rootDir: runRoot,
+    listings: input.listings,
+  });
+
+  return {
+    rootDir: runRoot,
+    urlsFilePath: path.join(runRoot, 'job_urls.txt'),
+  };
 }
 
 export function getListingMatchKey(

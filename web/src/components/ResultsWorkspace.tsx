@@ -5,13 +5,17 @@ import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { PriceDisplayMode, ReviewJobResponse } from '@/types';
 import { getPriceDisplayInfo, resolveComparablePrice } from '@/lib/pricing';
+import { buildListingUrl } from '@/lib/listingLinks';
 import {
   formatPoiDistance,
   getListingResultsSnapshot,
   getTierRank,
   type ParsedTheme,
 } from '@/lib/results';
-import { fetchReviewJobResponse } from '@/lib/reviewJobClient';
+import {
+  fetchReviewJobResponse,
+  getStoredReviewJobPriceDisplay,
+} from '@/lib/reviewJobClient';
 import { useReviewJobPolling } from '@/hooks/useReviewJobPolling';
 import ResultCard from './ResultCard';
 import PlatformBadge from './PlatformBadge';
@@ -178,7 +182,9 @@ interface ResultsWorkspaceProps {
 export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps) {
   const [data, setData] = useState(initialData);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [priceDisplay, setPriceDisplay] = useState<PriceDisplayMode>('total');
+  const [priceDisplay, setPriceDisplay] = useState<PriceDisplayMode>(
+    getStoredReviewJobPriceDisplay(initialData.job),
+  );
   const [activePhotoIndex, setActivePhotoIndex] = useState(0);
 
   const refreshJob = useCallback(async () => {
@@ -290,6 +296,14 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     ? getPriceDisplayInfo(selectedResult, priceDisplay, {
         checkin: data.job.checkin,
         checkout: data.job.checkout,
+      })
+    : null;
+  const selectedListingUrl = selectedResult
+    ? buildListingUrl(selectedResult.url, selectedResult.platform, {
+        checkin: data.job.checkin,
+        checkout: data.job.checkout,
+        adults: data.job.adults,
+        currency: data.job.currency,
       })
     : null;
 
@@ -530,7 +544,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                         </div>
                       </div>
                       <a
-                        href={selectedResult.url}
+                        href={selectedListingUrl ?? selectedResult.url}
                         target="_blank"
                         rel="noreferrer"
                         className="rounded-2xl border border-white/10 bg-white/[0.05] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"

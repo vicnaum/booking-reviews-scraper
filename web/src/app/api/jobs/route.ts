@@ -12,6 +12,27 @@ import type {
 
 export const runtime = 'nodejs';
 
+function withOwnerCookie(
+  response: NextResponse,
+  options: {
+    hasExistingOwnerKey: boolean;
+    ownerKey: string;
+  },
+) {
+  if (!options.hasExistingOwnerKey) {
+    response.cookies.set({
+      name: OWNER_KEY_COOKIE,
+      value: options.ownerKey,
+      httpOnly: false,
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 60 * 60 * 24 * 180,
+    });
+  }
+
+  return response;
+}
+
 export async function POST(request: NextRequest) {
   let body: CreateReviewJobRequest;
   try {
@@ -25,7 +46,8 @@ export async function POST(request: NextRequest) {
   }
 
   const cookieStore = await cookies();
-  const ownerKey = cookieStore.get(OWNER_KEY_COOKIE)?.value ?? randomUUID();
+  const existingOwnerKey = cookieStore.get(OWNER_KEY_COOKIE)?.value ?? null;
+  const ownerKey = existingOwnerKey ?? randomUUID();
 
   const job = await prisma.reviewJob.create({
     data: buildReviewJobData(body, {
@@ -59,7 +81,13 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    return NextResponse.json({ error: message }, { status: 500 });
+    return withOwnerCookie(
+      NextResponse.json({ error: message }, { status: 500 }),
+      {
+        hasExistingOwnerKey: !!existingOwnerKey,
+        ownerKey,
+      },
+    );
   }
 
   const response: CreateReviewJobResponse = {
@@ -67,17 +95,8 @@ export async function POST(request: NextRequest) {
     status: 'pending',
   };
 
-  const nextResponse = NextResponse.json(response);
-  if (!cookieStore.get(OWNER_KEY_COOKIE)?.value) {
-    nextResponse.cookies.set({
-      name: OWNER_KEY_COOKIE,
-      value: ownerKey,
-      httpOnly: false,
-      sameSite: 'lax',
-      path: '/',
-      maxAge: 60 * 60 * 24 * 180,
-    });
-  }
-
-  return nextResponse;
+  return withOwnerCookie(NextResponse.json(response), {
+    hasExistingOwnerKey: !!existingOwnerKey,
+    ownerKey,
+  });
 }

@@ -48,7 +48,7 @@ export async function POST(_request: Request, { params }: Params) {
     );
   }
 
-  if (job.analysisStatus === 'running') {
+  if (job.analysisStatus === 'running' || job.analysisCurrentPhase === 'queued') {
     return NextResponse.json(
       { error: 'Analysis is already running for this job' },
       { status: 409 },

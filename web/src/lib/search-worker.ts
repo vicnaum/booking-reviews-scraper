@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Prisma } from '@prisma/client';
+import { Prisma, type PhaseStatus as DbPhaseStatus } from '@prisma/client';
 import { Worker } from 'bullmq';
 import { config as loadDotEnv } from 'dotenv';
 import { runBatch, type BatchEvent, type BatchPhaseUpdate } from '../../../src/batch.js';
@@ -33,9 +33,8 @@ import {
   getManifestPathFromRoot,
   getPoiDistanceMeters,
   getReportPathFromRoot,
-  getReviewJobWorkspaceDir,
   injectPoiContextIntoListingArtifacts,
-  pruneAnalysisManifestToListings,
+  prepareReviewJobRunWorkspace,
   readJsonFile,
   summarizeAnalysisStatus,
   summarizeManifestEntryStatus,
@@ -117,6 +116,7 @@ async function runSearchJob(searchJobId: string) {
 
   const startedAt = new Date();
   let pagesScanned = 0;
+  const progressWriter = createProgressWriter('search-worker');
 
   await prisma.searchJob.update({
     where: { id: searchJobId },
@@ -131,7 +131,6 @@ async function runSearchJob(searchJobId: string) {
   try {
     const params = buildCliSearchParams(jobRecord);
     const storedFilters = parseSearchFilters(jobRecord.filters);
-    const progressWriter = createProgressWriter('search-worker');
     const onProgress = () => {
       const nextPagesScanned = pagesScanned + 1;
       pagesScanned = nextPagesScanned;
@@ -198,6 +197,7 @@ async function runSearchJob(searchJobId: string) {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Search failed';
     const completedAt = new Date();
+    await progressWriter.flush();
 
     await prisma.searchJob.update({
       where: { id: searchJobId },
@@ -254,6 +254,7 @@ async function runReviewJobSearch(reviewJobId: string) {
 
   const startedAt = new Date();
   let pagesScanned = 0;
+  const progressWriter = createProgressWriter('review-worker');
   const searchLogger = createSearchLogger({
     kind: 'review-job-search',
     label: reviewJobId,
@@ -290,7 +291,6 @@ async function runReviewJobSearch(reviewJobId: string) {
   try {
     const storedFilters = parseSearchFilters(jobRecord.filters);
     const storedPoi = asStoredMapPoint(jobRecord.poi);
-    const progressWriter = createProgressWriter('review-worker');
     const requestFilters = {
       circle: storedFilters.circle,
       checkin: jobRecord.checkin ?? undefined,
@@ -472,6 +472,7 @@ async function runReviewJobSearch(reviewJobId: string) {
     const message =
       error instanceof Error ? error.message : 'Review job search failed';
     const completedAt = new Date();
+    await progressWriter.flush();
 
     await prisma.$transaction(async (tx) => {
       await tx.reviewJob.update({
@@ -564,6 +565,138 @@ interface ReviewJobListingPersistenceRow {
   lng: number | null;
   poiDistanceMeters: number | null;
   analysis: { startedAt: Date | null } | null;
+}
+
+interface ReviewJobListingAnalysisSnapshot {
+  jobListingId: string;
+  status: DbPhaseStatus;
+  currentPhase: string;
+  errorMessage: string | null;
+  detailsStatus: DbPhaseStatus;
+  reviewsStatus: DbPhaseStatus;
+  photosStatus: DbPhaseStatus;
+  aiReviewsStatus: DbPhaseStatus;
+  aiPhotosStatus: DbPhaseStatus;
+  triageStatus: DbPhaseStatus;
+  details: Prisma.InputJsonValue | typeof Prisma.DbNull;
+  aiReviews: Prisma.InputJsonValue | typeof Prisma.DbNull;
+  aiPhotos: Prisma.InputJsonValue | typeof Prisma.DbNull;
+  triage: Prisma.InputJsonValue | typeof Prisma.DbNull;
+  reviewCount: number | null;
+  photoCount: number | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  durationMs: number | null;
+}
+
+function toStoredAnalysisValue(
+  value: Prisma.JsonValue | null,
+): Prisma.InputJsonValue | typeof Prisma.DbNull {
+  return value == null ? Prisma.DbNull : (value as Prisma.InputJsonValue);
+}
+
+function createReviewJobAnalysisSnapshot(
+  listing: {
+    id: string;
+    analysis: {
+      status: DbPhaseStatus;
+      currentPhase: string;
+      errorMessage: string | null;
+      detailsStatus: DbPhaseStatus;
+      reviewsStatus: DbPhaseStatus;
+      photosStatus: DbPhaseStatus;
+      aiReviewsStatus: DbPhaseStatus;
+      aiPhotosStatus: DbPhaseStatus;
+      triageStatus: DbPhaseStatus;
+      details: Prisma.JsonValue | null;
+      aiReviews: Prisma.JsonValue | null;
+      aiPhotos: Prisma.JsonValue | null;
+      triage: Prisma.JsonValue | null;
+      reviewCount: number | null;
+      photoCount: number | null;
+      startedAt: Date | null;
+      completedAt: Date | null;
+      durationMs: number | null;
+    } | null;
+  },
+): ReviewJobListingAnalysisSnapshot | null {
+  if (!listing.analysis) {
+    return null;
+  }
+
+  return {
+    jobListingId: listing.id,
+    status: listing.analysis.status,
+    currentPhase: listing.analysis.currentPhase,
+    errorMessage: listing.analysis.errorMessage,
+    detailsStatus: listing.analysis.detailsStatus,
+    reviewsStatus: listing.analysis.reviewsStatus,
+    photosStatus: listing.analysis.photosStatus,
+    aiReviewsStatus: listing.analysis.aiReviewsStatus,
+    aiPhotosStatus: listing.analysis.aiPhotosStatus,
+    triageStatus: listing.analysis.triageStatus,
+    details: toStoredAnalysisValue(listing.analysis.details),
+    aiReviews: toStoredAnalysisValue(listing.analysis.aiReviews),
+    aiPhotos: toStoredAnalysisValue(listing.analysis.aiPhotos),
+    triage: toStoredAnalysisValue(listing.analysis.triage),
+    reviewCount: listing.analysis.reviewCount,
+    photoCount: listing.analysis.photoCount,
+    startedAt: listing.analysis.startedAt,
+    completedAt: listing.analysis.completedAt,
+    durationMs: listing.analysis.durationMs,
+  };
+}
+
+async function restoreReviewJobAnalysisSnapshots(
+  tx: Prisma.TransactionClient,
+  snapshots: ReviewJobListingAnalysisSnapshot[],
+) {
+  for (const snapshot of snapshots) {
+    await tx.reviewJobListingAnalysis.upsert({
+      where: { jobListingId: snapshot.jobListingId },
+      create: {
+        jobListingId: snapshot.jobListingId,
+        status: snapshot.status,
+        currentPhase: snapshot.currentPhase,
+        errorMessage: snapshot.errorMessage,
+        detailsStatus: snapshot.detailsStatus,
+        reviewsStatus: snapshot.reviewsStatus,
+        photosStatus: snapshot.photosStatus,
+        aiReviewsStatus: snapshot.aiReviewsStatus,
+        aiPhotosStatus: snapshot.aiPhotosStatus,
+        triageStatus: snapshot.triageStatus,
+        details: snapshot.details,
+        aiReviews: snapshot.aiReviews,
+        aiPhotos: snapshot.aiPhotos,
+        triage: snapshot.triage,
+        reviewCount: snapshot.reviewCount,
+        photoCount: snapshot.photoCount,
+        startedAt: snapshot.startedAt,
+        completedAt: snapshot.completedAt,
+        durationMs: snapshot.durationMs,
+      },
+      update: {
+        status: snapshot.status,
+        currentPhase: snapshot.currentPhase,
+        errorMessage: snapshot.errorMessage,
+        detailsStatus: snapshot.detailsStatus,
+        reviewsStatus: snapshot.reviewsStatus,
+        photosStatus: snapshot.photosStatus,
+        aiReviewsStatus: snapshot.aiReviewsStatus,
+        aiPhotosStatus: snapshot.aiPhotosStatus,
+        triageStatus: snapshot.triageStatus,
+        details: snapshot.details,
+        aiReviews: snapshot.aiReviews,
+        aiPhotos: snapshot.aiPhotos,
+        triage: snapshot.triage,
+        reviewCount: snapshot.reviewCount,
+        photoCount: snapshot.photoCount,
+        startedAt: snapshot.startedAt,
+        completedAt: snapshot.completedAt,
+        durationMs: snapshot.durationMs,
+      },
+    });
+  }
 }
 
 function getManifestEntryError(entry: PersistableManifestEntry): string | null {
@@ -774,19 +907,8 @@ async function syncReviewJobArtifactsToDb(input: {
     });
   }
 
-  const finalAnalyses = await prisma.reviewJobListingAnalysis.findMany({
-    where: {
-      jobListing: {
-        jobId: input.reviewJobId,
-        hidden: false,
-      },
-    },
-    select: { status: true },
-  });
-
   return {
     manifest,
-    overallStatus: summarizeAnalysisStatus(finalAnalyses),
   };
 }
 
@@ -814,21 +936,12 @@ async function runReviewJobAnalysis(reviewJobId: string) {
 
   const selectedListings = jobRecord.listings.filter((listing) => listing.selected);
   const activeListings = selectedListings.length > 0 ? selectedListings : jobRecord.listings;
-  const artifactRoot = getReviewJobWorkspaceDir(reviewJobId);
-  const urlsFilePath = path.join(artifactRoot, 'job_urls.txt');
-  const analysisModel = process.env.LLM_MODEL || 'gemini-3-flash-preview:high';
-  const poi = asStoredMapPoint(jobRecord.poi);
   const startedAt = new Date();
-  const activeListingByKey = new Map(
-    activeListings.map((listing) => [
-      getListingMatchKey(listing.platform, listing.url),
-      listing,
-    ]),
-  );
-
-  fs.mkdirSync(artifactRoot, { recursive: true });
-  pruneAnalysisManifestToListings({
-    rootDir: artifactRoot,
+  const runId = startedAt.toISOString().replace(/[:.]/g, '-');
+  const { rootDir: artifactRoot, urlsFilePath } = prepareReviewJobRunWorkspace({
+    jobId: reviewJobId,
+    runId,
+    previousArtifactRoot: jobRecord.artifactRoot,
     listings: activeListings,
     dates: {
       checkIn: jobRecord.checkin ?? undefined,
@@ -836,6 +949,42 @@ async function runReviewJobAnalysis(reviewJobId: string) {
       adults: jobRecord.adults,
     },
   });
+  const analysisModel = process.env.LLM_MODEL || 'gemini-3-flash-preview:high';
+  const poi = asStoredMapPoint(jobRecord.poi);
+  const activeListingByKey = new Map(
+    activeListings.map((listing) => [
+      getListingMatchKey(listing.platform, listing.url),
+      {
+        ...listing,
+        analysis: { startedAt },
+      },
+    ]),
+  );
+  const previousAnalysisSnapshots = activeListings
+    .map((listing) => createReviewJobAnalysisSnapshot(listing))
+    .filter((snapshot): snapshot is ReviewJobListingAnalysisSnapshot => snapshot != null);
+  const hadPersistedResults =
+    jobRecord.analysisStatus === 'completed' || jobRecord.analysisStatus === 'partial';
+  const previousJobState = {
+    status: jobRecord.status,
+    currentPhase: jobRecord.currentPhase,
+    analysisStatus: jobRecord.analysisStatus,
+    analysisCurrentPhase: jobRecord.analysisCurrentPhase,
+    analysisProgress: jobRecord.analysisProgress,
+    analysisStartedAt: jobRecord.analysisStartedAt,
+    analysisCompletedAt: jobRecord.analysisCompletedAt,
+    analysisDurationMs: jobRecord.analysisDurationMs,
+    artifactRoot: jobRecord.artifactRoot,
+    reportPath: jobRecord.reportPath,
+  };
+  const activeListingIds = activeListings.map((listing) => listing.id);
+  const hasSelectedSubset = selectedListings.length > 0;
+  const inactiveListingIds = hasSelectedSubset
+    ? jobRecord.listings
+      .filter((listing) => !listing.selected)
+      .map((listing) => listing.id)
+    : [];
+
   fs.writeFileSync(
     urlsFilePath,
     `${activeListings.map((listing) => listing.url).join('\n')}\n`,
@@ -843,6 +992,21 @@ async function runReviewJobAnalysis(reviewJobId: string) {
   );
 
   await prisma.$transaction(async (tx) => {
+    await tx.reviewJobListingAnalysis.updateMany({
+      where: {
+        jobListingId: {
+          in: activeListingIds,
+        },
+      },
+      data: {
+        status: 'running',
+        currentPhase: 'queued',
+        errorMessage: null,
+        startedAt,
+        completedAt: null,
+        durationMs: null,
+      },
+    });
     await tx.reviewJob.update({
       where: { id: reviewJobId },
       data: {
@@ -855,36 +1019,6 @@ async function runReviewJobAnalysis(reviewJobId: string) {
         analysisStartedAt: startedAt,
         analysisCompletedAt: null,
         analysisDurationMs: null,
-        artifactRoot,
-        reportPath: null,
-      },
-    });
-
-    await tx.reviewJobListingAnalysis.updateMany({
-      where: {
-        jobListingId: {
-          in: jobRecord.listings.map((listing) => listing.id),
-        },
-      },
-      data: {
-        status: 'pending',
-        currentPhase: 'queued',
-        errorMessage: null,
-        startedAt,
-        completedAt: null,
-        durationMs: null,
-        detailsStatus: 'pending',
-        reviewsStatus: 'pending',
-        photosStatus: 'pending',
-        aiReviewsStatus: 'pending',
-        aiPhotosStatus: 'pending',
-        triageStatus: 'pending',
-        details: Prisma.DbNull,
-        aiReviews: Prisma.DbNull,
-        aiPhotos: Prisma.DbNull,
-        triage: Prisma.DbNull,
-        reviewCount: null,
-        photoCount: null,
       },
     });
   });
@@ -1009,16 +1143,58 @@ async function runReviewJobAnalysis(reviewJobId: string) {
       });
     }
 
-    const { overallStatus } = await syncReviewJobArtifactsToDb({
+    await syncReviewJobArtifactsToDb({
       reviewJobId,
       artifactRoot,
       poi,
     });
 
     const completedAt = new Date();
-    const resultsReady =
-      overallStatus === 'completed' || overallStatus === 'partial';
+    let overallStatus: 'completed' | 'partial' | 'failed' = 'completed';
     await prisma.$transaction(async (tx) => {
+      if (inactiveListingIds.length > 0) {
+        await tx.reviewJobListingAnalysis.updateMany({
+          where: {
+            jobListingId: {
+              in: inactiveListingIds,
+            },
+          },
+          data: {
+            status: 'pending',
+            currentPhase: 'pending',
+            errorMessage: null,
+            startedAt: null,
+            completedAt: null,
+            durationMs: null,
+            detailsStatus: 'pending',
+            reviewsStatus: 'pending',
+            photosStatus: 'pending',
+            aiReviewsStatus: 'pending',
+            aiPhotosStatus: 'pending',
+            triageStatus: 'pending',
+            details: Prisma.DbNull,
+            aiReviews: Prisma.DbNull,
+            aiPhotos: Prisma.DbNull,
+            triage: Prisma.DbNull,
+            reviewCount: null,
+            photoCount: null,
+          },
+        });
+      }
+
+      const finalAnalyses = await tx.reviewJobListingAnalysis.findMany({
+        where: {
+          jobListing: {
+            jobId: reviewJobId,
+            hidden: false,
+          },
+        },
+        select: { status: true },
+      });
+      overallStatus = summarizeAnalysisStatus(finalAnalyses);
+      const resultsReady =
+        overallStatus === 'completed' || overallStatus === 'partial';
+
       await tx.reviewJob.update({
         where: { id: reviewJobId },
         data: {
@@ -1030,6 +1206,7 @@ async function runReviewJobAnalysis(reviewJobId: string) {
           analysisErrorMessage: null,
           analysisCompletedAt: completedAt,
           analysisDurationMs: completedAt.getTime() - startedAt.getTime(),
+          artifactRoot,
           reportPath,
         },
       });
@@ -1043,6 +1220,7 @@ async function runReviewJobAnalysis(reviewJobId: string) {
             listingCount: activeListings.length,
             resultsReady,
             legacyReportAvailable: !!reportPath,
+            selectedSubset: hasSelectedSubset,
           },
         }),
       });
@@ -1057,23 +1235,44 @@ async function runReviewJobAnalysis(reviewJobId: string) {
     const completedAt = new Date();
 
     await prisma.$transaction(async (tx) => {
+      await restoreReviewJobAnalysisSnapshots(tx, previousAnalysisSnapshots);
       await tx.reviewJob.update({
         where: { id: reviewJobId },
         data: {
-          status: 'failed',
-          currentPhase: 'analysis',
-          analysisStatus: 'failed',
-          analysisCurrentPhase: 'failed',
+          status: hadPersistedResults ? previousJobState.status : 'failed',
+          currentPhase: hadPersistedResults
+            ? previousJobState.currentPhase
+            : 'analysis',
+          analysisStatus: hadPersistedResults
+            ? previousJobState.analysisStatus
+            : 'failed',
+          analysisCurrentPhase: hadPersistedResults
+            ? previousJobState.analysisCurrentPhase
+            : 'failed',
+          analysisProgress: hadPersistedResults
+            ? previousJobState.analysisProgress
+            : 0,
           analysisErrorMessage: message,
-          analysisCompletedAt: completedAt,
-          analysisDurationMs: completedAt.getTime() - startedAt.getTime(),
+          analysisStartedAt: hadPersistedResults
+            ? previousJobState.analysisStartedAt
+            : startedAt,
+          analysisCompletedAt: hadPersistedResults
+            ? previousJobState.analysisCompletedAt
+            : completedAt,
+          analysisDurationMs: hadPersistedResults
+            ? previousJobState.analysisDurationMs
+            : completedAt.getTime() - startedAt.getTime(),
+          artifactRoot: previousJobState.artifactRoot,
+          reportPath: previousJobState.reportPath,
         },
       });
       await tx.reviewJobEvent.create({
         data: buildReviewJobEventData(reviewJobId, {
           phase: 'analysis',
-          level: 'error',
-          message,
+          level: hadPersistedResults ? 'warning' : 'error',
+          message: hadPersistedResults
+            ? `Analysis rerun failed; previous results preserved. ${message}`
+            : message,
         }),
       });
     });
