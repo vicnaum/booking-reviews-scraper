@@ -1012,6 +1012,8 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   );
   const [sortKey, setSortKey] = useState<SortKey>('fitScore');
   const [sortAsc, setSortAsc] = useState(false);
+  const [isUpdatingSharing, setIsUpdatingSharing] = useState(false);
+  const [shareMessage, setShareMessage] = useState<string | null>(null);
   const rowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
 
   const applyJobUpdate = useCallback((nextData: ReviewJobResponse) => {
@@ -1024,6 +1026,60 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   }, [applyJobUpdate, data.job.id]);
 
   useReviewJobPolling(data.job, refreshJob, applyJobUpdate);
+
+  const viewerCanEdit = data.job.viewerCanEdit;
+
+  const setPublicSharing = useCallback(async (nextValue: boolean) => {
+    if (!viewerCanEdit) {
+      return;
+    }
+
+    setIsUpdatingSharing(true);
+    setShareMessage(null);
+
+    try {
+      const res = await fetch(`/api/jobs/${data.job.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isPublic: nextValue }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null);
+        throw new Error(payload?.error || 'Failed to update public sharing');
+      }
+
+      const nextData: ReviewJobResponse = await res.json();
+      applyJobUpdate(nextData);
+      setShareMessage(nextValue ? 'Public link enabled' : 'Public link disabled');
+    } catch (error) {
+      setShareMessage(
+        error instanceof Error ? error.message : 'Failed to update public sharing',
+      );
+    } finally {
+      setIsUpdatingSharing(false);
+    }
+  }, [applyJobUpdate, data.job.id, viewerCanEdit]);
+
+  const copyShareLink = useCallback(async (target: 'job' | 'results') => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const url = new URL(
+      target === 'results' ? `/jobs/${data.job.id}/results` : `/jobs/${data.job.id}`,
+      window.location.origin,
+    ).toString();
+
+    try {
+      await navigator.clipboard.writeText(url);
+      setShareMessage(
+        target === 'results' ? 'Copied public results link' : 'Copied public job link',
+      );
+    } catch {
+      setShareMessage('Failed to copy link');
+    }
+  }, [data.job.id]);
 
   useEffect(() => {
     const storedPicks = readStoredResultsPicks(data.job.id);
@@ -1578,6 +1634,77 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 ))}
               </div>
             </div>
+          </div>
+
+          <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <p className="text-sm font-semibold text-white">Sharing</p>
+                <p className="mt-1 text-xs text-stone-500">
+                  Public sharing exposes this job and its results without the owner cookie,
+                  but keeps editing and analysis owner-only.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${
+                    data.job.isPublic
+                      ? 'border-emerald-300/20 bg-emerald-300/10 text-emerald-100'
+                      : 'border-white/10 bg-white/[0.04] text-stone-400'
+                  }`}
+                >
+                  {data.job.isPublic ? 'Public link enabled' : 'Private'}
+                </span>
+                {viewerCanEdit && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void setPublicSharing(!data.job.isPublic);
+                    }}
+                    disabled={isUpdatingSharing}
+                    className="rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-2 text-xs font-semibold text-stone-200 transition hover:bg-white/[0.1] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isUpdatingSharing
+                      ? 'Updating…'
+                      : data.job.isPublic
+                        ? 'Disable public link'
+                        : 'Enable public link'}
+                  </button>
+                )}
+                {data.job.isPublic && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void copyShareLink('job');
+                      }}
+                      className="rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-2 text-xs font-semibold text-stone-200 transition hover:bg-white/[0.1]"
+                    >
+                      Copy job link
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void copyShareLink('results');
+                      }}
+                      className="rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-2 text-xs font-semibold text-stone-200 transition hover:bg-white/[0.1]"
+                    >
+                      Copy results link
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+            <p className="mt-3 text-xs text-stone-500">
+              {shareMessage
+                ?? (
+                  viewerCanEdit
+                    ? 'Share links stay stable, so previously analyzed results remain available after you enable public access.'
+                    : data.job.isPublic
+                      ? 'This is a public, read-only results view.'
+                      : 'This results page is private to the owner.'
+                )}
+            </p>
           </div>
 
           {data.job.prompt && (
