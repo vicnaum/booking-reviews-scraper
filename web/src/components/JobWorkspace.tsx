@@ -144,14 +144,19 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   const [isStartingAnalysis, setIsStartingAnalysis] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
 
-  const refreshJob = useCallback(async () => {
-    const nextData = await fetchReviewJobResponse(data.job.id);
+  const applyJobUpdate = useCallback((nextData: ReviewJobResponse) => {
     const nextPrompt = nextData.job.prompt ?? '';
     setData(nextData);
     setSavedPrompt(nextPrompt);
     setPrompt((currentPrompt) => (currentPrompt === savedPrompt ? nextPrompt : currentPrompt));
-  }, [data.job.id, savedPrompt]);
-  useReviewJobPolling(data.job, refreshJob);
+  }, [savedPrompt]);
+
+  const refreshJob = useCallback(async () => {
+    const nextData = await fetchReviewJobResponse(data.job.id);
+    applyJobUpdate(nextData);
+  }, [applyJobUpdate, data.job.id]);
+
+  useReviewJobPolling(data.job, refreshJob, applyJobUpdate);
 
   const sortedResults = useMemo(() => {
     const nextResults = [...data.listings];

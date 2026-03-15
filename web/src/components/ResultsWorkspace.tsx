@@ -187,11 +187,16 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   );
   const [activePhotoIndex, setActivePhotoIndex] = useState(0);
 
+  const applyJobUpdate = useCallback((nextData: ReviewJobResponse) => {
+    setData(nextData);
+  }, []);
+
   const refreshJob = useCallback(async () => {
     const nextData = await fetchReviewJobResponse(data.job.id);
-    setData(nextData);
-  }, [data.job.id]);
-  useReviewJobPolling(data.job, refreshJob);
+    applyJobUpdate(nextData);
+  }, [applyJobUpdate, data.job.id]);
+
+  useReviewJobPolling(data.job, refreshJob, applyJobUpdate);
 
   const sortedResults = useMemo(() => {
     const next = [...data.listings];
