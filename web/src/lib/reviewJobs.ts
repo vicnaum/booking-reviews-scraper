@@ -145,6 +145,34 @@ export function buildOwnedReviewJobQuery(
   } satisfies Prisma.ReviewJobFindFirstArgs;
 }
 
+export function buildAccessibleReviewJobQuery(
+  jobId: string,
+  ownerKey: string | null,
+) {
+  return {
+    where: ownerKey
+      ? {
+          id: jobId,
+          OR: [
+            { ownerKey },
+            { isPublic: true },
+          ],
+        }
+      : {
+          id: jobId,
+          isPublic: true,
+        },
+    include: reviewJobResponseInclude,
+  } satisfies Prisma.ReviewJobFindFirstArgs;
+}
+
+export function canEditReviewJob(
+  job: Pick<ReviewJobModel, 'ownerKey'>,
+  ownerKey: string | null,
+) {
+  return !!ownerKey && job.ownerKey === ownerKey;
+}
+
 export function toReviewJobListingRecord(
   jobId: string,
   result: SearchResult,
@@ -288,11 +316,14 @@ export function toReviewJobState(
   options: {
     resultsReady?: boolean;
     legacyReportAvailable?: boolean;
+    viewerCanEdit?: boolean;
   } = {},
 ): ReviewJobState {
   return {
     id: job.id,
     ownerKey: job.ownerKey ?? null,
+    isPublic: job.isPublic,
+    viewerCanEdit: options.viewerCanEdit ?? false,
     status: job.status,
     currentPhase: job.currentPhase,
     analysisStatus: job.analysisStatus,
@@ -346,6 +377,7 @@ export function toReviewJobResponse(input: {
   job: ReviewJobModel;
   listings: Array<ReviewJobListingModel & { analysis?: ReviewJobListingAnalysisModel | null }>;
   events: ReviewJobEventModel[];
+  viewerCanEdit?: boolean;
 }): ReviewJobResponse {
   const resultsReady = hasPersistedReviewJobResults(input.job);
 
@@ -353,6 +385,7 @@ export function toReviewJobResponse(input: {
     job: toReviewJobState(input.job, {
       resultsReady,
       legacyReportAvailable: !!input.job.reportPath,
+      viewerCanEdit: input.viewerCanEdit,
     }),
     listings: input.listings.map(toWebReviewJobListing),
     events: input.events.map(toReviewJobEvent),
@@ -364,6 +397,18 @@ export function toReviewJobResponseRecord(job: ReviewJobResponseRecord): ReviewJ
     job,
     listings: job.listings,
     events: job.events,
+  });
+}
+
+export function toReviewJobResponseRecordForViewer(
+  job: ReviewJobResponseRecord,
+  ownerKey: string | null,
+): ReviewJobResponse {
+  return toReviewJobResponse({
+    job,
+    listings: job.listings,
+    events: job.events,
+    viewerCanEdit: canEditReviewJob(job, ownerKey),
   });
 }
 

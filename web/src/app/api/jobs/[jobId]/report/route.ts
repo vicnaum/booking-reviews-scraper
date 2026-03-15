@@ -14,15 +14,16 @@ export async function GET(_request: Request, { params }: Params) {
   const { jobId } = await params;
   const ownerKey = await getReviewJobOwnerKey();
 
-  if (!ownerKey) {
-    return NextResponse.json({ error: 'Report not found' }, { status: 404 });
-  }
-
   const job = await prisma.reviewJob.findFirst({
-    where: {
-      id: jobId,
-      ownerKey,
-    },
+    where: ownerKey
+      ? {
+          id: jobId,
+          OR: [{ ownerKey }, { isPublic: true }],
+        }
+      : {
+          id: jobId,
+          isPublic: true,
+        },
     select: {
       artifactRoot: true,
       reportPath: true,

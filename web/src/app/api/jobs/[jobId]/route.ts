@@ -3,8 +3,9 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
 import { getReviewJobOwnerKey } from '@/lib/reviewJobOwner';
 import {
+  buildAccessibleReviewJobQuery,
   buildOwnedReviewJobQuery,
-  toReviewJobResponseRecord,
+  toReviewJobResponseRecordForViewer,
 } from '@/lib/reviewJobs';
 import type { Platform, ReviewJobResponse } from '@/types';
 
@@ -19,17 +20,15 @@ export async function GET(_request: Request, { params }: Params) {
   const { jobId } = await params;
   const ownerKey = await getReviewJobOwnerKey();
 
-  if (!ownerKey) {
-    return NextResponse.json({ error: 'Review job not found' }, { status: 404 });
-  }
-
-  const job = await prisma.reviewJob.findFirst(buildOwnedReviewJobQuery(jobId, ownerKey));
+  const job = await prisma.reviewJob.findFirst(
+    buildAccessibleReviewJobQuery(jobId, ownerKey),
+  );
 
   if (!job) {
     return NextResponse.json({ error: 'Review job not found' }, { status: 404 });
   }
 
-  const response: ReviewJobResponse = toReviewJobResponseRecord(job);
+  const response: ReviewJobResponse = toReviewJobResponseRecordForViewer(job, ownerKey);
 
   return NextResponse.json(response);
 }
@@ -45,6 +44,7 @@ export async function PATCH(request: Request, { params }: Params) {
   let body: {
     prompt?: string | null;
     selectedListings?: Array<{ id: string; platform: Platform }> | null;
+    isPublic?: boolean;
   };
   try {
     body = await request.json();
@@ -93,6 +93,9 @@ export async function PATCH(request: Request, { params }: Params) {
     if (Object.prototype.hasOwnProperty.call(body, 'prompt')) {
       updateData.prompt = body.prompt?.trim() || null;
     }
+    if (typeof body.isPublic === 'boolean') {
+      updateData.isPublic = body.isPublic;
+    }
 
     if (Object.keys(updateData).length > 0) {
       await tx.reviewJob.update({
@@ -124,7 +127,7 @@ export async function PATCH(request: Request, { params }: Params) {
     return tx.reviewJob.findFirstOrThrow(buildOwnedReviewJobQuery(jobId, ownerKey));
   });
 
-  const response: ReviewJobResponse = toReviewJobResponseRecord(job);
+  const response: ReviewJobResponse = toReviewJobResponseRecordForViewer(job, ownerKey);
 
   return NextResponse.json(response);
 }

@@ -208,6 +208,8 @@ export interface ReviewJobListing extends SearchResult {
 export interface ReviewJobState {
   id: string;
   ownerKey: string | null;
+  isPublic: boolean;
+  viewerCanEdit: boolean;
   status: SearchJobStatus;
   currentPhase: string;
   analysisStatus: PhaseStatus;

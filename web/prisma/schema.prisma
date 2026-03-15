@@ -94,6 +94,7 @@ model SearchResult {
 model ReviewJob {
   id             String          @id @default(cuid())
   ownerKey       String?
+  isPublic       Boolean         @default(false)
   status         JobStatus       @default(pending)
   currentPhase   String          @default("search")
   analysisStatus PhaseStatus     @default(pending)

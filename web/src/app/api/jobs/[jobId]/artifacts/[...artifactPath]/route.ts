@@ -29,15 +29,16 @@ export async function GET(_request: Request, { params }: Params) {
   const { jobId, artifactPath } = await params;
   const ownerKey = await getReviewJobOwnerKey();
 
-  if (!ownerKey) {
-    return NextResponse.json({ error: 'Artifact root not found' }, { status: 404 });
-  }
-
   const job = await prisma.reviewJob.findFirst({
-    where: {
-      id: jobId,
-      ownerKey,
-    },
+    where: ownerKey
+      ? {
+          id: jobId,
+          OR: [{ ownerKey }, { isPublic: true }],
+        }
+      : {
+          id: jobId,
+          isPublic: true,
+        },
     select: { artifactRoot: true },
   });
 

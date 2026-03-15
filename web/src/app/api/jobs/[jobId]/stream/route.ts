@@ -2,8 +2,8 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { getReviewJobOwnerKey } from '@/lib/reviewJobOwner';
 import {
-  buildOwnedReviewJobQuery,
-  toReviewJobResponseRecord,
+  buildAccessibleReviewJobQuery,
+  toReviewJobResponseRecordForViewer,
 } from '@/lib/reviewJobs';
 import { shouldPollReviewJob } from '@/lib/reviewJobStatus';
 
@@ -21,9 +21,11 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function getOwnedReviewJobResponse(jobId: string, ownerKey: string) {
-  const job = await prisma.reviewJob.findFirst(buildOwnedReviewJobQuery(jobId, ownerKey));
-  return job ? toReviewJobResponseRecord(job) : null;
+async function getAccessibleReviewJobResponse(jobId: string, ownerKey: string | null) {
+  const job = await prisma.reviewJob.findFirst(
+    buildAccessibleReviewJobQuery(jobId, ownerKey),
+  );
+  return job ? toReviewJobResponseRecordForViewer(job, ownerKey) : null;
 }
 
 function writeEvent(controller: ReadableStreamDefaultController<Uint8Array>, event: string, data: string) {
@@ -40,11 +42,7 @@ export async function GET(request: Request, { params }: Params) {
   const { jobId } = await params;
   const ownerKey = await getReviewJobOwnerKey();
 
-  if (!ownerKey) {
-    return NextResponse.json({ error: 'Review job not found' }, { status: 404 });
-  }
-
-  const initialPayload = await getOwnedReviewJobResponse(jobId, ownerKey);
+  const initialPayload = await getAccessibleReviewJobResponse(jobId, ownerKey);
   if (!initialPayload) {
     return NextResponse.json({ error: 'Review job not found' }, { status: 404 });
   }
@@ -63,7 +61,7 @@ export async function GET(request: Request, { params }: Params) {
             break;
           }
 
-          const nextPayload = await getOwnedReviewJobResponse(jobId, ownerKey);
+          const nextPayload = await getAccessibleReviewJobResponse(jobId, ownerKey);
           if (!nextPayload) {
             writeEvent(controller, 'error', JSON.stringify({ error: 'Review job not found' }));
             break;

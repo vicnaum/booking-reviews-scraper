@@ -142,6 +142,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   const [isSavingPrompt, setIsSavingPrompt] = useState(false);
   const [isSavingSelection, setIsSavingSelection] = useState(false);
   const [isStartingAnalysis, setIsStartingAnalysis] = useState(false);
+  const [isUpdatingSharing, setIsUpdatingSharing] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
 
   const applyJobUpdate = useCallback((nextData: ReviewJobResponse) => {
@@ -193,9 +194,11 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   );
 
   const selectedCount = selectedListings.length;
+  const viewerCanEdit = data.job.viewerCanEdit;
   const analysisQueued = data.job.analysisCurrentPhase === 'queued';
   const analysisLocked =
-    isStartingAnalysis
+    !viewerCanEdit
+    || isStartingAnalysis
     || data.job.analysisStatus === 'running'
     || analysisQueued;
   const isPromptDirty = prompt !== savedPrompt;
@@ -241,6 +244,10 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   );
 
   const savePrompt = useCallback(async () => {
+    if (!viewerCanEdit) {
+      return;
+    }
+
     setIsSavingPrompt(true);
     setSaveMessage(null);
 
@@ -267,9 +274,13 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     } finally {
       setIsSavingPrompt(false);
     }
-  }, [data.job.id, prompt]);
+  }, [data.job.id, prompt, viewerCanEdit]);
 
   const startAnalysis = useCallback(async () => {
+    if (!viewerCanEdit) {
+      return;
+    }
+
     setIsStartingAnalysis(true);
     setSaveMessage(null);
 
@@ -301,7 +312,60 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     } finally {
       setIsStartingAnalysis(false);
     }
-  }, [data.job.id, prompt, refreshJob]);
+  }, [data.job.id, prompt, refreshJob, viewerCanEdit]);
+
+  const setPublicSharing = useCallback(async (nextValue: boolean) => {
+    if (!viewerCanEdit) {
+      return;
+    }
+
+    setIsUpdatingSharing(true);
+    setSaveMessage(null);
+
+    try {
+      const res = await fetch(`/api/jobs/${data.job.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isPublic: nextValue }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null);
+        throw new Error(payload?.error || 'Failed to update public sharing');
+      }
+
+      const nextData: ReviewJobResponse = await res.json();
+      const nextPrompt = nextData.job.prompt ?? '';
+      setData(nextData);
+      setSavedPrompt(nextPrompt);
+      setPrompt(nextPrompt);
+      setSaveMessage(nextValue ? 'Public link enabled' : 'Public link disabled');
+    } catch (error) {
+      setSaveMessage(
+        error instanceof Error ? error.message : 'Failed to update public sharing',
+      );
+    } finally {
+      setIsUpdatingSharing(false);
+    }
+  }, [data.job.id, viewerCanEdit]);
+
+  const copyShareLink = useCallback(async (target: 'job' | 'results') => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const url = new URL(
+      target === 'results' ? `/jobs/${data.job.id}/results` : `/jobs/${data.job.id}`,
+      window.location.origin,
+    ).toString();
+
+    try {
+      await navigator.clipboard.writeText(url);
+      setSaveMessage(target === 'results' ? 'Copied public results link' : 'Copied public job link');
+    } catch {
+      setSaveMessage('Failed to copy link');
+    }
+  }, [data.job.id]);
 
   const toggleListingSelection = useCallback(
     async (target: ReviewJobResponse['listings'][number]) => {
@@ -478,9 +542,9 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                   onClick={() => {
                     void savePrompt();
                   }}
-                  disabled={isSavingPrompt || analysisLocked}
-                  className="rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-2 text-xs font-semibold text-stone-200 transition hover:bg-white/[0.1] disabled:cursor-not-allowed disabled:opacity-50"
-                >
+                    disabled={isSavingPrompt || analysisLocked}
+                    className="rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-2 text-xs font-semibold text-stone-200 transition hover:bg-white/[0.1] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
                   {isSavingPrompt ? 'Saving…' : 'Save brief'}
                 </button>
               </div>
@@ -497,7 +561,9 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                   {saveMessage
                     ?? (
                       analysisLocked
-                        ? 'Brief and selection are locked while analysis is queued or running.'
+                        ? (viewerCanEdit
+                          ? 'Brief and selection are locked while analysis is queued or running.'
+                          : 'Shared view is read-only. Ask the owner to edit the brief or run analysis.')
                         : isPromptDirty
                         ? 'Unsaved brief changes'
                         : selectedCount > 0
@@ -514,16 +580,81 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                       Open results
                     </Link>
                   )}
-                  <button
-                    onClick={() => {
-                      void startAnalysis();
-                    }}
-                    disabled={!canStartAnalysis || isStartingAnalysis}
-                    className="rounded-2xl border border-white/10 bg-[#ff6b5f]/12 px-4 py-2 text-xs font-semibold text-[#ffcabf] transition hover:bg-[#ff6b5f]/18 disabled:cursor-not-allowed disabled:border-white/[0.08] disabled:bg-white/[0.03] disabled:text-stone-500"
-                  >
-                    {isStartingAnalysis ? 'Queueing…' : analysisButtonLabel}
-                  </button>
+                  {viewerCanEdit && (
+                    <button
+                      onClick={() => {
+                        void startAnalysis();
+                      }}
+                      disabled={!canStartAnalysis || isStartingAnalysis}
+                      className="rounded-2xl border border-white/10 bg-[#ff6b5f]/12 px-4 py-2 text-xs font-semibold text-[#ffcabf] transition hover:bg-[#ff6b5f]/18 disabled:cursor-not-allowed disabled:border-white/[0.08] disabled:bg-white/[0.03] disabled:text-stone-500"
+                    >
+                      {isStartingAnalysis ? 'Queueing…' : analysisButtonLabel}
+                    </button>
+                  )}
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <p className="text-sm font-semibold text-white">Sharing</p>
+                <p className="mt-1 text-xs text-stone-500">
+                  Public sharing exposes this job and its results without the owner cookie,
+                  but keeps editing and analysis owner-only.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${
+                    data.job.isPublic
+                      ? 'border-emerald-300/20 bg-emerald-300/10 text-emerald-100'
+                      : 'border-white/10 bg-white/[0.04] text-stone-400'
+                  }`}
+                >
+                  {data.job.isPublic ? 'Public link enabled' : 'Private'}
+                </span>
+                {viewerCanEdit && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void setPublicSharing(!data.job.isPublic);
+                    }}
+                    disabled={isUpdatingSharing}
+                    className="rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-2 text-xs font-semibold text-stone-200 transition hover:bg-white/[0.1] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isUpdatingSharing
+                      ? 'Updating…'
+                      : data.job.isPublic
+                        ? 'Disable public link'
+                        : 'Enable public link'}
+                  </button>
+                )}
+                {data.job.isPublic && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void copyShareLink('job');
+                      }}
+                      className="rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-2 text-xs font-semibold text-stone-200 transition hover:bg-white/[0.1]"
+                    >
+                      Copy job link
+                    </button>
+                    {data.job.reportReady && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void copyShareLink('results');
+                        }}
+                        className="rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-2 text-xs font-semibold text-stone-200 transition hover:bg-white/[0.1]"
+                      >
+                        Copy results link
+                      </button>
+                    )}
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -542,7 +673,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                 <span className="text-xs text-stone-500">
                   {selectedCount > 0 ? `${selectedCount} selected` : (data.job.status === 'completed' ? 'Saved set' : 'Updating')}
                 </span>
-                {sortedResults.length > 0 && (
+                {viewerCanEdit && sortedResults.length > 0 && (
                   <button
                     type="button"
                     onClick={() => {
@@ -554,16 +685,18 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                     Select all
                   </button>
                 )}
-                <button
-                  type="button"
-                  onClick={() => {
-                    void clearSelection();
-                  }}
-                  disabled={analysisLocked || isSavingSelection || selectedCount === 0}
-                  className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] font-semibold text-stone-300 transition hover:bg-white/[0.08] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Clear
-                </button>
+                {viewerCanEdit && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void clearSelection();
+                    }}
+                    disabled={analysisLocked || isSavingSelection || selectedCount === 0}
+                    className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] font-semibold text-stone-300 transition hover:bg-white/[0.08] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Clear
+                  </button>
+                )}
               </div>
             </div>
 
@@ -574,14 +707,14 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                   result={result}
                   isSelected={selectedId === listingKey(result)}
                   onClick={() => setSelectedId(selectedId === listingKey(result) ? null : listingKey(result))}
-                  selectionControl={{
+                  selectionControl={viewerCanEdit ? {
                     active: result.selected,
                     label: result.selected ? 'Selected for analysis' : 'Select for analysis',
                     onToggle: () => {
                       void toggleListingSelection(result);
                     },
                     disabled: analysisLocked || isSavingSelection,
-                  }}
+                  } : undefined}
                   context={resultCardContext}
                 />
               ))}
