@@ -115,6 +115,36 @@ function getDistanceMeters(a: MapPoint, b: MapPoint): number {
   return 2 * EARTH_RADIUS_METERS * Math.atan2(Math.sqrt(hav), Math.sqrt(1 - hav));
 }
 
+export const reviewJobResponseInclude = {
+  listings: {
+    where: { hidden: false },
+    orderBy: { createdAt: 'asc' as const },
+    include: {
+      analysis: true,
+    },
+  },
+  events: {
+    orderBy: { createdAt: 'asc' as const },
+  },
+} satisfies Prisma.ReviewJobInclude;
+
+export type ReviewJobResponseRecord = Prisma.ReviewJobGetPayload<{
+  include: typeof reviewJobResponseInclude;
+}>;
+
+export function buildOwnedReviewJobQuery(
+  jobId: string,
+  ownerKey: string,
+){
+  return {
+    where: {
+      id: jobId,
+      ownerKey,
+    },
+    include: reviewJobResponseInclude,
+  } satisfies Prisma.ReviewJobFindFirstArgs;
+}
+
 export function toReviewJobListingRecord(
   jobId: string,
   result: SearchResult,
@@ -327,6 +357,14 @@ export function toReviewJobResponse(input: {
     listings: input.listings.map(toWebReviewJobListing),
     events: input.events.map(toReviewJobEvent),
   };
+}
+
+export function toReviewJobResponseRecord(job: ReviewJobResponseRecord): ReviewJobResponse {
+  return toReviewJobResponse({
+    job,
+    listings: job.listings,
+    events: job.events,
+  });
 }
 
 export function buildReviewJobData(

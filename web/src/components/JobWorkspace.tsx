@@ -2,12 +2,14 @@
 
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import type {
   PriceDisplayMode,
   ReviewJobResponse,
 } from '@/types';
 import { resolveComparablePrice } from '@/lib/pricing';
+import { fetchReviewJobResponse } from '@/lib/reviewJobClient';
+import { useReviewJobPolling } from '@/hooks/useReviewJobPolling';
 import ResultCard from './ResultCard';
 
 const JobMap = dynamic(() => import('./JobMap'), {
@@ -18,8 +20,6 @@ const JobMap = dynamic(() => import('./JobMap'), {
     </div>
   ),
 });
-
-const JOB_POLL_INTERVAL_MS = 2500;
 
 function statusLabel(
   status: ReviewJobResponse['job']['status'],
@@ -128,42 +128,25 @@ interface JobWorkspaceProps {
 }
 
 export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
+  const initialPrompt = initialData.job.prompt ?? '';
   const [data, setData] = useState(initialData);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [priceDisplay, setPriceDisplay] = useState<PriceDisplayMode>('total');
-  const [prompt, setPrompt] = useState(initialData.job.prompt ?? '');
+  const [prompt, setPrompt] = useState(initialPrompt);
+  const [savedPrompt, setSavedPrompt] = useState(initialPrompt);
   const [isSavingPrompt, setIsSavingPrompt] = useState(false);
   const [isSavingSelection, setIsSavingSelection] = useState(false);
   const [isStartingAnalysis, setIsStartingAnalysis] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
 
   const refreshJob = useCallback(async () => {
-    const res = await fetch(`/api/jobs/${data.job.id}`, { cache: 'no-store' });
-    if (!res.ok) {
-      throw new Error('Failed to refresh job');
-    }
-    const nextData: ReviewJobResponse = await res.json();
+    const nextData = await fetchReviewJobResponse(data.job.id);
+    const nextPrompt = nextData.job.prompt ?? '';
     setData(nextData);
-    setPrompt(nextData.job.prompt ?? '');
-  }, [data.job.id]);
-
-  useEffect(() => {
-    const shouldPoll =
-      data.job.status === 'pending'
-      || data.job.status === 'running'
-      || data.job.analysisStatus === 'running'
-      || data.job.analysisCurrentPhase === 'queued';
-
-    if (!shouldPoll) {
-      return;
-    }
-
-    const interval = setInterval(() => {
-      void refreshJob().catch(() => {});
-    }, JOB_POLL_INTERVAL_MS);
-
-    return () => clearInterval(interval);
-  }, [data.job.analysisCurrentPhase, data.job.analysisStatus, data.job.status, refreshJob]);
+    setSavedPrompt(nextPrompt);
+    setPrompt((currentPrompt) => (currentPrompt === savedPrompt ? nextPrompt : currentPrompt));
+  }, [data.job.id, savedPrompt]);
+  useReviewJobPolling(data.job, refreshJob);
 
   const sortedResults = useMemo(() => {
     const nextResults = [...data.listings];
@@ -201,6 +184,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
 
   const selectedCount = selectedListings.length;
   const analysisLocked = data.job.analysisStatus === 'running';
+  const isPromptDirty = prompt !== savedPrompt;
 
   const persistSelection = useCallback(
     async (
@@ -229,7 +213,10 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
         }
 
         const nextData: ReviewJobResponse = await res.json();
+        const nextPrompt = nextData.job.prompt ?? '';
         setData(nextData);
+        setSavedPrompt(nextPrompt);
+        setPrompt(nextPrompt);
         setSaveMessage(successMessage);
       } catch (error) {
         setSaveMessage(error instanceof Error ? error.message : 'Failed to update selection');
@@ -257,7 +244,10 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
       }
 
       const nextData: ReviewJobResponse = await res.json();
+      const nextPrompt = nextData.job.prompt ?? '';
       setData(nextData);
+      setSavedPrompt(nextPrompt);
+      setPrompt(nextPrompt);
       setSaveMessage('Saved');
     } catch (error) {
       setSaveMessage(error instanceof Error ? error.message : 'Failed to save prompt');
@@ -484,6 +474,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                 rows={5}
                 placeholder="Describe what matters for this stay: work setup, quietness, walkability to POI, kitchen needs, deal-breakers, budget tradeoffs..."
                 className="mt-3 w-full rounded-2xl border border-white/10 bg-black/[0.18] px-4 py-3 text-sm text-white outline-none transition placeholder:text-stone-500 focus:border-[#ff6b5f]/35 focus:bg-black/30"
+                disabled={analysisLocked || isSavingPrompt || isStartingAnalysis}
               />
               <div className="mt-3 flex items-center justify-between gap-3">
                 <span className="text-xs text-stone-500">
@@ -491,6 +482,8 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                     ?? (
                       analysisLocked
                         ? 'Brief and selection are locked while analysis is running.'
+                        : isPromptDirty
+                        ? 'Unsaved brief changes'
                         : selectedCount > 0
                         ? `Only the ${selectedCount} selected listing${selectedCount === 1 ? '' : 's'} will be analyzed.`
                         : `No shortlist yet, so analysis will run on all ${sortedResults.length} listings.`

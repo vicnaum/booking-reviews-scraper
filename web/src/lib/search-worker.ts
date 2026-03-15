@@ -87,6 +87,25 @@ async function appendReviewJobEvent(
   });
 }
 
+function createProgressWriter(label: 'search-worker' | 'review-worker') {
+  let queue = Promise.resolve();
+
+  return {
+    push(task: () => Promise<void>) {
+      queue = queue
+        .catch(() => {})
+        .then(task)
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(`[${label}] failed to persist progress: ${message}`);
+        });
+    },
+    async flush() {
+      await queue.catch(() => {});
+    },
+  };
+}
+
 async function runSearchJob(searchJobId: string) {
   const jobRecord = await prisma.searchJob.findUnique({
     where: { id: searchJobId },
@@ -112,28 +131,28 @@ async function runSearchJob(searchJobId: string) {
   try {
     const params = buildCliSearchParams(jobRecord);
     const storedFilters = parseSearchFilters(jobRecord.filters);
+    const progressWriter = createProgressWriter('search-worker');
     const onProgress = () => {
-      pagesScanned += 1;
-      void prisma.searchJob
-        .update({
+      const nextPagesScanned = pagesScanned + 1;
+      pagesScanned = nextPagesScanned;
+      progressWriter.push(async () => {
+        await prisma.searchJob.update({
           where: { id: searchJobId },
           data: {
             status: 'running',
-            pagesScanned,
-            progress: Math.min(0.95, 0.05 + pagesScanned * 0.03),
+            pagesScanned: nextPagesScanned,
+            progress: Math.min(0.95, 0.05 + nextPagesScanned * 0.03),
           },
-        })
-        .catch((error) => {
-          console.error(
-            `[search-worker] failed to persist progress: ${error.message}`,
-          );
         });
+      });
     };
 
     const output =
       params.platform === 'airbnb'
         ? await searchAirbnb(params, onProgress)
         : await searchBooking(params, onProgress);
+
+    await progressWriter.flush();
 
     const filteredResults = filterResultsForRequest(output.results, {
       circle: storedFilters.circle,
@@ -271,6 +290,7 @@ async function runReviewJobSearch(reviewJobId: string) {
   try {
     const storedFilters = parseSearchFilters(jobRecord.filters);
     const storedPoi = asStoredMapPoint(jobRecord.poi);
+    const progressWriter = createProgressWriter('review-worker');
     const requestFilters = {
       circle: storedFilters.circle,
       checkin: jobRecord.checkin ?? undefined,
@@ -283,22 +303,19 @@ async function runReviewJobSearch(reviewJobId: string) {
     };
 
     const persistProgress = (platform: 'airbnb' | 'booking') => {
-      pagesScanned += 1;
-      void prisma.reviewJob
-        .update({
+      const nextPagesScanned = pagesScanned + 1;
+      pagesScanned = nextPagesScanned;
+      progressWriter.push(async () => {
+        await prisma.reviewJob.update({
           where: { id: reviewJobId },
           data: {
             status: 'running',
             currentPhase: `search:${platform}`,
-            pagesScanned,
-            progress: Math.min(0.95, 0.05 + pagesScanned * 0.02),
+            pagesScanned: nextPagesScanned,
+            progress: Math.min(0.95, 0.05 + nextPagesScanned * 0.02),
           },
-        })
-        .catch((error) => {
-          console.error(
-            `[review-worker] failed to persist progress: ${error.message}`,
-          );
         });
+      });
     };
 
     const platforms: Array<'airbnb' | 'booking'> = ['airbnb', 'booking'];
@@ -366,6 +383,8 @@ async function runReviewJobSearch(reviewJobId: string) {
         },
       });
     }
+
+    await progressWriter.flush();
 
     const searchSummary = summarizeReviewJobSearchOutcome({
       successfulPlatforms,

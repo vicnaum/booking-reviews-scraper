@@ -1,12 +1,13 @@
-import * as fs from 'fs';
 import * as path from 'path';
 
+import { createJsonlFileLogger } from '../logging/jsonl.js';
 import type { BookingSearchParams } from '../search/types.js';
 
 export interface BookingSearchLogger {
   readonly searchId: string;
   readonly filePath: string | null;
   log(event: string, data?: Record<string, unknown>): void;
+  flush(): Promise<void>;
 }
 
 interface CreateBookingSearchLoggerOptions {
@@ -59,36 +60,26 @@ export function createBookingSearchLogger(
       searchId,
       filePath: null,
       log() {},
+      async flush() {},
     };
   }
 
-  const dir = buildLogDir();
-  fs.mkdirSync(dir, { recursive: true });
-
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const filePath = path.join(dir, `${timestamp}-${searchId}.jsonl`);
-  let enabled = true;
+  const filePath = path.join(buildLogDir(), `${timestamp}-${searchId}.jsonl`);
+  const logger = createJsonlFileLogger({
+    filePath,
+    onError(message) {
+      console.error(`⚠️  Failed to write Booking search log: ${message}`);
+    },
+  });
 
   const write = (event: string, data: Record<string, unknown> = {}) => {
-    if (!enabled) {
-      return;
-    }
-
-    try {
-      fs.appendFileSync(
-        filePath,
-        `${JSON.stringify({
-          ts: new Date().toISOString(),
-          searchId,
-          event,
-          ...data,
-        })}\n`,
-      );
-    } catch (error) {
-      enabled = false;
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`⚠️  Failed to write Booking search log: ${message}`);
-    }
+    logger.write({
+      ts: new Date().toISOString(),
+      searchId,
+      event,
+      ...data,
+    });
   };
 
   write('search_started', {
@@ -99,7 +90,8 @@ export function createBookingSearchLogger(
 
   return {
     searchId,
-    filePath,
+    filePath: logger.filePath,
     log: write,
+    flush: () => logger.flush(),
   };
 }

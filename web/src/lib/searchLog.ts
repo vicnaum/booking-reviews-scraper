@@ -1,5 +1,5 @@
-import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { createJsonlFileLogger } from '@cli/logging/jsonl.js';
 
 interface SearchLogEvent {
   event: string;
@@ -16,6 +16,7 @@ export interface SearchLogger {
   readonly logId: string;
   readonly filePath: string | null;
   log(event: string, data?: Record<string, unknown>): void;
+  flush(): Promise<void>;
 }
 
 function makeLogId(): string {
@@ -39,21 +40,23 @@ export function createSearchLogger(
       logId,
       filePath: null,
       log() {},
+      async flush() {},
     };
   }
 
-  const dir = buildLogDir();
-  fs.mkdirSync(dir, { recursive: true });
-
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const filePath = path.join(dir, `${timestamp}-${options.kind}-${logId}.jsonl`);
-  let enabled = true;
+  const filePath = path.join(
+    buildLogDir(),
+    `${timestamp}-${options.kind}-${logId}.jsonl`,
+  );
+  const logger = createJsonlFileLogger({
+    filePath,
+    onError(message) {
+      console.error(`[search-log] failed to append row: ${message}`);
+    },
+  });
 
   const write = (event: string, data: Record<string, unknown> = {}) => {
-    if (!enabled) {
-      return;
-    }
-
     const row: SearchLogEvent = {
       ts: new Date().toISOString(),
       kind: options.kind,
@@ -62,21 +65,15 @@ export function createSearchLogger(
       event,
       ...data,
     };
-
-    try {
-      fs.appendFileSync(filePath, `${JSON.stringify(row)}\n`);
-    } catch (error) {
-      enabled = false;
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`[search-log] failed to append ${event}: ${message}`);
-    }
+    logger.write(row);
   };
 
   write('started', options.payload);
 
   return {
     logId,
-    filePath,
+    filePath: logger.filePath,
     log: write,
+    flush: () => logger.flush(),
   };
 }

@@ -11,6 +11,8 @@ import {
   getTierRank,
   type ParsedTheme,
 } from '@/lib/results';
+import { fetchReviewJobResponse } from '@/lib/reviewJobClient';
+import { useReviewJobPolling } from '@/hooks/useReviewJobPolling';
 import ResultCard from './ResultCard';
 import PlatformBadge from './PlatformBadge';
 
@@ -22,8 +24,6 @@ const JobMap = dynamic(() => import('./JobMap'), {
     </div>
   ),
 });
-
-const POLL_INTERVAL_MS = 2500;
 
 function listingKey(listing: Pick<ReviewJobResponse['listings'][number], 'id' | 'platform'>) {
   return `${listing.platform}:${listing.id}`;
@@ -182,31 +182,10 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   const [activePhotoIndex, setActivePhotoIndex] = useState(0);
 
   const refreshJob = useCallback(async () => {
-    const res = await fetch(`/api/jobs/${data.job.id}`, { cache: 'no-store' });
-    if (!res.ok) {
-      throw new Error('Failed to refresh job');
-    }
-    const nextData: ReviewJobResponse = await res.json();
+    const nextData = await fetchReviewJobResponse(data.job.id);
     setData(nextData);
   }, [data.job.id]);
-
-  useEffect(() => {
-    const shouldPoll =
-      data.job.status === 'pending'
-      || data.job.status === 'running'
-      || data.job.analysisStatus === 'running'
-      || data.job.analysisCurrentPhase === 'queued';
-
-    if (!shouldPoll) {
-      return;
-    }
-
-    const interval = setInterval(() => {
-      void refreshJob().catch(() => {});
-    }, POLL_INTERVAL_MS);
-
-    return () => clearInterval(interval);
-  }, [data.job.analysisCurrentPhase, data.job.analysisStatus, data.job.status, refreshJob]);
+  useReviewJobPolling(data.job, refreshJob);
 
   const sortedResults = useMemo(() => {
     const next = [...data.listings];
