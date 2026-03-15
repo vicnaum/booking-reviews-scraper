@@ -160,7 +160,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   useReviewJobPolling(data.job, refreshJob, applyJobUpdate);
 
   const sortedResults = useMemo(() => {
-    const nextResults = [...data.listings];
+    const nextResults = data.listings.filter((result) => !result.hidden);
     nextResults.sort((a, b) => {
       const aAmount = resolveComparablePrice(a, priceDisplay, {
         checkin: data.job.checkin,

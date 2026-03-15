@@ -28,7 +28,6 @@ import { useReviewJobPolling } from '@/hooks/useReviewJobPolling';
 import PlatformBadge from './PlatformBadge';
 import ResultsJobMap from './ResultsJobMap';
 
-const RESULTS_PICKS_STORAGE_PREFIX = 'stayreviewr-results-picks';
 const MIN_MAP_HEIGHT = 280;
 const MAX_MAP_HEIGHT = 920;
 const TIER_ORDER = ['top_pick', 'shortlist', 'consider', 'unlikely', 'no_go'] as const;
@@ -44,42 +43,8 @@ const SCORE_ORDER = [
 type SortKey = 'rank' | 'title' | 'tier' | 'fitScore' | 'price';
 type DetailTab = 'triage' | 'reviews' | 'photos' | 'snapshot';
 
-interface StoredResultsPicks {
-  liked: string[];
-  hidden: string[];
-}
-
 function listingKey(listing: Pick<ReviewJobListing, 'id' | 'platform'>) {
   return `${listing.platform}:${listing.id}`;
-}
-
-function getResultsPicksStorageKey(jobId: string) {
-  return `${RESULTS_PICKS_STORAGE_PREFIX}:${jobId}`;
-}
-
-function readStoredResultsPicks(jobId: string): StoredResultsPicks {
-  if (typeof window === 'undefined') {
-    return { liked: [], hidden: [] };
-  }
-
-  try {
-    const raw = window.localStorage.getItem(getResultsPicksStorageKey(jobId));
-    if (!raw) {
-      return { liked: [], hidden: [] };
-    }
-
-    const parsed = JSON.parse(raw) as Partial<StoredResultsPicks>;
-    return {
-      liked: Array.isArray(parsed.liked)
-        ? parsed.liked.filter((item): item is string => typeof item === 'string')
-        : [],
-      hidden: Array.isArray(parsed.hidden)
-        ? parsed.hidden.filter((item): item is string => typeof item === 'string')
-        : [],
-    };
-  } catch {
-    return { liked: [], hidden: [] };
-  }
 }
 
 function tierLabel(tier: string | null): string {
@@ -1026,8 +991,6 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   const [priceDisplay, setPriceDisplay] = useState<PriceDisplayMode>(
     getStoredReviewJobPriceDisplay(initialData.job),
   );
-  const [likedIds, setLikedIds] = useState<Set<string>>(() => new Set());
-  const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => new Set());
   const [showHidden, setShowHidden] = useState(false);
   const [mapHeight, setMapHeight] = useState(500);
   const [activeTiers, setActiveTiers] = useState<Set<string>>(
@@ -1048,7 +1011,9 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     applyJobUpdate(nextData);
   }, [applyJobUpdate, data.job.id]);
 
-  useReviewJobPolling(data.job, refreshJob, applyJobUpdate);
+  useReviewJobPolling(data.job, refreshJob, applyJobUpdate, {
+    keepSynced: true,
+  });
 
   const viewerCanEdit = data.job.viewerCanEdit;
 
@@ -1104,25 +1069,62 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     }
   }, [data.job.id]);
 
-  useEffect(() => {
-    const storedPicks = readStoredResultsPicks(data.job.id);
-    setLikedIds(new Set(storedPicks.liked));
-    setHiddenIds(new Set(storedPicks.hidden));
-  }, [data.job.id]);
+  const likedIds = useMemo(
+    () =>
+      new Set(
+        data.listings
+          .filter((listing) => listing.liked)
+          .map((listing) => listingKey(listing)),
+      ),
+    [data.listings],
+  );
 
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return;
+  const hiddenIds = useMemo(
+    () =>
+      new Set(
+        data.listings
+          .filter((listing) => listing.hidden)
+          .map((listing) => listingKey(listing)),
+      ),
+    [data.listings],
+  );
+
+  const persistCuration = useCallback(async (nextLikedIds: Set<string>, nextHiddenIds: Set<string>) => {
+    try {
+      const likedListings = data.listings
+        .filter((listing) => nextLikedIds.has(listingKey(listing)))
+        .map((listing) => ({
+          id: listing.id,
+          platform: listing.platform,
+        }));
+
+      const hiddenListings = data.listings
+        .filter((listing) => nextHiddenIds.has(listingKey(listing)))
+        .map((listing) => ({
+          id: listing.id,
+          platform: listing.platform,
+        }));
+
+      const res = await fetch(`/api/jobs/${data.job.id}/curation`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          likedListings,
+          hiddenListings,
+        }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null);
+        throw new Error(payload?.error || 'Failed to update curation');
+      }
+
+      const nextData: ReviewJobResponse = await res.json();
+      applyJobUpdate(nextData);
+    } catch (error) {
+      setShareMessage(error instanceof Error ? error.message : 'Failed to update curation');
     }
-
-    window.localStorage.setItem(
-      getResultsPicksStorageKey(data.job.id),
-      JSON.stringify({
-        liked: [...likedIds],
-        hidden: [...hiddenIds],
-      }),
-    );
-  }, [data.job.id, hiddenIds, likedIds]);
+  }, [applyJobUpdate, data.job.id, data.listings]);
 
   const baseRankedResults = useMemo(() => {
     const next = [...data.listings];
@@ -1301,46 +1303,32 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   );
 
   const toggleLike = useCallback((key: string) => {
-    setLikedIds((current) => {
-      const next = new Set(current);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
-      return next;
-    });
+    const nextLikedIds = new Set(likedIds);
+    const nextHiddenIds = new Set(hiddenIds);
 
-    setHiddenIds((current) => {
-      if (!current.has(key)) {
-        return current;
-      }
-      const next = new Set(current);
-      next.delete(key);
-      return next;
-    });
-  }, []);
+    if (nextLikedIds.has(key)) {
+      nextLikedIds.delete(key);
+    } else {
+      nextLikedIds.add(key);
+      nextHiddenIds.delete(key);
+    }
+
+    void persistCuration(nextLikedIds, nextHiddenIds);
+  }, [hiddenIds, likedIds, persistCuration]);
 
   const toggleHidden = useCallback((key: string) => {
-    setHiddenIds((current) => {
-      const next = new Set(current);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
-      return next;
-    });
+    const nextLikedIds = new Set(likedIds);
+    const nextHiddenIds = new Set(hiddenIds);
 
-    setLikedIds((current) => {
-      if (!current.has(key)) {
-        return current;
-      }
-      const next = new Set(current);
-      next.delete(key);
-      return next;
-    });
-  }, []);
+    if (nextHiddenIds.has(key)) {
+      nextHiddenIds.delete(key);
+    } else {
+      nextHiddenIds.add(key);
+      nextLikedIds.delete(key);
+    }
+
+    void persistCuration(nextLikedIds, nextHiddenIds);
+  }, [hiddenIds, likedIds, persistCuration]);
 
   const beginMapResize = useCallback(
     (direction: 1 | -1) => (event: MouseEvent<HTMLButtonElement>) => {

@@ -200,6 +200,7 @@ export interface ReviewJobListingAnalysis {
 
 export interface ReviewJobListing extends SearchResult {
   selected: boolean;
+  liked: boolean;
   hidden: boolean;
   poiDistanceMeters: number | null;
   analysis: ReviewJobListingAnalysis | null;

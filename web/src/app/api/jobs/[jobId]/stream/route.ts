@@ -41,6 +41,7 @@ function writeComment(controller: ReadableStreamDefaultController<Uint8Array>, m
 export async function GET(request: Request, { params }: Params) {
   const { jobId } = await params;
   const ownerKey = await getReviewJobOwnerKey();
+  const keepWatching = new URL(request.url).searchParams.get('watch') === '1';
 
   const initialPayload = await getAccessibleReviewJobResponse(jobId, ownerKey);
   if (!initialPayload) {
@@ -76,7 +77,7 @@ export async function GET(request: Request, { params }: Params) {
             lastKeepaliveAt = Date.now();
           }
 
-          if (!shouldPollReviewJob(nextPayload.job)) {
+          if (!keepWatching && !shouldPollReviewJob(nextPayload.job)) {
             break;
           }
         }

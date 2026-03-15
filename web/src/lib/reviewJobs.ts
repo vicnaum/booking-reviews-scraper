@@ -117,7 +117,6 @@ function getDistanceMeters(a: MapPoint, b: MapPoint): number {
 
 export const reviewJobResponseInclude = {
   listings: {
-    where: { hidden: false },
     orderBy: { createdAt: 'asc' as const },
     include: {
       analysis: true,
@@ -299,6 +298,7 @@ export function toWebReviewJobListing(
     stars: row.stars ?? undefined,
     freeCancellation: row.freeCancellation ?? undefined,
     selected: row.selected,
+    liked: row.liked,
     hidden: row.hidden,
     poiDistanceMeters: row.poiDistanceMeters ?? null,
     analysis: row.analysis ? toReviewJobListingAnalysisState(row.analysis) : null,

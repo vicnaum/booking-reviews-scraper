@@ -164,6 +164,7 @@ model ReviewJobListing {
   stars            Int?
   freeCancellation Boolean?
   selected         Boolean   @default(false)
+  liked            Boolean   @default(false)
   hidden           Boolean   @default(false)
   poiDistanceMeters Float?
   createdAt        DateTime  @default(now())

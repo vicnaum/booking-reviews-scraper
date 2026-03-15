@@ -10,9 +10,14 @@ export function useReviewJobPolling(
   job: ReviewJobResponse['job'],
   refreshJob: () => Promise<void>,
   onStreamJob?: (nextData: ReviewJobResponse) => void,
+  options?: {
+    keepSynced?: boolean;
+  },
 ) {
   useEffect(() => {
-    if (!shouldPollReviewJob(job)) {
+    const keepSynced = options?.keepSynced ?? false;
+
+    if (!keepSynced && !shouldPollReviewJob(job)) {
       return;
     }
 
@@ -25,13 +30,16 @@ export function useReviewJobPolling(
         return;
       }
 
-      fallbackInterval = setInterval(() => {
-        void refreshJob().catch(() => {});
-      }, REVIEW_JOB_POLL_INTERVAL_MS);
+        fallbackInterval = setInterval(() => {
+          void refreshJob().catch(() => {});
+        }, REVIEW_JOB_POLL_INTERVAL_MS);
     };
 
     if (typeof window !== 'undefined' && 'EventSource' in window) {
-      eventSource = new EventSource(`/api/jobs/${job.id}/stream`);
+      const streamUrl = keepSynced
+        ? `/api/jobs/${job.id}/stream?watch=1`
+        : `/api/jobs/${job.id}/stream`;
+      eventSource = new EventSource(streamUrl);
 
       eventSource.addEventListener('job', (event) => {
         if (!onStreamJob) {
@@ -63,5 +71,5 @@ export function useReviewJobPolling(
         clearInterval(fallbackInterval);
       }
     };
-  }, [job, onStreamJob, refreshJob]);
+  }, [job, onStreamJob, options?.keepSynced, refreshJob]);
 }
