@@ -249,8 +249,8 @@ function JobPoiDistanceOverlay({
       }
 
       setMouseDistance({
-        x: event.originalEvent.offsetX,
-        y: event.originalEvent.offsetY,
+        x: event.containerPoint.x,
+        y: event.containerPoint.y,
         meters: haversineDistanceMeters(poi, {
           lat: event.latlng.lat,
           lng: event.latlng.lng,
