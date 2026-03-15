@@ -156,6 +156,7 @@ function JobViewport({
   mapCenter,
   mapZoom,
   selectedPoint,
+  selectedPointToken,
 }: {
   searchAreaMode: 'window' | 'rectangle' | 'circle';
   mapBounds: BoundingBox | null;
@@ -163,22 +164,33 @@ function JobViewport({
   mapCenter: MapPoint | null;
   mapZoom: number | null;
   selectedPoint: MapPoint | null;
+  selectedPointToken?: number;
 }) {
   const map = useMap();
   const hasRestoredViewportRef = useRef(false);
-  const lastSelectedPointKeyRef = useRef<string | null>(null);
+  const lastSelectionRef = useRef<{ pointKey: string; token: number } | null>(null);
 
   useEffect(() => {
     if (selectedPoint) {
       const pointKey = `${selectedPoint.lat}:${selectedPoint.lng}`;
-      if (lastSelectedPointKeyRef.current !== pointKey) {
-        lastSelectedPointKeyRef.current = pointKey;
+      const selectionToken = selectedPointToken ?? 0;
+      const lastSelection = lastSelectionRef.current;
+
+      if (
+        lastSelection == null
+        || lastSelection.pointKey !== pointKey
+        || lastSelection.token !== selectionToken
+      ) {
+        lastSelectionRef.current = {
+          pointKey,
+          token: selectionToken,
+        };
         map.panTo([selectedPoint.lat, selectedPoint.lng], { animate: true });
       }
       return;
     }
 
-    lastSelectedPointKeyRef.current = null;
+    lastSelectionRef.current = null;
 
     if (hasRestoredViewportRef.current) {
       return;
@@ -204,7 +216,16 @@ function JobViewport({
       const bounds: LatLngBoundsExpression = toRectangleBounds(target);
       map.fitBounds(bounds, { padding: [24, 24], animate: false });
     }
-  }, [boundingBox, map, mapBounds, mapCenter, mapZoom, searchAreaMode, selectedPoint]);
+  }, [
+    boundingBox,
+    map,
+    mapBounds,
+    mapCenter,
+    mapZoom,
+    searchAreaMode,
+    selectedPoint,
+    selectedPointToken,
+  ]);
 
   return null;
 }
@@ -264,6 +285,7 @@ interface JobMapProps {
   results: ReviewJobListing[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  selectedPointToken?: number;
   searchAreaMode: 'window' | 'rectangle' | 'circle';
   boundingBox: BoundingBox | null;
   mapBounds: BoundingBox | null;
@@ -280,6 +302,7 @@ export default function JobMap({
   results,
   selectedId,
   onSelect,
+  selectedPointToken,
   searchAreaMode,
   boundingBox,
   mapBounds,
@@ -322,6 +345,7 @@ export default function JobMap({
         mapCenter={mapCenter}
         mapZoom={mapZoom}
         selectedPoint={selectedResult?.coordinates ?? null}
+        selectedPointToken={selectedPointToken}
       />
       <JobPoiDistanceOverlay poi={poi} />
 

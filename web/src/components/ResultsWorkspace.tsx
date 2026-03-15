@@ -520,10 +520,12 @@ function ListingDetailPanel({
   listing,
   job,
   priceDisplay,
+  onLocate,
 }: {
   listing: ReviewJobListing;
   job: ReviewJobResponse['job'];
   priceDisplay: PriceDisplayMode;
+  onLocate: () => void;
 }) {
   const snapshot = useMemo(() => getListingResultsSnapshot(listing), [listing]);
   const [activeTab, setActiveTab] = useState<DetailTab>('triage');
@@ -551,6 +553,7 @@ function ListingDetailPanel({
   const triage = snapshot.triage;
   const aiReviews = snapshot.aiReviews;
   const aiPhotos = snapshot.aiPhotos;
+  const poiDistanceLabel = formatPoiDistance(listing.poiDistanceMeters);
 
   return (
     <div className="border-t border-white/10 bg-black/25 px-4 py-5 md:px-5">
@@ -631,7 +634,7 @@ function ListingDetailPanel({
                 </span>
                 {listing.poiDistanceMeters != null && (
                   <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
-                    {formatPoiDistance(listing.poiDistanceMeters)} from POI
+                    {poiDistanceLabel} from POI
                   </span>
                 )}
                 {listing.bedrooms != null && (
@@ -951,6 +954,11 @@ function ListingDetailPanel({
                       {snapshot.details.address}
                     </span>
                   )}
+                  {listing.poiDistanceMeters != null && (
+                    <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                      POI distance: {poiDistanceLabel}
+                    </span>
+                  )}
                   {snapshot.details?.checkIn && (
                     <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
                       Check-in: {snapshot.details.checkIn}
@@ -973,15 +981,29 @@ function ListingDetailPanel({
                       Source
                     </h3>
                     <p className="mt-2 text-sm text-stone-300">{listing.name}</p>
+                    {listing.poiDistanceMeters != null && (
+                      <p className="mt-1 text-xs text-stone-500">
+                        {poiDistanceLabel} from POI
+                      </p>
+                    )}
                   </div>
-                  <a
-                    href={listingUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="rounded-xl border border-white/10 bg-white/[0.05] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"
-                  >
-                    Open listing ↗
-                  </a>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={onLocate}
+                      className="rounded-xl border border-white/10 bg-white/[0.05] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"
+                    >
+                      Locate on map
+                    </button>
+                    <a
+                      href={listingUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="rounded-xl border border-white/10 bg-white/[0.05] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"
+                    >
+                      Open listing ↗
+                    </a>
+                  </div>
                 </div>
               </section>
             </div>
@@ -1000,6 +1022,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   const [data, setData] = useState(initialData);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [mapFocusToken, setMapFocusToken] = useState(0);
   const [priceDisplay, setPriceDisplay] = useState<PriceDisplayMode>(
     getStoredReviewJobPriceDisplay(initialData.job),
   );
@@ -1257,6 +1280,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   const handleSelect = useCallback(
     (key: string, options?: { scroll?: boolean; toggle?: boolean }) => {
       setSelectedId(key);
+      setMapFocusToken((current) => current + 1);
       setExpandedId((current) => {
         if (options?.toggle && current === key) {
           return null;
@@ -1467,8 +1491,26 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                         </span>
                       )}
                       {listing.reviewCount > 0 && <span>({listing.reviewCount})</span>}
+                    </div>
+                    {listing.poiDistanceMeters != null && (
+                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-stone-300">
+                        <span className="rounded-full border border-sky-300/20 bg-sky-300/10 px-2.5 py-1 text-sky-100">
+                          POI {formatPoiDistance(listing.poiDistanceMeters)} away
+                        </span>
+                      </div>
+                    )}
+                    <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-stone-500">
                       {listing.poiDistanceMeters != null && (
-                        <span>{formatPoiDistance(listing.poiDistanceMeters)} from POI</span>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleSelect(key, { scroll: false });
+                          }}
+                          className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 font-semibold text-stone-300 transition hover:bg-white/[0.08] hover:text-white"
+                        >
+                          Locate on map
+                        </button>
                       )}
                     </div>
                   </div>
@@ -1490,6 +1532,11 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 <div className="text-sm font-semibold text-white">{priceInfo.primary}</div>
                 {priceInfo.secondary && (
                   <div className="mt-1 text-xs text-stone-500">{priceInfo.secondary}</div>
+                )}
+                {listing.poiDistanceMeters != null && (
+                  <div className="mt-2 text-xs text-stone-400">
+                    {formatPoiDistance(listing.poiDistanceMeters)} from POI
+                  </div>
                 )}
               </td>
               <td className="px-3 py-3 align-top">
@@ -1557,6 +1604,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                     listing={listing}
                     job={data.job}
                     priceDisplay={priceDisplay}
+                    onLocate={() => handleSelect(key, { scroll: false })}
                   />
                 </td>
               </tr>
@@ -1841,6 +1889,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 results={filteredResults}
                 selectedId={selectedId}
                 onSelect={(key) => handleSelect(key, { scroll: true })}
+                selectedPointToken={mapFocusToken}
                 searchAreaMode={data.job.searchAreaMode}
                 boundingBox={data.job.boundingBox}
                 mapBounds={data.job.mapBounds}
