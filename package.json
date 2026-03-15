@@ -7,7 +7,7 @@
     "reviewr": "./dist/src/cli.js"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "tsx --test tests/**/*.test.ts",
     "dev": "tsx watch src/booking/scraper.ts",
     "dev:cli": "tsx src/cli.ts",
     "start": "tsx src/booking/scraper.ts",
@@ -18,7 +18,7 @@
     "analytics:airbnb:12m": "tsx src/airbnb/analytics.ts --12m",
     "transform": "tsx src/booking/transform-to-csv.ts",
     "build": "tsc",
-    "lint": "eslint . --ext .ts",
+    "lint": "eslint src tests",
     "format": "prettier --write \"src/**/*.ts\""
   },
   "keywords": [],

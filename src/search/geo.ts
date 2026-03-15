@@ -5,7 +5,7 @@
 
 import * as turf from '@turf/turf';
 import { makeRequest } from '../airbnb/scraper.js';
-import type { BoundingBox } from './types.js';
+import type { BoundingBox, CircleFilter } from './types.js';
 
 const NOMINATIM_BASE_URL = 'https://nominatim.openstreetmap.org';
 
@@ -76,6 +76,61 @@ export function subdivideBbox(bbox: BoundingBox): BoundingBox[] {
     { neLat: midLat, neLng: bbox.neLng, swLat: bbox.swLat, swLng: midLng }, // SE
     { neLat: midLat, neLng: midLng, swLat: bbox.swLat, swLng: bbox.swLng }, // SW
   ];
+}
+
+export function haversineDistanceMeters(
+  aLat: number,
+  aLng: number,
+  bLat: number,
+  bLng: number,
+): number {
+  const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
+  const earthRadiusMeters = 6371000;
+  const dLat = toRadians(bLat - aLat);
+  const dLng = toRadians(bLng - aLng);
+  const lat1 = toRadians(aLat);
+  const lat2 = toRadians(bLat);
+  const sinDLat = Math.sin(dLat / 2);
+  const sinDLng = Math.sin(dLng / 2);
+
+  const a =
+    sinDLat * sinDLat +
+    Math.cos(lat1) * Math.cos(lat2) * sinDLng * sinDLng;
+
+  return 2 * earthRadiusMeters * Math.asin(Math.sqrt(a));
+}
+
+export function bboxHeightMeters(bbox: BoundingBox): number {
+  return haversineDistanceMeters(
+    bbox.swLat,
+    bbox.swLng,
+    bbox.neLat,
+    bbox.swLng,
+  );
+}
+
+export function bboxWidthMeters(bbox: BoundingBox): number {
+  return haversineDistanceMeters(
+    bbox.swLat,
+    bbox.swLng,
+    bbox.swLat,
+    bbox.neLng,
+  );
+}
+
+export function bboxIntersectsCircle(
+  bbox: BoundingBox,
+  circle: CircleFilter,
+): boolean {
+  const nearestLat = Math.min(Math.max(circle.center.lat, bbox.swLat), bbox.neLat);
+  const nearestLng = Math.min(Math.max(circle.center.lng, bbox.swLng), bbox.neLng);
+
+  return haversineDistanceMeters(
+    circle.center.lat,
+    circle.center.lng,
+    nearestLat,
+    nearestLng,
+  ) <= circle.radiusMeters;
 }
 
 /**

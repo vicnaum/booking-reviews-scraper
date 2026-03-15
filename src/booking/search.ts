@@ -6,7 +6,19 @@
 
 import fetch from 'node-fetch';
 import { HttpsProxyAgent } from 'https-proxy-agent';
-import { createSearchGrid, subdivideBbox } from '../search/geo.js';
+import {
+  parseBookingCardPricing,
+  parseBookingGraphQLPricing,
+} from './pricing.js';
+import { createBookingSearchLogger, type BookingSearchLogger } from './search-log.js';
+import {
+  countNewChildIds,
+  hasMeaningfulChildGain,
+  shouldRecurseIntoChildren,
+  shouldProbeChildren,
+  type AdaptiveSubdivisionConfig,
+} from '../search/adaptive.js';
+import { bboxIntersectsCircle, subdivideBbox } from '../search/geo.js';
 import { filterSearchResults } from '../search/filters.js';
 import type {
   BookingSearchParams,
@@ -20,6 +32,14 @@ const FULL_SEARCH_HASH = '8cea877c71f083895aa316412e85ffe818b503bb5331babba34a16
 const MAP_MARKERS_HASH = 'f6d2e861c5149589bf368582c31f74d58399004da319fac65f2c88313cf15c16';
 const PAGE_DELAY_MS = 300;
 const CELL_DELAY_MS = 500;
+const BOOKING_SUBDIVISION_CONFIG: AdaptiveSubdivisionConfig = {
+  forceProbeDepth: 2,
+  maxDepth: 3,
+  minCellSideMeters: 900,
+  minResultsToProbe: 10,
+  minNewIds: 2,
+  minGainRatio: 0.05,
+};
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -53,6 +73,20 @@ function getMatchingUnitConfigurations(result: any): any[] {
   }
 
   return configurations;
+}
+
+function getStayNights(params: BookingSearchParams): number | null {
+  if (!params.checkin || !params.checkout) {
+    return null;
+  }
+
+  const diffMs =
+    new Date(params.checkout).getTime() - new Date(params.checkin).getTime();
+  if (!Number.isFinite(diffMs) || diffMs <= 0) {
+    return null;
+  }
+
+  return Math.max(1, Math.round(diffMs / 86400000));
 }
 
 // --- Session management ---
@@ -104,10 +138,17 @@ function buildPlaywrightLaunchOptions(): Record<string, unknown> {
 
 async function bootstrapSession(
   params: BookingSearchParams,
+  logger?: BookingSearchLogger,
 ): Promise<BookingSession> {
   const { chromium } = await import('playwright');
 
   console.log('🔑 Bootstrapping Booking.com session via Playwright...');
+  logger?.log('bootstrap_started', {
+    location: params.location ?? null,
+    destId: params.destId ?? null,
+    boundingBox: params.boundingBox ?? null,
+    filters: buildFilterString(params),
+  });
   const browser = await chromium.launch(buildPlaywrightLaunchOptions());
 
   try {
@@ -118,13 +159,14 @@ async function bootstrapSession(
     const page = await context.newPage();
 
     // Build a search URL that will trigger GraphQL requests.
-    // If no location/destId provided (bbox-only search), use a fallback city
-    // so the page loads results and fires GraphQL (needed to capture CSRF token).
-    const bootstrapParams = (!params.location && !params.destId)
-      ? { ...params, destId: '-2601889', location: undefined } as BookingSearchParams  // London
+    // If this is a bbox-only search, use a fallback city so the page loads
+    // search results and then open map mode to capture MapMarkersDesktop.
+    const needsFallbackCity = !!params.boundingBox && !params.location && !params.destId;
+    const bootstrapParams = needsFallbackCity
+      ? { ...params, destId: '-2601889', location: undefined } as BookingSearchParams // London
       : params;
     const searchUrl = buildSearchUrl(bootstrapParams);
-    const shouldOpenMap = !!params.boundingBox && !params.location && !params.destId;
+    const shouldOpenMap = !!params.boundingBox;
     const bootstrapUrl = shouldOpenMap ? `${searchUrl}#map_opened` : searchUrl;
     console.log(`  Navigating to: ${bootstrapUrl}`);
 
@@ -155,6 +197,10 @@ async function bootstrapSession(
           }
 
           console.log(`  Intercepted GraphQL: ${operationName}`);
+          logger?.log('bootstrap_intercepted_graphql', {
+            operationName,
+            graphqlUrl: request.url(),
+          });
         } else if (!capturedGraphqlUrl) {
           capturedGraphqlUrl = request.url();
           if (Object.keys(capturedHeaders).length === 0) {
@@ -232,8 +278,23 @@ async function bootstrapSession(
 
     if (!hasHeaders) {
       console.log('  ⚠️  No CSRF token captured. GraphQL may not work, will try SSR fallback.');
+      logger?.log('bootstrap_completed', {
+        success: false,
+        hasCsrfToken: false,
+        cookieCount: cookies.length,
+        destId,
+        capturedGraphqlUrl: capturedGraphqlUrl || null,
+      });
     } else {
       console.log(`  ✅ Session captured: CSRF=${csrfToken.substring(0, 20)}..., ${cookies.length} cookies`);
+      logger?.log('bootstrap_completed', {
+        success: true,
+        hasCsrfToken: true,
+        cookieCount: cookies.length,
+        destId,
+        capturedGraphqlUrl: capturedGraphqlUrl || null,
+        capturedTemplateOperation: capturedMapMarkersTemplate?.operationName ?? null,
+      });
     }
 
     await page.close();
@@ -270,6 +331,7 @@ function buildSearchUrl(params: BookingSearchParams): string {
   if (params.checkout) url.searchParams.set('checkout', params.checkout);
   url.searchParams.set('group_adults', String(params.adults));
   url.searchParams.set('no_rooms', '1');
+  url.searchParams.set('selected_currency', params.currency);
 
   // Build nflt filter string
   const filters = buildFilterString(params);
@@ -329,7 +391,7 @@ function cloneBodyTemplate<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-function buildFilterString(params: BookingSearchParams): string {
+export function buildFilterString(params: BookingSearchParams): string {
   const parts: string[] = ['oos=1']; // Only available properties
 
   if (params.minRating) {
@@ -346,6 +408,18 @@ function buildFilterString(params: BookingSearchParams): string {
     };
     const mapped = typeMap[params.propertyType];
     if (mapped) parts.push(mapped);
+  }
+
+  if (
+    params.minBedrooms != null
+    && params.minBedrooms > 0
+    && params.propertyType !== 'private'
+    && params.propertyType !== 'hotel'
+  ) {
+    if (!parts.includes('privacy_type=3')) {
+      parts.push('privacy_type=3');
+    }
+    parts.push(`entire_place_bedroom_count=${Math.max(1, Math.floor(params.minBedrooms))}`);
   }
 
   if (params.stars?.length) {
@@ -456,6 +530,7 @@ function buildMapMarkersBody(
       hotelIds: Array.isArray(input.location?.hotelIds) ? input.location.hotelIds : [],
       initialDestination: { destType: 'CITY', destId },
     };
+    input.location.hotelIds = [];
     input.nbRooms = 1;
     input.nbAdults = params.adults;
     input.pagination = {
@@ -626,6 +701,20 @@ async function fetchGraphQL(session: BookingSession, body: any): Promise<any> {
   return data;
 }
 
+type MapMarkersCellSearchResult = {
+  cellResults: SearchResult[];
+  totalResults: number;
+  rawResultsCount: number;
+};
+
+function getSubdivisionSignal(
+  filteredResultsCount: number,
+  rawResultsCount: number,
+  totalResults: number,
+): number {
+  return Math.max(filteredResultsCount, rawResultsCount, totalResults);
+}
+
 // --- Response parsing ---
 
 function parseSearchResult(r: any, params: BookingSearchParams): SearchResult | null {
@@ -635,24 +724,12 @@ function parseSearchResult(r: any, params: BookingSearchParams): SearchResult | 
   const pageName = r?.basicPropertyData?.pageName || '';
   const countryCode = (r?.basicPropertyData?.location?.countryCode || '').toLowerCase();
 
-  let price: SearchResult['price'] = null;
-  let totalPrice: SearchResult['totalPrice'] = null;
-
   const priceInfo = r?.priceDisplayInfoIrene?.displayPrice;
-  if (priceInfo) {
-    const perStay = priceInfo?.amountPerStay?.amountRounded;
-    if (perStay) {
-      const amount = parseFloat(String(perStay).replace(/[^0-9.]/g, ''));
-      if (!isNaN(amount)) {
-        // Booking shows per-stay, approximate per-night
-        const nights = params.checkin && params.checkout
-          ? Math.max(1, Math.round((new Date(params.checkout).getTime() - new Date(params.checkin).getTime()) / 86400000))
-          : 1;
-        price = { amount: Math.round(amount / nights), currency: params.currency, period: 'night' };
-        totalPrice = { amount, currency: params.currency };
-      }
-    }
-  }
+  const pricing = parseBookingGraphQLPricing(
+    priceInfo,
+    params.currency,
+    getStayNights(params),
+  );
 
   const reviewScore = r?.basicPropertyData?.reviewScore;
   const location = r?.basicPropertyData?.location;
@@ -674,8 +751,7 @@ function parseSearchResult(r: any, params: BookingSearchParams): SearchResult | 
     url: `https://www.booking.com/hotel/${countryCode}/${pageName}.html`,
     rating: reviewScore?.score ?? null,
     reviewCount: reviewScore?.reviewCount ?? 0,
-    price,
-    totalPrice,
+    pricing,
     coordinates: location?.latitude != null && location?.longitude != null
       ? { lat: location.latitude, lng: location.longitude }
       : null,
@@ -711,7 +787,16 @@ function parseFullSearchResponse(data: any, params: BookingSearchParams, pageInd
   };
 }
 
-function parseMapMarkersResponse(data: any, params: BookingSearchParams, pageIndex: number): SearchPage {
+type ParsedMapMarkersPage = SearchPage & {
+  rawResultsCount: number;
+  totalResults: number;
+};
+
+function parseMapMarkersResponse(
+  data: any,
+  params: BookingSearchParams,
+  pageIndex: number,
+): ParsedMapMarkersPage {
   const results = data?.data?.searchQueries?.search?.results || [];
   const total = data?.data?.searchQueries?.search?.pagination?.nbResultsTotal ?? 0;
 
@@ -726,6 +811,8 @@ function parseMapMarkersResponse(data: any, params: BookingSearchParams, pageInd
     results: filtered,
     hasNextPage: parsed.length > 0 && (pageIndex + 1) * 100 < total,
     pageIndex,
+    rawResultsCount: parsed.length,
+    totalResults: total,
   };
 }
 
@@ -826,12 +913,7 @@ async function searchBookingSSR(
         if (countMatch) reviewCount = parseInt(countMatch[1].replace(',', ''));
 
         // Parse price
-        let price: SearchResult['price'] = null;
-        const priceMatch = card.price.match(/([\d,]+)/);
-        if (priceMatch) {
-          const amount = parseInt(priceMatch[1].replace(',', ''));
-          price = { amount, currency: params.currency, period: 'night' };
-        }
+        const pricing = parseBookingCardPricing(card.price, params.currency);
 
         pageResults.push({
           id: hotelId,
@@ -840,8 +922,7 @@ async function searchBookingSSR(
           url: card.link.startsWith('http') ? card.link : `https://www.booking.com${card.link}`,
           rating,
           reviewCount,
-          price,
-          totalPrice: null,
+          pricing,
           coordinates: null,
           propertyType: null,
           photoUrl: null,
@@ -885,19 +966,35 @@ export async function searchBooking(
     throw new Error('Booking search requires --location, --bbox, or --dest-id');
   }
 
+  const useBboxSearch = !!bbox;
+  const logger = createBookingSearchLogger({
+    params,
+    mode: params.exhaustive ? 'exhaustive' : 'quick',
+    useBboxSearch,
+  });
+  if (logger.filePath) {
+    console.log(`🧾 Booking search log: ${logger.filePath}`);
+  }
+
   let session: BookingSession;
   const now = Date.now();
   if (cachedSession && cachedSession.headers['x-booking-csrf-token'] && (now - cachedSessionTime) < SESSION_TTL_MS) {
     console.log('♻️  Reusing cached Booking session');
+    logger.log('session_reused', {
+      ageMs: now - cachedSessionTime,
+    });
     session = cachedSession;
   } else {
     try {
-      session = await bootstrapSession(params);
+      session = await bootstrapSession(params, logger);
       if (session.headers['x-booking-csrf-token']) {
         cachedSession = session;
         cachedSessionTime = Date.now();
       }
     } catch (error: any) {
+      logger.log('bootstrap_failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       console.log(`❌ Bootstrap failed: ${error.message}`);
       throw error;
     }
@@ -921,9 +1018,120 @@ export async function searchBooking(
     if (onProgress) onProgress(page);
   };
 
-  // Use MapMarkers when we have a bbox but no city (viewport search).
-  // FullSearch only works with destType=CITY; it ignores bbox.
-  const useBboxSearch = !!bbox && !params.location && !params.destId;
+  const addUniqueResults = (results: SearchResult[]): SearchResult[] => {
+    const newResults: SearchResult[] = [];
+    for (const result of results) {
+      if (!seenIds.has(result.id)) {
+        seenIds.add(result.id);
+        newResults.push(result);
+      }
+    }
+    allResults.push(...newResults);
+    return newResults;
+  };
+
+  const searchMapMarkersCell = async (
+    cell: BoundingBox,
+    label: string,
+  ): Promise<MapMarkersCellSearchResult> => {
+    let offset = 0;
+    let pageIndex = 0;
+    let retried = false;
+    let totalResults = 0;
+    let rawResultsCount = 0;
+    const cellSeenIds = new Set<string>();
+    const cellResults: SearchResult[] = [];
+
+    while (true) {
+      try {
+        const body = buildMapMarkersBody(params, session, cell, offset);
+        logger.log('map_markers_request', {
+          label,
+          pageIndex,
+          offset,
+          boundingBox: cell,
+          filters: buildFilterString(params),
+        });
+        const data = await fetchGraphQL(buildMapSession(session), body);
+        const page = parseMapMarkersResponse(data, params, pageIndex);
+
+        if (pageIndex === 0) {
+          totalResults = page.totalResults;
+          rawResultsCount = page.rawResultsCount;
+        }
+
+        const freshCellResults: SearchResult[] = [];
+        for (const result of page.results) {
+          if (!cellSeenIds.has(result.id)) {
+            cellSeenIds.add(result.id);
+            cellResults.push(result);
+            freshCellResults.push(result);
+          }
+        }
+
+        const newResults = addUniqueResults(freshCellResults);
+        progressTracker({ ...page, results: newResults });
+        logger.log('map_markers_page', {
+          label,
+          pageIndex,
+          offset,
+          boundingBox: cell,
+          rawResultsCount: page.rawResultsCount,
+          filteredResultsCount: page.results.length,
+          newUniqueResultsCount: newResults.length,
+          totalResults: page.totalResults,
+          hasNextPage: page.hasNextPage,
+        });
+
+        if (!page.hasNextPage) break;
+        if (params.maxResults && allResults.length >= params.maxResults) break;
+
+        offset += 100;
+        pageIndex++;
+        await sleep(PAGE_DELAY_MS);
+      } catch (error: any) {
+        if (error.message.includes('403') && !retried) {
+          console.log(`  🔄 ${label}: session expired, re-bootstrapping...`);
+          logger.log('map_markers_rebootstrap', {
+            label,
+            boundingBox: cell,
+            reason: '403',
+          });
+          try {
+            cachedSession = null;
+            session = await bootstrapSession(params, logger);
+            if (session.headers['x-booking-csrf-token']) {
+              cachedSession = session;
+              cachedSessionTime = Date.now();
+            }
+            retried = true;
+            continue;
+          } catch {
+            console.log(`  ❌ ${label}: re-bootstrap failed`);
+          }
+        }
+
+        logger.log('map_markers_error', {
+          label,
+          boundingBox: cell,
+          pageIndex,
+          offset,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
+    }
+
+    logger.log('map_markers_cell_completed', {
+      label,
+      boundingBox: cell,
+      filteredResultsCount: cellResults.length,
+      rawResultsCount,
+      totalResults,
+    });
+
+    return { cellResults, totalResults, rawResultsCount };
+  };
 
   if (!params.exhaustive && !useBboxSearch) {
     // Quick mode: FullSearch with offset pagination (city-based)
@@ -935,6 +1143,11 @@ export async function searchBooking(
     while (true) {
       try {
         const body = buildFullSearchBody(params, session, offset);
+        logger.log('full_search_request', {
+          pageIndex,
+          offset,
+          filters: buildFilterString(params),
+        });
         const data = await fetchGraphQL(session, body);
         const page = parseFullSearchResponse(data, params, pageIndex);
 
@@ -949,6 +1162,13 @@ export async function searchBooking(
 
         allResults.push(...newResults);
         progressTracker({ ...page, results: newResults });
+        logger.log('full_search_page', {
+          pageIndex,
+          offset,
+          filteredResultsCount: page.results.length,
+          newUniqueResultsCount: newResults.length,
+          hasNextPage: page.hasNextPage,
+        });
 
         if (!page.hasNextPage) break;
         if (params.maxResults && allResults.length >= params.maxResults) break;
@@ -959,9 +1179,14 @@ export async function searchBooking(
       } catch (error: any) {
         if (error.message.includes('403') && !retried) {
           console.log('  🔄 Session expired, re-bootstrapping...');
+          logger.log('full_search_rebootstrap', {
+            pageIndex,
+            offset,
+            reason: '403',
+          });
           try {
             cachedSession = null;
-            session = await bootstrapSession(params);
+            session = await bootstrapSession(params, logger);
             if (session.headers['x-booking-csrf-token']) {
               cachedSession = session;
               cachedSessionTime = Date.now();
@@ -977,6 +1202,12 @@ export async function searchBooking(
           console.log(`  ⚠️  ${error.message}`);
           console.log('  Falling back to SSR...');
         }
+        logger.log('full_search_error', {
+          pageIndex,
+          offset,
+          error: error instanceof Error ? error.message : String(error),
+          fallback: 'ssr',
+        });
 
         const ssrResults = await searchBookingSSR(params, session, seenIds, params.maxResults ? params.maxResults - allResults.length : undefined, progressTracker);
         allResults.push(...ssrResults);
@@ -995,6 +1226,13 @@ export async function searchBooking(
     while (true) {
       try {
         const body = buildMapMarkersBody(params, session, bbox, offset);
+        logger.log('map_markers_request', {
+          label: 'Quick bbox',
+          pageIndex,
+          offset,
+          boundingBox: bbox,
+          filters: buildFilterString(params),
+        });
         const data = await fetchGraphQL(buildMapSession(session), body);
         const page = parseMapMarkersResponse(data, params, pageIndex);
 
@@ -1008,6 +1246,17 @@ export async function searchBooking(
 
         allResults.push(...newResults);
         progressTracker({ ...page, results: newResults });
+        logger.log('map_markers_page', {
+          label: 'Quick bbox',
+          pageIndex,
+          offset,
+          boundingBox: bbox,
+          rawResultsCount: page.rawResultsCount,
+          filteredResultsCount: page.results.length,
+          newUniqueResultsCount: newResults.length,
+          totalResults: page.totalResults,
+          hasNextPage: page.hasNextPage,
+        });
 
         if (!page.hasNextPage) break;
         if (params.maxResults && allResults.length >= params.maxResults) break;
@@ -1018,9 +1267,16 @@ export async function searchBooking(
       } catch (error: any) {
         if (error.message.includes('403') && !retried) {
           console.log('  🔄 Session expired, re-bootstrapping...');
+          logger.log('map_markers_rebootstrap', {
+            label: 'Quick bbox',
+            boundingBox: bbox,
+            pageIndex,
+            offset,
+            reason: '403',
+          });
           try {
             cachedSession = null;
-            session = await bootstrapSession(params);
+            session = await bootstrapSession(params, logger);
             if (session.headers['x-booking-csrf-token']) {
               cachedSession = session;
               cachedSessionTime = Date.now();
@@ -1031,6 +1287,13 @@ export async function searchBooking(
             console.log('  ❌ Re-bootstrap failed, falling back to SSR');
           }
         }
+        logger.log('map_markers_error', {
+          label: 'Quick bbox',
+          boundingBox: bbox,
+          pageIndex,
+          offset,
+          error: error instanceof Error ? error.message : String(error),
+        });
         console.log(`  ⚠️  MapMarkers error: ${error.message}`);
         break;
       }
@@ -1041,62 +1304,164 @@ export async function searchBooking(
       throw new Error('Exhaustive Booking search requires a bounding box (--bbox or --location)');
     }
 
-    console.log('🔍 Exhaustive search via MapMarkersDesktop (100/page)...');
-    const cells = createSearchGrid(bbox, 5);
-    console.log(`   ${cells.length} cells to search`);
+    console.log('🔍 Exhaustive search via MapMarkersDesktop + quadrant subdivision...');
 
-    let retried = false;
+    let visitedCells = 0;
+    const visitCell = async (
+      cell: BoundingBox,
+      depth: number,
+      seededResults?: MapMarkersCellSearchResult,
+    ): Promise<void> => {
+      visitedCells++;
+      const label = `Cell ${visitedCells} (depth ${depth})`;
+      console.log(`  📍 ${label}`);
 
-    for (let i = 0; i < cells.length; i++) {
-      const cell = cells[i];
-      console.log(`  📍 Cell ${i + 1}/${cells.length}`);
+      try {
+        const { cellResults, totalResults, rawResultsCount } = seededResults
+          ? seededResults
+          : await searchMapMarkersCell(cell, label);
+        const subdivisionSignal = getSubdivisionSignal(
+          cellResults.length,
+          rawResultsCount,
+          totalResults,
+        );
+        console.log(
+          `    ↳ ${cellResults.length} filtered / ${rawResultsCount} raw / ${totalResults} reported results`,
+        );
+        logger.log('subdivision_cell_evaluated', {
+          label,
+          depth,
+          boundingBox: cell,
+          filteredResultsCount: cellResults.length,
+          rawResultsCount,
+          totalResults,
+          subdivisionSignal,
+        });
 
-      let offset = 0;
-      let pageIndex = 0;
-
-      while (true) {
-        try {
-          const body = buildMapMarkersBody(params, session, cell, offset);
-          const data = await fetchGraphQL(buildMapSession(session), body);
-          const page = parseMapMarkersResponse(data, params, pageIndex);
-
-          const newResults: SearchResult[] = [];
-          for (const r of page.results) {
-            if (!seenIds.has(r.id)) {
-              seenIds.add(r.id);
-              newResults.push(r);
-            }
-          }
-
-          allResults.push(...newResults);
-          progressTracker({ ...page, results: newResults });
-
-          if (!page.hasNextPage) break;
-
-          offset += 100;
-          pageIndex++;
-          await sleep(PAGE_DELAY_MS);
-        } catch (error: any) {
-          if (error.message.includes('403') && !retried) {
-            console.log('  🔄 Session expired, re-bootstrapping...');
-            try {
-              session = await bootstrapSession(params);
-              retried = true;
-              continue;
-            } catch {
-              console.log('  ❌ Re-bootstrap failed');
-            }
-          }
-
-          console.log(`  ⚠️  Cell ${i + 1} error: ${error.message}`);
-          break; // Move to next cell
+        if (
+          !shouldProbeChildren({
+            bbox: cell,
+            depth,
+            resultCount: subdivisionSignal,
+            config: BOOKING_SUBDIVISION_CONFIG,
+          }) ||
+          (params.maxResults && allResults.length >= params.maxResults)
+        ) {
+          logger.log('subdivision_stopped', {
+            label,
+            depth,
+            boundingBox: cell,
+            reason:
+              params.maxResults && allResults.length >= params.maxResults
+                ? 'max_results'
+                : 'insufficient_density',
+            filteredResultsCount: cellResults.length,
+            rawResultsCount,
+            totalResults,
+          });
+          return;
         }
-      }
 
-      await sleep(CELL_DELAY_MS);
-    }
+        const childCells = subdivideBbox(cell).filter(
+          (child) => !params.circle || bboxIntersectsCircle(child, params.circle),
+        );
+        if (childCells.length === 0) {
+          logger.log('subdivision_stopped', {
+            label,
+            depth,
+            boundingBox: cell,
+            reason: 'no_child_cells',
+          });
+          return;
+        }
+
+        console.log(`    ↳ probing ${childCells.length} exact quadrants`);
+        const parentIds = new Set(cellResults.map((result) => result.id));
+        const childSearches: Array<{ cell: BoundingBox; result: MapMarkersCellSearchResult }> = [];
+        const childUnionIds = new Set<string>();
+
+        for (const child of childCells) {
+          await sleep(CELL_DELAY_MS);
+          const childLabel = `${label} -> probe`;
+          const childResult = await searchMapMarkersCell(
+            child,
+            childLabel,
+          );
+          childSearches.push({ cell: child, result: childResult });
+          for (const result of childResult.cellResults) {
+            childUnionIds.add(result.id);
+          }
+          if (params.maxResults && allResults.length >= params.maxResults) {
+            break;
+          }
+        }
+
+        const newIdCount = countNewChildIds(parentIds, childUnionIds);
+        const gain = hasMeaningfulChildGain({
+          parentCount: parentIds.size,
+          newIdCount,
+          config: BOOKING_SUBDIVISION_CONFIG,
+        });
+        const shouldRecurse = shouldRecurseIntoChildren({
+          depth,
+          parentCount: parentIds.size,
+          newIdCount,
+          config: BOOKING_SUBDIVISION_CONFIG,
+        });
+        const forcedRecursion = depth < BOOKING_SUBDIVISION_CONFIG.forceProbeDepth;
+        console.log(
+          `    ↳ child cells added ${newIdCount} new IDs beyond parent${
+            forcedRecursion && !gain ? ' (continuing to forced depth)' : ''
+          }`,
+        );
+        logger.log('subdivision_children_probed', {
+          label,
+          depth,
+          boundingBox: cell,
+          parentFilteredCount: parentIds.size,
+          newChildIdCount: newIdCount,
+          childCellCount: childCells.length,
+          forcedRecursion,
+          gain,
+          shouldRecurse,
+        });
+
+        if (!shouldRecurse || (params.maxResults && allResults.length >= params.maxResults)) {
+          return;
+        }
+
+        for (const child of childSearches) {
+          await visitCell(child.cell, depth + 1, child.result);
+          if (params.maxResults && allResults.length >= params.maxResults) {
+            break;
+          }
+        }
+      } catch (error: any) {
+        logger.log('subdivision_error', {
+          label,
+          depth,
+          boundingBox: cell,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        console.log(`  ⚠️  ${label} error: ${error.message}`);
+      }
+    };
+
+    await visitCell(bbox, 0);
   }
 
+  logger.log('search_completed', {
+    totalResults: allResults.length,
+    pagesScanned,
+    mode: params.exhaustive ? 'exhaustive' : 'quick',
+    useBboxSearch,
+  });
   console.log(`✅ Booking search complete: ${allResults.length} unique results, ${pagesScanned} pages scanned`);
   return { results: allResults, pagesScanned };
 }
+
+export const __bookingSearchTestUtils = {
+  buildFilterString,
+  buildMapMarkersBody,
+  getSubdivisionSignal,
+};

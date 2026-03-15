@@ -2,9 +2,9 @@
 
 import dynamic from 'next/dynamic';
 import SearchBar from '@/components/SearchBar';
-import PlatformToggle from '@/components/PlatformToggle';
 import LandingFilters from '@/components/LandingFilters';
 import FilterPanel from '@/components/FilterPanel';
+import RecentJobs from '@/components/RecentJobs';
 import ResultsSidebar from '@/components/ResultsSidebar';
 import { useSearchStore } from '@/hooks/useSearchStore';
 
@@ -37,14 +37,10 @@ export default function HomePage() {
             </h1>
             <p className="mt-4 max-w-lg text-base leading-7 text-stone-300">
               Start with a real place, then open the map only after the first search.
-              Filters and area tools appear when they are actually useful.
+              StayReviewr pulls listings from Airbnb and Booking into one shared map.
             </p>
 
-            <div className="mt-8 flex justify-center">
-              <PlatformToggle />
-            </div>
-
-            <div className="mt-6 w-full">
+            <div className="mt-8 w-full">
               <SearchBar />
             </div>
 
@@ -54,6 +50,8 @@ export default function HomePage() {
               Enter a city like London, Lisbon, or Rome, then open the map with
               your filters already in place.
             </p>
+
+            <RecentJobs />
           </div>
         </div>
       </main>
@@ -77,7 +75,7 @@ export default function HomePage() {
                   StayReviewr
                 </div>
                 <p className="text-sm text-stone-400">
-                  Search by city first, then carve out the area you actually care about.
+                  Search by city first, then refine one shared Airbnb + Booking map.
                 </p>
               </div>
             </div>
@@ -86,7 +84,6 @@ export default function HomePage() {
               <div className="lg:flex-1">
                 <SearchBar />
               </div>
-              <PlatformToggle />
             </div>
           </div>
         </div>
@@ -99,10 +96,15 @@ export default function HomePage() {
       </div>
 
       <div className="relative z-10 flex flex-1 px-4 pb-4 pt-3 md:px-5">
-        <div className="mx-auto flex w-full max-w-[1600px] overflow-hidden rounded-[30px] border border-white/10 bg-black/[0.24] shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl">
+        <div className="mx-auto grid h-[calc(100vh-13.75rem)] w-full max-w-[1600px] min-h-[32rem] grid-cols-1 overflow-hidden rounded-[30px] border border-white/10 bg-black/[0.24] shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl md:grid-cols-[360px_minmax(0,1fr)]">
           <ResultsSidebar />
-          <main className="relative flex-1 overflow-hidden">
-            <SearchMap />
+          <main className="relative flex min-h-0 items-center justify-center overflow-hidden bg-black/[0.08] p-3 md:p-5">
+            <div
+              className="relative aspect-square max-w-full overflow-hidden rounded-[26px] border border-white/10 bg-black/[0.18]"
+              style={{ width: 'min(100%, calc(100vh - 13.75rem))' }}
+            >
+              <SearchMap />
+            </div>
           </main>
         </div>
       </div>

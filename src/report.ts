@@ -76,6 +76,9 @@ interface ListingRow {
   hasBalcony: boolean;
   lat: number | null;
   lng: number | null;
+  poiDistanceMeters: number | null;
+  poiLat: number | null;
+  poiLng: number | null;
   // AI review data
   aiOverallSentiment: string;
   aiStrengths: Array<{ theme: string; description: string; evidence: string[]; frequency: string }>;
@@ -98,6 +101,18 @@ function getPhotos(dir: string): string[] {
   return readdirSync(dir)
     .filter(f => /\.(jpe?g|png|webp)$/i.test(f))
     .sort();
+}
+
+function formatPoiDistance(meters: number | null): string | null {
+  if (meters == null || !Number.isFinite(meters)) {
+    return null;
+  }
+
+  if (meters < 1000) {
+    return `${Math.round(meters)} m`;
+  }
+
+  return `${(meters / 1000).toFixed(1)} km`;
 }
 
 export async function generateReport(options: ReportOptions): Promise<string> {
@@ -133,6 +148,9 @@ export async function generateReport(options: ReportOptions): Promise<string> {
     let hasParking = false, hasWifi = false, hasElevator = false, hasAC = false, hasBalcony = false;
     let lat: number | null = null;
     let lng: number | null = null;
+    let poiDistanceMeters: number | null = null;
+    let poiLat: number | null = null;
+    let poiLng: number | null = null;
     if (entry.details?.status === 'fetched') {
       const listingPath = join(outputDir, entry.details.file);
       if (existsSync(listingPath)) {
@@ -156,6 +174,9 @@ export async function generateReport(options: ReportOptions): Promise<string> {
         hasBalcony = /balcon|terrace|patio/i.test(amenStr);
         lat = listing.coordinates?.lat ?? null;
         lng = listing.coordinates?.lng ?? null;
+        poiDistanceMeters = listing.poiDistanceMeters ?? null;
+        poiLat = listing.poi?.lat ?? null;
+        poiLng = listing.poi?.lng ?? null;
       }
     }
 
@@ -202,6 +223,9 @@ export async function generateReport(options: ReportOptions): Promise<string> {
       photos,
       lat,
       lng,
+      poiDistanceMeters,
+      poiLat,
+      poiLng,
       rating,
       reviewCount,
       bedrooms,
@@ -286,6 +310,10 @@ function esc(s: string): string {
 function buildHTML(rows: ListingRow[], dates?: { checkIn: string; checkOut: string; adults: number }, picks?: { liked: string[]; hidden: string[] }): string {
   const dataJSON = JSON.stringify(rows);
   const picksJSON = JSON.stringify(picks || { liked: [], hidden: [] });
+  const poiRow = rows.find((row) => row.poiLat != null && row.poiLng != null);
+  const poiJSON = JSON.stringify(
+    poiRow ? { lat: poiRow.poiLat, lng: poiRow.poiLng } : null,
+  );
   const tierOrder = ['top_pick', 'shortlist', 'consider', 'unlikely', 'no_go'];
   const tierCounts: Record<string, number> = {};
   for (const t of tierOrder) tierCounts[t] = 0;
@@ -402,6 +430,7 @@ ${tierOrder.map(t => `  <button class="tier-btn active" data-tier="${t}"><span c
 <script>
 const DATA = ${dataJSON};
 const INITIAL_PICKS = ${picksJSON};
+const REPORT_POI = ${poiJSON};
 ${getJS()}
 </script>
 </body>
@@ -410,6 +439,12 @@ ${getJS()}
 
 function heroCard(r: ListingRow): string {
   const photo = r.photos[0] || '';
+  const metaParts = [
+    esc(r.priceTotal),
+    r.poiDistanceMeters != null ? `${esc(formatPoiDistance(r.poiDistanceMeters) || '')} from POI` : null,
+    `${r.bedrooms ?? '?'}BR ${r.beds ?? '?'}beds`,
+    esc(r.bedSetup.substring(0, 60)),
+  ].filter(Boolean);
   const reqDots = r.requirements.map(req =>
     `<span class="req-dot status-${req.status}" title="${esc(req.requirement)}: ${req.status}"></span>`
   ).join('');
@@ -419,7 +454,7 @@ function heroCard(r: ListingRow): string {
       <div class="hero-body">
         <div class="hero-badges"><span class="score-badge">${r.fitScore}</span><span class="tier-badge tier-${r.tier}">${r.tier.replace('_', ' ')}</span></div>
         <h3><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.title)}</a></h3>
-        <div class="hero-meta">${esc(r.priceTotal)} · ${r.bedrooms ?? '?'}BR ${r.beds ?? '?'}beds · ${esc(r.bedSetup.substring(0, 60))}</div>
+        <div class="hero-meta">${metaParts.join(' · ')}</div>
         <p class="hero-summary">${esc(r.summary.substring(0, 160))}${r.summary.length > 160 ? '…' : ''}</p>
         <div class="req-dots">${reqDots}</div>
       </div>
@@ -839,6 +874,7 @@ function getJS(): string {
 
     let tabTriage = '<div class="prop-info">'
       + '<div class="pi">Price: <b>' + esc(r.priceTotal) + '</b> (' + esc(r.pricePerNight) + '/n)</div>'
+      + (r.poiDistanceMeters != null ? '<div class="pi">POI distance: <b>' + esc(formatPoiDistance(r.poiDistanceMeters) || '') + '</b></div>' : '')
       + (r.bedrooms != null ? '<div class="pi">Bedrooms: <b>' + r.bedrooms + '</b></div>' : '')
       + (r.beds != null ? '<div class="pi">Beds: <b>' + r.beds + '</b></div>' : '')
       + (r.bathrooms != null ? '<div class="pi">Baths: <b>' + r.bathrooms + '</b></div>' : '')
@@ -1124,6 +1160,17 @@ function getJS(): string {
       maxZoom: 19
     }).addTo(map);
 
+    if (REPORT_POI) {
+      const poiMarker = L.circleMarker([REPORT_POI.lat, REPORT_POI.lng], {
+        radius: 8,
+        color: '#f97316',
+        weight: 2,
+        fillColor: '#fb923c',
+        fillOpacity: 0.9,
+      }).addTo(map);
+      poiMarker.bindTooltip('POI', { direction: 'top', offset: [0, -8] });
+    }
+
     const bounds = [];
     withCoords.forEach(r => {
       const photo = r.photos[0] || '';
@@ -1144,6 +1191,10 @@ function getJS(): string {
       markers[r.id] = { marker: marker, data: r };
       bounds.push([r.lat, r.lng]);
     });
+
+    if (REPORT_POI) {
+      bounds.push([REPORT_POI.lat, REPORT_POI.lng]);
+    }
 
     if (bounds.length > 0) {
       map.fitBounds(bounds, { padding: [30, 30] });

@@ -1,35 +1,13 @@
-import type { SearchResult } from '@/types';
+import type { PriceDisplayMode, SearchResult } from '@/types';
+export type { PriceDisplayInfo } from './pricing';
+export {
+  currencySymbol,
+  formatAmount,
+  getNightCount,
+  getPriceDisplayInfo,
+} from './pricing';
 
-export type PriceDisplay = 'perNight' | 'total';
-
-function currencySymbol(code: string): string {
-  if (code === 'USD') return '$';
-  if (code === 'EUR') return '\u20AC';
-  if (code === 'GBP') return '\u00A3';
-  return code + '\u00A0';
-}
-
-export function formatPrice(
-  result: SearchResult,
-  mode: PriceDisplay,
-): string {
-  if (mode === 'total' && result.totalPrice) {
-    return `${currencySymbol(result.totalPrice.currency)}${Math.round(result.totalPrice.amount)}`;
-  }
-  if (result.price) {
-    return `${currencySymbol(result.price.currency)}${Math.round(result.price.amount)}`;
-  }
-  return '?';
-}
-
-export function formatPriceLabel(
-  result: SearchResult,
-  mode: PriceDisplay,
-): string {
-  const price = formatPrice(result, mode);
-  if (price === '?') return price;
-  return mode === 'total' ? price : `${price} per night`;
-}
+export type PriceDisplay = PriceDisplayMode;
 
 export function formatRating(result: SearchResult): string {
   if (result.rating == null) return '';

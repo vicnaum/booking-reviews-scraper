@@ -92,6 +92,14 @@ export interface PropertyInfo {
   status: string;
 }
 
+export interface AirbnbReviewScrapeProgress {
+  currentPage: number;
+  totalPages?: number;
+  offset: number;
+  totalReviewsSoFar: number;
+  reportedReviewCount?: number | null;
+}
+
 /**
  * Make HTTP request with retry logic and proxy support using Fetch
  */
@@ -227,11 +235,21 @@ function outputFileExists(inputFileName: string, outputDir: string = OUTPUT_DIR)
 /**
  * Fetch reviews for a single property with pagination
  */
-export async function fetchPropertyReviews(apiKey: string, property: PropertyInfo): Promise<AirBnBReview[]> {
+export async function fetchPropertyReviews(
+  apiKey: string,
+  property: PropertyInfo,
+  onProgress?: (progress: AirbnbReviewScrapeProgress) => void | Promise<void>,
+): Promise<AirBnBReview[]> {
   const allReviews: AirBnBReview[] = [];
   const globalId = Buffer.from(`StayListing:${property.id}`).toString('base64');
   let offset = 0;
   const limit = 50;
+  const reportedReviewCount = (() => {
+    const parsed = Number(String(property.review_count || '').replace(/[^0-9.]/g, ''));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  })();
+  const totalPages =
+    reportedReviewCount != null ? Math.max(1, Math.ceil(reportedReviewCount / limit)) : undefined;
   
   while (true) {
     try {
@@ -242,6 +260,13 @@ export async function fetchPropertyReviews(apiKey: string, property: PropertyInf
       }
       
       allReviews.push(...reviews);
+      await onProgress?.({
+        currentPage: Math.floor(offset / limit) + 1,
+        totalPages,
+        offset,
+        totalReviewsSoFar: allReviews.length,
+        reportedReviewCount,
+      });
       offset += limit;
       
       if (allReviews.length > 0 && allReviews.length % 100 === 0) {

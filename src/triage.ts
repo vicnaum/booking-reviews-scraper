@@ -167,6 +167,7 @@ function trimListingData(listing: any): any {
     'host', 'rating', 'reviewCount', 'subRatings', 'capacity', 'highlights',
     'houseRules', 'cancellationPolicy', 'address', 'ratingText', 'stars',
     'rooms', 'url', 'id',
+    'poi', 'poiDistanceMeters',
   ];
 
   for (const key of keepFields) {

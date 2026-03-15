@@ -9,8 +9,8 @@ import {
 } from 'react';
 import {
   Circle,
-  CircleMarker,
   MapContainer,
+  Marker,
   Rectangle,
   TileLayer,
   Tooltip,
@@ -18,7 +18,7 @@ import {
   useMapEvents,
 } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
-import type { LatLng, Map as LeafletMap } from 'leaflet';
+import L, { type LatLng, type Map as LeafletMap } from 'leaflet';
 import { useSearchStore } from '@/hooks/useSearchStore';
 import PriceMarker from './PriceMarker';
 import type { BoundingBox, CircleFilter, MapPoint } from '@/types';
@@ -27,6 +27,20 @@ const QUICK_SEARCH_DEBOUNCE_MS = 1000;
 const MIN_SEARCH_ZOOM = 12;
 const MIN_RECTANGLE_SIZE = 0.0005;
 const MIN_CIRCLE_RADIUS_METERS = 50;
+
+const poiIcon = L.divIcon({
+  className: '',
+  html: `<div style="
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: #fb923c;
+    border: 3px solid #f97316;
+    box-shadow: 0 0 0 4px rgba(249,115,22,0.22), 0 10px 22px rgba(0,0,0,0.28);
+  "></div>`,
+  iconSize: [18, 18],
+  iconAnchor: [9, 9],
+});
 
 function getBboxFromMap(map: LeafletMap): BoundingBox {
   const bounds = map.getBounds();
@@ -466,20 +480,15 @@ function DrawingTools({
         />
       )}
       {poi && (
-        <CircleMarker
-          center={[poi.lat, poi.lng]}
-          radius={8}
-          pathOptions={{
-            color: '#f97316',
-            fillColor: '#fb923c',
-            fillOpacity: 1,
-            weight: 3,
-          }}
+        <Marker
+          position={[poi.lat, poi.lng]}
+          icon={poiIcon}
+          zIndexOffset={5000}
         >
           <Tooltip direction="top" offset={[0, -8]}>
             Point of interest
           </Tooltip>
-        </CircleMarker>
+        </Marker>
       )}
       {poi && mouseDistance && (
         <div

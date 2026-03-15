@@ -7,7 +7,9 @@ import type {
   BoundingBox,
   CircleFilter,
   FullSearchRequest,
+  PriceDisplayMode,
   SearchJobState,
+  SearchPricing,
   SearchResult,
 } from '../types.js';
 
@@ -17,6 +19,7 @@ export interface PersistedSearchFilters {
   minRating?: number;
   minBedrooms?: number;
   minBeds?: number;
+  priceDisplay?: PriceDisplayMode;
   priceMin?: number;
   priceMax?: number;
   propertyType?: string;
@@ -33,8 +36,7 @@ interface PersistableSearchResult {
   url: string;
   rating: number | null;
   reviewCount: number;
-  price: { amount: number; currency: string; period: 'night' } | null;
-  totalPrice: { amount: number; currency: string } | null;
+  pricing: SearchPricing | null;
   coordinates: { lat: number; lng: number } | null;
   propertyType: string | null;
   photoUrl: string | null;
@@ -85,6 +87,32 @@ function asCircleFilter(value: unknown): CircleFilter | undefined {
   };
 }
 
+function asSearchPricing(value: unknown): SearchPricing | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const pricing = value as Record<string, unknown>;
+  const nightly =
+    pricing.nightly && typeof pricing.nightly === 'object' && !Array.isArray(pricing.nightly)
+      ? pricing.nightly as SearchPricing['nightly']
+      : null;
+  const total =
+    pricing.total && typeof pricing.total === 'object' && !Array.isArray(pricing.total)
+      ? pricing.total as SearchPricing['total']
+      : null;
+  const display =
+    pricing.display && typeof pricing.display === 'object' && !Array.isArray(pricing.display)
+      ? pricing.display as SearchPricing['display']
+      : null;
+
+  if (!nightly && !total && !display) {
+    return null;
+  }
+
+  return { nightly, total, display };
+}
+
 export function buildSearchFilters(
   request: FullSearchRequest,
 ): Prisma.InputJsonValue {
@@ -96,6 +124,7 @@ export function buildSearchFilters(
   if (request.minRating != null) filters.minRating = request.minRating;
   if (request.minBedrooms != null) filters.minBedrooms = request.minBedrooms;
   if (request.minBeds != null) filters.minBeds = request.minBeds;
+  if (request.priceDisplay) filters.priceDisplay = request.priceDisplay;
   if (request.priceMin != null) filters.priceMin = request.priceMin;
   if (request.priceMax != null) filters.priceMax = request.priceMax;
   if (request.propertyType) filters.propertyType = request.propertyType;
@@ -123,6 +152,10 @@ export function parseSearchFilters(
     minRating: asNumber(filters.minRating),
     minBedrooms: asNumber(filters.minBedrooms),
     minBeds: asNumber(filters.minBeds),
+    priceDisplay:
+      filters.priceDisplay === 'perNight' || filters.priceDisplay === 'total'
+        ? filters.priceDisplay
+        : undefined,
     priceMin: asNumber(filters.priceMin),
     priceMax: asNumber(filters.priceMax),
     propertyType: asString(filters.propertyType),
@@ -165,11 +198,14 @@ export function buildCliSearchParams(job: SearchJobModel) {
     checkout: job.checkout ?? undefined,
     adults: job.adults,
     currency: job.currency,
+    priceDisplay: filters.priceDisplay,
     minRating: filters.minRating,
     minBedrooms: filters.minBedrooms,
     minBeds: filters.minBeds,
-    priceMin: filters.priceMin,
-    priceMax: filters.priceMax,
+    priceMin:
+      filters.priceDisplay === 'total' ? undefined : filters.priceMin,
+    priceMax:
+      filters.priceDisplay === 'total' ? undefined : filters.priceMax,
     propertyType: filters.propertyType,
     exhaustive: filters.exhaustive ?? true,
   };
@@ -203,10 +239,14 @@ export function toSearchResultRecord(
     url: result.url,
     rating: result.rating,
     reviewCount: result.reviewCount,
-    priceAmount: result.price?.amount ?? null,
+    priceAmount: result.pricing?.nightly?.amount ?? null,
     priceCurrency:
-      result.price?.currency ?? result.totalPrice?.currency ?? null,
-    totalPrice: result.totalPrice?.amount ?? null,
+      result.pricing?.nightly?.currency
+      ?? result.pricing?.total?.currency
+      ?? result.pricing?.display?.currency
+      ?? null,
+    totalPrice: result.pricing?.total?.amount ?? null,
+    pricing: result.pricing as unknown as Prisma.InputJsonValue,
     lat: result.coordinates?.lat ?? null,
     lng: result.coordinates?.lng ?? null,
     propertyType: result.propertyType,
@@ -224,6 +264,32 @@ export function toSearchResultRecord(
 }
 
 export function toWebSearchResult(row: SearchResultModel): SearchResult {
+  const pricing =
+    asSearchPricing((row as SearchResultModel & { pricing?: Prisma.JsonValue | null }).pricing)
+    ?? (
+      row.priceAmount != null || row.totalPrice != null
+        ? {
+            nightly:
+              row.priceAmount != null && row.priceCurrency
+                ? {
+                    amount: row.priceAmount,
+                    currency: row.priceCurrency,
+                    source: 'upstream' as const,
+                  }
+                : null,
+            total:
+              row.totalPrice != null && row.priceCurrency
+                ? {
+                    amount: row.totalPrice,
+                    currency: row.priceCurrency,
+                    source: 'upstream' as const,
+                  }
+                : null,
+            display: null,
+          }
+        : null
+    );
+
   return {
     id: row.listingId,
     platform: row.platform,
@@ -231,21 +297,7 @@ export function toWebSearchResult(row: SearchResultModel): SearchResult {
     url: row.url,
     rating: row.rating,
     reviewCount: row.reviewCount,
-    price:
-      row.priceAmount != null && row.priceCurrency
-        ? {
-            amount: row.priceAmount,
-            currency: row.priceCurrency,
-            period: 'night',
-          }
-        : null,
-    totalPrice:
-      row.totalPrice != null && row.priceCurrency
-        ? {
-            amount: row.totalPrice,
-            currency: row.priceCurrency,
-          }
-        : null,
+    pricing,
     coordinates:
       row.lat != null && row.lng != null
         ? { lat: row.lat, lng: row.lng }

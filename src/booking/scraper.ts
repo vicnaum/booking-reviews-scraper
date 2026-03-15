@@ -72,6 +72,14 @@ export interface HotelInfo {
   url: string;
 }
 
+export interface BookingReviewScrapeProgress {
+  currentPage: number;
+  totalPages: number;
+  offset: number;
+  maxOffset: number;
+  totalReviewsSoFar: number;
+}
+
 /**
  * Make HTTP request with retry logic and proxy support using Fetch
  */
@@ -194,7 +202,10 @@ function outputFileExists(inputFileName: string, outputDir: string = OUTPUT_DIR)
 /**
  * Scrape reviews for a single hotel
  */
-export async function scrapeHotelReviews(hotelInfo: HotelInfo): Promise<Review[]> {
+export async function scrapeHotelReviews(
+  hotelInfo: HotelInfo,
+  onProgress?: (progress: BookingReviewScrapeProgress) => void | Promise<void>,
+): Promise<Review[]> {
   console.log(`Starting scraper for hotel: ${hotelInfo.hotel_name} (${hotelInfo.country_code})...`);
 
   try {
@@ -207,6 +218,7 @@ export async function scrapeHotelReviews(hotelInfo: HotelInfo): Promise<Review[]
     }
 
     const allReviews: Review[] = [];
+    const totalPages = Math.floor(maxOffset / 10) + 1;
 
     // 2. Loop through each page of reviews
     for (let offset = 0; offset <= maxOffset; offset += 10) {
@@ -221,6 +233,13 @@ export async function scrapeHotelReviews(hotelInfo: HotelInfo): Promise<Review[]
       const response = await makeRequest(pageUrl.href);
       const reviewsOnPage = parseReviewsFromHtml(response.data, hotelInfo.hotel_name);
       allReviews.push(...reviewsOnPage);
+      await onProgress?.({
+        currentPage: offset / 10 + 1,
+        totalPages,
+        offset,
+        maxOffset,
+        totalReviewsSoFar: allReviews.length,
+      });
 
       // Be a good internet citizen: add a small delay between requests
       await new Promise(resolve => setTimeout(resolve, 500)); // 0.5-second delay

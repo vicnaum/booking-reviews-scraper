@@ -18,7 +18,7 @@ trap cleanup EXIT INT TERM
 docker compose up -d
 npm run db:push
 
-npm run worker > ./.worker-dev.log 2>&1 &
+npm run worker:dev > ./.worker-dev.log 2>&1 &
 WORKER_PID=$!
 
 echo "Worker started as PID $WORKER_PID"

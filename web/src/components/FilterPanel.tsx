@@ -1,7 +1,8 @@
 'use client';
 
-import { useCallback, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useRef, type KeyboardEvent } from 'react';
 import { useSearchStore } from '@/hooks/useSearchStore';
+import { currencySymbol, getNightCount } from '@/lib/format';
 import type { PriceDisplay } from '@/lib/format';
 
 const PROPERTY_TYPES = [
@@ -24,18 +25,26 @@ const smallButtonClassName =
 const modeButtonClassName =
   'rounded-xl px-3 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-35';
 
+const fieldLabelClassName =
+  'px-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500';
+
+const FILTER_INPUT_DEBOUNCE_MS = 450;
+const MIN_LIVE_SEARCH_ZOOM = 12;
+
+function roundPriceValue(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
 export default function FilterPanel() {
   const checkin = useSearchStore((s) => s.checkin);
   const checkout = useSearchStore((s) => s.checkout);
   const adults = useSearchStore((s) => s.adults);
   const priceMin = useSearchStore((s) => s.priceMin);
   const priceMax = useSearchStore((s) => s.priceMax);
-  const minRating = useSearchStore((s) => s.minRating);
   const minBedrooms = useSearchStore((s) => s.minBedrooms);
   const minBeds = useSearchStore((s) => s.minBeds);
   const propertyType = useSearchStore((s) => s.propertyType);
   const currency = useSearchStore((s) => s.currency);
-  const platform = useSearchStore((s) => s.platform);
   const priceDisplay = useSearchStore((s) => s.priceDisplay);
   const hasInitializedSearch = useSearchStore((s) => s.hasInitializedSearch);
   const autoUpdate = useSearchStore((s) => s.autoUpdate);
@@ -43,8 +52,6 @@ export default function FilterPanel() {
   const circleFilter = useSearchStore((s) => s.circleFilter);
   const poi = useSearchStore((s) => s.poi);
   const pendingViewportSearch = useSearchStore((s) => s.pendingViewportSearch);
-  const airbnbFilters = useSearchStore((s) => s.airbnbFilters);
-  const bookingFilters = useSearchStore((s) => s.bookingFilters);
   const viewportBbox = useSearchStore((s) => s.viewportBbox);
   const userBbox = useSearchStore((s) => s.userBbox);
   const zoom = useSearchStore((s) => s.zoom);
@@ -64,12 +71,15 @@ export default function FilterPanel() {
   const setFullSearchMode = useSearchStore((s) => s.setFullSearchMode);
   const triggerQuickSearch = useSearchStore((s) => s.triggerQuickSearch);
   const startFullSearch = useSearchStore((s) => s.startFullSearch);
+  const commitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const currencyPrefix = currencySymbol(currency);
 
   const hasRectangleArea = !!userBbox && !circleFilter;
   const hasCircleArea = !!circleFilter && !!userBbox;
   const hasWindowArea = !!viewportBbox && zoom >= 12;
   const canDrawArea = hasInitializedSearch && !activeJobId;
   const canTogglePoi = hasInitializedSearch;
+  const hasLockedLiveArea = !!userBbox;
   const canStartFullSearch =
     hasInitializedSearch &&
     !activeJobId &&
@@ -91,49 +101,161 @@ export default function FilterPanel() {
         : hasCircleArea
           ? 'Use the drawn circle.'
           : 'Draw a circle first.';
+  const canRunManualMapUpdate =
+    hasInitializedSearch &&
+    !activeJobId &&
+    !hasLockedLiveArea &&
+    !!viewportBbox &&
+    zoom >= MIN_LIVE_SEARCH_ZOOM &&
+    pendingViewportSearch;
+  const liveMapButtonLabel = hasLockedLiveArea
+    ? 'Area locked'
+    : zoom < MIN_LIVE_SEARCH_ZOOM
+      ? 'Zoom in to update'
+      : pendingViewportSearch
+        ? 'Update map'
+        : 'Map up to date';
+  const liveMapHint = hasLockedLiveArea
+    ? circleFilter
+      ? 'Live map updates follow the drawn circle. Clear or redraw it to change the search area.'
+      : 'Live map updates follow the drawn rectangle. Clear or redraw it to change the search area.'
+    : zoom < MIN_LIVE_SEARCH_ZOOM
+      ? 'Zoom in a bit more before panning the live map.'
+      : pendingViewportSearch
+        ? 'The map window changed. Click update or turn on auto-update.'
+        : 'The live map window is current.';
+  const nights = getNightCount(checkin, checkout);
 
   const update = useCallback(
     (key: string, value: unknown) => {
       setFilter(key, value);
-      triggerQuickSearch();
+      triggerQuickSearch({ force: true });
     },
     [setFilter, triggerQuickSearch],
   );
 
-  const updateSilent = useCallback(
+  const scheduleCommit = useCallback(() => {
+    if (commitTimeoutRef.current) {
+      clearTimeout(commitTimeoutRef.current);
+    }
+
+    commitTimeoutRef.current = setTimeout(() => {
+      void triggerQuickSearch({ force: true });
+    }, FILTER_INPUT_DEBOUNCE_MS);
+  }, [triggerQuickSearch]);
+
+  const updateDebounced = useCallback(
     (key: string, value: unknown) => {
       setFilter(key, value);
+      scheduleCommit();
     },
-    [setFilter],
+    [scheduleCommit, setFilter],
   );
 
   const commitSearch = useCallback(() => {
-    triggerQuickSearch();
+    if (commitTimeoutRef.current) {
+      clearTimeout(commitTimeoutRef.current);
+      commitTimeoutRef.current = null;
+    }
+    triggerQuickSearch({ force: true });
   }, [triggerQuickSearch]);
+
+  useEffect(() => {
+    return () => {
+      if (commitTimeoutRef.current) {
+        clearTimeout(commitTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const onEnter = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === 'Enter') {
-        triggerQuickSearch();
+        triggerQuickSearch({ force: true });
       }
     },
     [triggerQuickSearch],
   );
 
-  const updateAirbnb = useCallback(
-    (key: string, value: unknown) => {
-      setFilter('airbnbFilters', { ...airbnbFilters, [key]: value });
-      triggerQuickSearch();
+  const switchPriceDisplay = useCallback(
+    (mode: PriceDisplay) => {
+      if (mode === priceDisplay) {
+        return;
+      }
+
+      setFilter('priceDisplay', mode);
+
+      if (!nights || nights <= 0) {
+        return;
+      }
+
+      if (priceMin != null) {
+        setFilter(
+          'priceMin',
+          roundPriceValue(
+            priceDisplay === 'total' ? priceMin / nights : priceMin * nights,
+          ),
+        );
+      }
+
+      if (priceMax != null) {
+        setFilter(
+          'priceMax',
+          roundPriceValue(
+            priceDisplay === 'total' ? priceMax / nights : priceMax * nights,
+          ),
+        );
+      }
     },
-    [airbnbFilters, setFilter, triggerQuickSearch],
+    [nights, priceDisplay, priceMax, priceMin, setFilter],
   );
 
-  const updateBooking = useCallback(
-    (key: string, value: unknown) => {
-      setFilter('bookingFilters', { ...bookingFilters, [key]: value });
-      triggerQuickSearch();
+  const activateFullSearchMode = useCallback(
+    (mode: 'window' | 'rectangle' | 'circle') => {
+      setFullSearchMode(mode);
+
+      if (mode === 'window') {
+        setDrawMode(null);
+        return;
+      }
+
+      if (!canDrawArea) {
+        return;
+      }
+
+      if (mode === 'rectangle') {
+        if (hasRectangleArea) {
+          setDrawMode(null);
+          return;
+        }
+
+        setCircleFilter(null);
+        setUserBbox(null);
+        setPendingViewportSearch(false);
+        setDrawMode('rectangle');
+        return;
+      }
+
+      if (hasCircleArea) {
+        setDrawMode(null);
+        return;
+      }
+
+      setCircleFilter(null);
+      setUserBbox(null);
+      setPendingViewportSearch(false);
+      setDrawMode('circle');
     },
-    [bookingFilters, setFilter, triggerQuickSearch],
+    [
+      canDrawArea,
+      hasCircleArea,
+      hasRectangleArea,
+      setCircleFilter,
+      setDrawMode,
+      setFullSearchMode,
+      setPendingViewportSearch,
+      setUserBbox,
+    ],
   );
 
   return (
@@ -144,7 +266,7 @@ export default function FilterPanel() {
             <input
               type="date"
               value={checkin ?? ''}
-              onChange={(e) => updateSilent('checkin', e.target.value || null)}
+              onChange={(e) => updateDebounced('checkin', e.target.value || null)}
               onBlur={commitSearch}
               onKeyDown={onEnter}
               className={`${fieldClassName} w-[11rem]`}
@@ -152,7 +274,7 @@ export default function FilterPanel() {
             <input
               type="date"
               value={checkout ?? ''}
-              onChange={(e) => updateSilent('checkout', e.target.value || null)}
+              onChange={(e) => updateDebounced('checkout', e.target.value || null)}
               onBlur={commitSearch}
               onKeyDown={onEnter}
               className={`${fieldClassName} w-[11rem]`}
@@ -179,90 +301,103 @@ export default function FilterPanel() {
           </div>
 
           <div className={groupClassName}>
-            <input
-              type="number"
-              min={0}
-              value={minBedrooms ?? ''}
-              onChange={(e) =>
-                updateSilent(
-                  'minBedrooms',
-                  e.target.value ? Number(e.target.value) : null,
-                )
-              }
-              onBlur={commitSearch}
-              onKeyDown={onEnter}
-              placeholder="Min bedrooms"
-              className={`${fieldClassName} w-36`}
-            />
-            <input
-              type="number"
-              min={0}
-              value={minBeds ?? ''}
-              onChange={(e) =>
-                updateSilent(
-                  'minBeds',
-                  e.target.value ? Number(e.target.value) : null,
-                )
-              }
-              onBlur={commitSearch}
-              onKeyDown={onEnter}
-              placeholder="Min beds"
-              className={`${fieldClassName} w-32`}
-            />
-            <input
-              type="number"
-              value={priceMin ?? ''}
-              onChange={(e) =>
-                updateSilent(
-                  'priceMin',
-                  e.target.value ? Number(e.target.value) : null,
-                )
-              }
-              onBlur={commitSearch}
-              onKeyDown={onEnter}
-              placeholder={`Min ${currency === 'EUR' ? '\u20AC' : currency === 'GBP' ? '\u00A3' : '$'}`}
-              className={`${fieldClassName} w-[7.5rem]`}
-            />
-            <input
-              type="number"
-              value={priceMax ?? ''}
-              onChange={(e) =>
-                updateSilent(
-                  'priceMax',
-                  e.target.value ? Number(e.target.value) : null,
-                )
-              }
-              onBlur={commitSearch}
-              onKeyDown={onEnter}
-              placeholder={`Max ${currency === 'EUR' ? '\u20AC' : currency === 'GBP' ? '\u00A3' : '$'}`}
-              className={`${fieldClassName} w-[7.5rem]`}
-            />
+            <div className="flex flex-col gap-1">
+              <label htmlFor="map-min-bedrooms" className={fieldLabelClassName}>
+                Min bedrooms
+              </label>
+              <input
+                id="map-min-bedrooms"
+                type="number"
+                min={0}
+                value={minBedrooms ?? ''}
+                onChange={(e) =>
+                  updateDebounced(
+                    'minBedrooms',
+                    e.target.value ? Number(e.target.value) : null,
+                  )
+                }
+                onBlur={commitSearch}
+                onKeyDown={onEnter}
+                placeholder="Any"
+                className={`${fieldClassName} w-36`}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="map-min-beds" className={fieldLabelClassName}>
+                Min beds
+              </label>
+              <input
+                id="map-min-beds"
+                type="number"
+                min={0}
+                value={minBeds ?? ''}
+                onChange={(e) =>
+                  updateDebounced(
+                    'minBeds',
+                    e.target.value ? Number(e.target.value) : null,
+                  )
+                }
+                onBlur={commitSearch}
+                onKeyDown={onEnter}
+                placeholder="Any"
+                className={`${fieldClassName} w-32`}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="map-price-min" className={fieldLabelClassName}>
+                {priceDisplay === 'total' ? 'Min total' : 'Min nightly'}
+              </label>
+              <div className="relative">
+                <span className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-sm font-semibold text-stone-400">
+                  {currencyPrefix}
+                </span>
+                <input
+                  id="map-price-min"
+                  type="number"
+                  step="0.01"
+                  value={priceMin ?? ''}
+                  onChange={(e) =>
+                    updateDebounced(
+                      'priceMin',
+                      e.target.value ? Number(e.target.value) : null,
+                    )
+                  }
+                  onBlur={commitSearch}
+                  onKeyDown={onEnter}
+                  placeholder="Min"
+                  className={`${fieldClassName} w-[7.5rem] pl-8`}
+                />
+              </div>
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="map-price-max" className={fieldLabelClassName}>
+                {priceDisplay === 'total' ? 'Max total' : 'Max nightly'}
+              </label>
+              <div className="relative">
+                <span className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-sm font-semibold text-stone-400">
+                  {currencyPrefix}
+                </span>
+                <input
+                  id="map-price-max"
+                  type="number"
+                  step="0.01"
+                  value={priceMax ?? ''}
+                  onChange={(e) =>
+                    updateDebounced(
+                      'priceMax',
+                      e.target.value ? Number(e.target.value) : null,
+                    )
+                  }
+                  onBlur={commitSearch}
+                  onKeyDown={onEnter}
+                  placeholder="Max"
+                  className={`${fieldClassName} w-[7.5rem] pl-8`}
+                />
+              </div>
+            </div>
           </div>
 
           <div className={groupClassName}>
-            <select
-              value={minRating ?? ''}
-              onChange={(e) =>
-                update('minRating', e.target.value ? Number(e.target.value) : null)
-              }
-              className={`${fieldClassName} w-36`}
-            >
-              <option value="">Any rating</option>
-              {platform === 'airbnb' ? (
-                <>
-                  <option value="4.5">4.5+</option>
-                  <option value="4.7">4.7+</option>
-                  <option value="4.9">4.9+</option>
-                </>
-              ) : (
-                <>
-                  <option value="7">7+</option>
-                  <option value="8">8+</option>
-                  <option value="9">9+</option>
-                </>
-              )}
-            </select>
-
             <select
               value={propertyType ?? ''}
               onChange={(e) => update('propertyType', e.target.value || null)}
@@ -289,7 +424,7 @@ export default function FilterPanel() {
               {(['total', 'perNight'] as PriceDisplay[]).map((mode) => (
                 <button
                   key={mode}
-                  onClick={() => setFilter('priceDisplay', mode)}
+                  onClick={() => switchPriceDisplay(mode)}
                   className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
                     priceDisplay === mode
                       ? 'bg-white text-neutral-950 shadow-sm'
@@ -300,52 +435,6 @@ export default function FilterPanel() {
                 </button>
               ))}
             </div>
-          </div>
-
-          <div className={groupClassName}>
-            {platform === 'airbnb' && (
-              <>
-                <label className="flex items-center gap-2 rounded-xl px-2 py-1 text-xs font-medium text-stone-300">
-                  <input
-                    type="checkbox"
-                    checked={airbnbFilters.superhost ?? false}
-                    onChange={(e) =>
-                      updateAirbnb('superhost', e.target.checked || undefined)
-                    }
-                    className="accent-[#ff6b5f]"
-                  />
-                  Superhost
-                </label>
-                <label className="flex items-center gap-2 rounded-xl px-2 py-1 text-xs font-medium text-stone-300">
-                  <input
-                    type="checkbox"
-                    checked={airbnbFilters.instantBook ?? false}
-                    onChange={(e) =>
-                      updateAirbnb('instantBook', e.target.checked || undefined)
-                    }
-                    className="accent-[#ff6b5f]"
-                  />
-                  Instant Book
-                </label>
-              </>
-            )}
-
-            {platform === 'booking' && (
-              <label className="flex items-center gap-2 rounded-xl px-2 py-1 text-xs font-medium text-stone-300">
-                <input
-                  type="checkbox"
-                  checked={bookingFilters.freeCancellation ?? false}
-                  onChange={(e) =>
-                    updateBooking(
-                      'freeCancellation',
-                      e.target.checked || undefined,
-                    )
-                  }
-                  className="accent-[#2870ff]"
-                />
-                Free cancellation
-              </label>
-            )}
           </div>
         </div>
 
@@ -424,24 +513,22 @@ export default function FilterPanel() {
                 onChange={(e) => setAutoUpdate(e.target.checked)}
                 className="accent-[#ff6b5f]"
               />
-              Auto-update
+              Auto-update window
             </label>
             {!autoUpdate && (
               <button
                 onClick={() => {
                   void triggerQuickSearch({ force: true });
                 }}
-                disabled={
-                  !hasInitializedSearch ||
-                  !pendingViewportSearch ||
-                  !!activeJobId ||
-                  (!userBbox && !viewportBbox)
-                }
+                disabled={!canRunManualMapUpdate}
                 className="rounded-2xl border border-[#f4b56a]/30 bg-[#3a2917] px-4 py-2.5 text-xs font-semibold text-[#ffe0b0] transition hover:brightness-110 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:bg-white/[0.03] disabled:text-stone-600"
               >
-                {pendingViewportSearch ? 'Update map' : 'Map up to date'}
+                {liveMapButtonLabel}
               </button>
             )}
+            <p className="ml-1 text-xs text-stone-500">
+              {liveMapHint}
+            </p>
           </div>
 
           <div className="ml-auto min-w-[320px] flex-1 rounded-2xl border border-emerald-300/15 bg-[linear-gradient(180deg,rgba(17,44,31,0.72),rgba(11,26,20,0.72))] px-3 py-3 shadow-[0_16px_40px_rgba(8,56,37,0.18)]">
@@ -460,7 +547,8 @@ export default function FilterPanel() {
               <div className="flex flex-wrap items-center gap-2">
                 <div className="flex rounded-xl border border-white/10 bg-black/20 p-1">
                   <button
-                    onClick={() => setFullSearchMode('window')}
+                    onClick={() => activateFullSearchMode('window')}
+                    disabled={!hasInitializedSearch || !!activeJobId}
                     className={`${modeButtonClassName} ${
                       fullSearchMode === 'window'
                         ? 'bg-white text-neutral-950 shadow-sm'
@@ -470,8 +558,8 @@ export default function FilterPanel() {
                     Window
                   </button>
                   <button
-                    onClick={() => setFullSearchMode('rectangle')}
-                    disabled={!hasRectangleArea}
+                    onClick={() => activateFullSearchMode('rectangle')}
+                    disabled={!hasInitializedSearch || !!activeJobId}
                     className={`${modeButtonClassName} ${
                       fullSearchMode === 'rectangle'
                         ? 'bg-white text-neutral-950 shadow-sm'
@@ -481,8 +569,8 @@ export default function FilterPanel() {
                     Rectangle
                   </button>
                   <button
-                    onClick={() => setFullSearchMode('circle')}
-                    disabled={!hasCircleArea}
+                    onClick={() => activateFullSearchMode('circle')}
+                    disabled={!hasInitializedSearch || !!activeJobId}
                     className={`${modeButtonClassName} ${
                       fullSearchMode === 'circle'
                         ? 'bg-white text-neutral-950 shadow-sm'
@@ -494,11 +582,18 @@ export default function FilterPanel() {
                 </div>
 
                 <button
-                  onClick={() => {
-                    void startFullSearch();
+                  onClick={async () => {
+                    const jobId = await startFullSearch();
+                    if (jobId) {
+                      window.location.assign(`/jobs/${jobId}`);
+                    }
                   }}
                   disabled={!canStartFullSearch}
-                  className="rounded-2xl border border-emerald-300/20 bg-[linear-gradient(135deg,rgba(15,76,52,0.95),rgba(28,108,76,0.95))] px-4 py-2.5 text-xs font-semibold text-emerald-100 shadow-[0_12px_30px_rgba(8,56,37,0.28)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:bg-white/[0.03] disabled:text-stone-600 disabled:shadow-none"
+                  className={`rounded-2xl border px-4 py-2.5 text-xs font-semibold transition ${
+                    activeJobId
+                      ? 'cursor-wait border-emerald-300/20 bg-[linear-gradient(135deg,rgba(15,76,52,0.95),rgba(28,108,76,0.95))] text-emerald-100 opacity-85 shadow-[0_12px_30px_rgba(8,56,37,0.22)]'
+                      : 'border-emerald-300/20 bg-[linear-gradient(135deg,rgba(15,76,52,0.95),rgba(28,108,76,0.95))] text-emerald-100 shadow-[0_12px_30px_rgba(8,56,37,0.28)] hover:brightness-110 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:bg-white/[0.03] disabled:text-stone-600 disabled:shadow-none'
+                  }`}
                 >
                   {activeJobId ? 'Full search running...' : 'Run full search'}
                 </button>

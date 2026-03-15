@@ -11,8 +11,8 @@ import 'dotenv/config';
 import * as fs from 'fs';
 import * as path from 'path';
 import fetch from 'node-fetch';
-import { getApiKey, makeRequest } from './scraper.js';
-import { getSectionsApiUrl, getListingHash, isStaleHash, refreshHashesViaPlaywright, invalidateSessionCache } from './hash-manager.js';
+import { BROWSER_HEADERS, getApiKey, makeRequest } from './scraper.js';
+import { getListingHash, isStaleHash, refreshHashesViaPlaywright, invalidateSessionCache } from './hash-manager.js';
 const OUTPUT_DIR = 'data/airbnb/output';
 
 const API_HEADERS = {
@@ -127,6 +127,120 @@ function stripHtml(html: string): string {
     .trim();
 }
 
+interface AirbnbPdpPageData {
+  sections: any[];
+  metadata: any;
+}
+
+export function extractPdpSectionsFromHtml(html: string): AirbnbPdpPageData | null {
+  const scriptMatches = html.matchAll(/<script[^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/g);
+
+  for (const match of scriptMatches) {
+    const jsonText = match[1];
+    if (!jsonText.includes('niobeClientData') || !jsonText.includes('StaysPdpSections:')) {
+      continue;
+    }
+
+    try {
+      const parsed = JSON.parse(jsonText);
+      const niobeClientData = parsed?.niobeClientData;
+      if (!Array.isArray(niobeClientData)) {
+        continue;
+      }
+
+      const entry = niobeClientData.find((item: any) => (
+        Array.isArray(item)
+        && typeof item[0] === 'string'
+        && item[0].startsWith('StaysPdpSections:')
+      ));
+
+      const page = entry?.[1]?.data?.presentation?.stayProductDetailPage;
+      const sections = page?.sections?.sections;
+      if (!Array.isArray(sections) || sections.length === 0) {
+        continue;
+      }
+
+      return {
+        sections,
+        metadata: page?.sections?.metadata || {},
+      };
+    } catch {
+      // Ignore malformed script blocks and continue scanning.
+    }
+  }
+
+  return null;
+}
+
+function buildListingPageUrl(
+  roomId: string,
+  options?: { checkIn?: string; checkOut?: string; adults?: number },
+): string {
+  const url = new URL(`https://www.airbnb.com/rooms/${roomId}`);
+  if (options?.checkIn) {
+    url.searchParams.set('check_in', options.checkIn);
+  }
+  if (options?.checkOut) {
+    url.searchParams.set('check_out', options.checkOut);
+  }
+  if (options?.adults) {
+    url.searchParams.set('adults', String(options.adults));
+  }
+  return url.toString();
+}
+
+async function fetchListingPageData(
+  roomId: string,
+  options?: { checkIn?: string; checkOut?: string; adults?: number },
+): Promise<AirbnbPdpPageData> {
+  const pageUrl = buildListingPageUrl(roomId, options);
+  const response = await makeRequest(pageUrl, {
+    headers: {
+      ...BROWSER_HEADERS,
+      'User-Agent': API_HEADERS['User-Agent'],
+    },
+  });
+
+  const extracted = extractPdpSectionsFromHtml(response.data);
+  if (!extracted) {
+    throw new Error('Could not extract PDP sections from Airbnb listing HTML');
+  }
+
+  return extracted;
+}
+
+function buildListingDetails(
+  roomId: string,
+  parsed: Partial<AirbnbListingDetails>,
+): AirbnbListingDetails {
+  return {
+    id: roomId,
+    url: `https://www.airbnb.com/rooms/${roomId}`,
+    title: parsed.title || '',
+    description: parsed.description || '',
+    propertyType: parsed.propertyType || null,
+    coordinates: parsed.coordinates || null,
+    capacity: parsed.capacity || null,
+    bedrooms: parsed.bedrooms || null,
+    beds: parsed.beds || null,
+    bathrooms: parsed.bathrooms || null,
+    photos: parsed.photos || [],
+    amenities: parsed.amenities || [],
+    host: parsed.host || null,
+    houseRules: parsed.houseRules || [],
+    highlights: parsed.highlights || [],
+    rating: parsed.rating ?? null,
+    reviewCount: parsed.reviewCount ?? null,
+    subRatings: parsed.subRatings || null,
+    pricing: parsed.pricing || null,
+    checkIn: parsed.checkIn || null,
+    checkOut: parsed.checkOut || null,
+    cancellationPolicy: parsed.cancellationPolicy || null,
+    sleepingArrangements: parsed.sleepingArrangements || null,
+    scrapedAt: new Date().toISOString(),
+  };
+}
+
 // --- Parsing ---
 
 function parseSections(sections: any[], metadata: any): Partial<AirbnbListingDetails> {
@@ -143,6 +257,10 @@ function parseSections(sections: any[], metadata: any): Partial<AirbnbListingDet
         result.propertyType = item.title;
         break;
       }
+    }
+
+    if (!result.propertyType) {
+      result.propertyType = titleSection.shareSave?.embedData?.propertyType || null;
     }
   }
 
@@ -317,7 +435,8 @@ function parseSections(sections: any[], metadata: any): Partial<AirbnbListingDet
   }
 
   // Sleeping arrangements
-  const sleepingSection = findSection(sections, 'SLEEPING_ARRANGEMENT_DEFAULT');
+  const sleepingSection = findSection(sections, 'SLEEPING_ARRANGEMENT_DEFAULT')
+    || findSection(sections, 'SLEEPING_ARRANGEMENT_WITH_IMAGES');
   if (sleepingSection) {
     const details = sleepingSection.arrangementDetails || [];
     result.sleepingArrangements = details.map((d: any) => ({
@@ -378,6 +497,14 @@ export async function fetchListingDetails(
   roomId: string,
   options?: { checkIn?: string; checkOut?: string; adults?: number }
 ): Promise<AirbnbListingDetails> {
+  try {
+    const pageData = await fetchListingPageData(roomId, options);
+    const parsedFromHtml = parseSections(pageData.sections, pageData.metadata);
+    return buildListingDetails(roomId, parsedFromHtml);
+  } catch (htmlError: any) {
+    console.warn(`Warning: Airbnb listing HTML extraction failed for ${roomId}: ${htmlError.message}`);
+  }
+
   const globalId = Buffer.from(`StayListing:${roomId}`).toString('base64');
   const demandId = Buffer.from(`DemandStayListing:${roomId}`).toString('base64');
 
@@ -464,7 +591,7 @@ export async function fetchListingDetails(
       extensions: JSON.stringify(extensions),
     });
 
-    const apiUrl = `${getSectionsApiUrl()}?${queryParams.toString()}`;
+    const apiUrl = `https://www.airbnb.com/api/v3/StaysPdpSections/${currentHash}?${queryParams.toString()}`;
     return makeRequest(apiUrl, {
       headers: { ...API_HEADERS, 'X-Airbnb-Api-Key': apiKey },
     });
@@ -549,7 +676,7 @@ export async function fetchListingDetails(
         extensions: JSON.stringify(pricingExtensions),
       });
 
-      const pricingUrl = `${getSectionsApiUrl()}?${pricingParams.toString()}`;
+      const pricingUrl = `https://www.airbnb.com/api/v3/StaysPdpSections/${currentHash}?${pricingParams.toString()}`;
       const pricingResponse = await makeRequest(pricingUrl, {
         headers: { ...API_HEADERS, 'X-Airbnb-Api-Key': apiKey },
       });
@@ -574,32 +701,7 @@ export async function fetchListingDetails(
     }
   }
 
-  return {
-    id: roomId,
-    url: `https://www.airbnb.com/rooms/${roomId}`,
-    title: parsed.title || '',
-    description: parsed.description || '',
-    propertyType: parsed.propertyType || null,
-    coordinates: parsed.coordinates || null,
-    capacity: parsed.capacity || null,
-    bedrooms: parsed.bedrooms || null,
-    beds: parsed.beds || null,
-    bathrooms: parsed.bathrooms || null,
-    photos: parsed.photos || [],
-    amenities: parsed.amenities || [],
-    host: parsed.host || null,
-    houseRules: parsed.houseRules || [],
-    highlights: parsed.highlights || [],
-    rating: parsed.rating ?? null,
-    reviewCount: parsed.reviewCount ?? null,
-    subRatings: parsed.subRatings || null,
-    pricing: parsed.pricing || null,
-    checkIn: parsed.checkIn || null,
-    checkOut: parsed.checkOut || null,
-    cancellationPolicy: parsed.cancellationPolicy || null,
-    sleepingArrangements: parsed.sleepingArrangements || null,
-    scrapedAt: new Date().toISOString(),
-  };
+  return buildListingDetails(roomId, parsed);
 }
 
 /**

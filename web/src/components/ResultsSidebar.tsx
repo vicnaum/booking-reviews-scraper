@@ -12,7 +12,6 @@ export default function ResultsSidebar() {
   const isLoading = useSearchStore((s) => s.isLoading);
   const searchError = useSearchStore((s) => s.searchError);
   const lastSearchMs = useSearchStore((s) => s.lastSearchMs);
-  const platform = useSearchStore((s) => s.platform);
   const zoom = useSearchStore((s) => s.zoom);
   const activeJobId = useSearchStore((s) => s.activeJobId);
   const completedJobId = useSearchStore((s) => s.completedJobId);
@@ -81,7 +80,7 @@ export default function ResultsSidebar() {
   }, [completedJobId]);
 
   return (
-    <aside className="hidden w-[360px] flex-shrink-0 flex-col border-r border-white/10 bg-[linear-gradient(180deg,rgba(20,16,13,0.94),rgba(14,12,10,0.92))] md:flex">
+    <aside className="hidden h-full min-h-0 w-[360px] flex-shrink-0 flex-col border-r border-white/10 bg-[linear-gradient(180deg,rgba(20,16,13,0.94),rgba(14,12,10,0.92))] md:flex">
       <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-stone-100">
@@ -129,7 +128,7 @@ export default function ResultsSidebar() {
         </div>
       )}
 
-      <div ref={listRef} className="flex-1 space-y-3 overflow-y-auto p-3">
+      <div ref={listRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
         {searchError && (
           <div className="rounded-2xl border border-rose-400/20 bg-rose-950/40 p-4 text-xs text-rose-200">
             {searchError}
@@ -154,13 +153,11 @@ export default function ResultsSidebar() {
           ))
         ) : !isLoading && !searchError ? (
           <div className="flex flex-col items-center justify-center py-16 text-center">
-            <div className="mb-3 text-3xl">
-              {platform === 'airbnb' ? '🏠' : '🏨'}
-            </div>
+            <div className="mb-3 text-3xl">🗺️</div>
             <p className="max-w-[18rem] text-sm leading-6 text-stone-500">
               {zoom < 12
-                ? 'Zoom in to search for listings'
-                : 'No results in this area'}
+                ? 'Zoom in to search across Airbnb and Booking'
+                : 'No results from Airbnb or Booking in this area'}
             </p>
           </div>
         ) : null}

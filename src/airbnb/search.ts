@@ -5,7 +5,18 @@
 // Fallback: SSR HTML parsing (18-20 results/page, no auth)
 
 import { makeRequest, getApiKey, BROWSER_HEADERS, API_HEADERS } from './scraper.js';
-import { createSearchGrid, subdivideBbox, createPriceRanges } from '../search/geo.js';
+import {
+  parseAirbnbPricingQuote,
+  parseAirbnbStructuredDisplayPrice,
+} from './pricing.js';
+import {
+  countNewChildIds,
+  hasMeaningfulChildGain,
+  shouldRecurseIntoChildren,
+  shouldProbeChildren,
+  type AdaptiveSubdivisionConfig,
+} from '../search/adaptive.js';
+import { bboxIntersectsCircle, subdivideBbox } from '../search/geo.js';
 import { filterSearchResults } from '../search/filters.js';
 import type {
   AirbnbSearchParams,
@@ -21,11 +32,19 @@ const PAGE_DELAY_MS = 250;
 const CELL_DELAY_MS = 500;
 const MAX_CONSECUTIVE_ERRORS = 5;
 const ERROR_THRESHOLD_FOR_KEY_REFRESH = 3;
+const AIRBNB_SUBDIVISION_CONFIG: AdaptiveSubdivisionConfig = {
+  forceProbeDepth: 2,
+  maxDepth: 3,
+  minCellSideMeters: 700,
+  minResultsToProbe: 8,
+  minNewIds: 2,
+  minGainRatio: 0.05,
+};
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 interface AirbnbCellSearchOutput {
-  results: SearchResult[];
+  cellResults: SearchResult[];
   apiKey: string;
   sawRateLimit: boolean;
   encounteredFatalError: boolean;
@@ -109,26 +128,7 @@ function parseExploreListing(item: any, params: AirbnbSearchParams): SearchResul
   if (!id) return null;
 
   const pricingQuote = item?.pricing_quote;
-
-  let price: SearchResult['price'] = null;
-  let totalPrice: SearchResult['totalPrice'] = null;
-
-  if (pricingQuote) {
-    const rateAmount = pricingQuote?.price?.rate_amount
-      ?? pricingQuote?.rate?.amount
-      ?? pricingQuote?.price_string?.match?.(/[\d,]+/)?.[0]?.replace(',', '');
-    if (rateAmount) {
-      price = {
-        amount: Number(rateAmount),
-        currency: params.currency,
-        period: 'night' as const,
-      };
-    }
-    const totalAmount = pricingQuote?.price?.total?.amount ?? pricingQuote?.price?.total_price;
-    if (totalAmount) {
-      totalPrice = { amount: Number(totalAmount), currency: params.currency };
-    }
-  }
+  const pricing = parseAirbnbPricingQuote(pricingQuote, params.currency);
 
   return {
     id,
@@ -137,8 +137,7 @@ function parseExploreListing(item: any, params: AirbnbSearchParams): SearchResul
     url: `${AIRBNB_BASE_URL}/rooms/${id}`,
     rating: listing.star_rating ?? listing.avg_rating ?? null,
     reviewCount: listing.reviews_count ?? 0,
-    price,
-    totalPrice,
+    pricing,
     coordinates: listing.lat != null && listing.lng != null
       ? { lat: listing.lat, lng: listing.lng }
       : null,
@@ -179,11 +178,11 @@ async function searchAirbnbCell(
   params: AirbnbSearchParams,
   bbox: BoundingBox,
   apiKey: string,
-  seenIds: Set<string>,
   maxResults?: number,
   onProgress?: ProgressCallback,
 ): Promise<AirbnbCellSearchOutput> {
-  const results: SearchResult[] = [];
+  const cellResults: SearchResult[] = [];
+  const cellSeenIds = new Set<string>();
   let offset = 0;
   let pageIndex = 0;
   let currentKey = apiKey;
@@ -209,25 +208,24 @@ async function searchAirbnbCell(
       const page = parseExplorePage(data, params, pageIndex);
       const filteredPageResults = filterSearchResults(page.results, params);
 
-      // Deduplicate
-      const newResults: SearchResult[] = [];
-      for (const r of filteredPageResults) {
-        if (!seenIds.has(r.id)) {
-          seenIds.add(r.id);
-          newResults.push(r);
+      const newCellResults: SearchResult[] = [];
+      for (const result of filteredPageResults) {
+        if (!cellSeenIds.has(result.id)) {
+          cellSeenIds.add(result.id);
+          cellResults.push(result);
+          newCellResults.push(result);
         }
       }
 
-      results.push(...newResults);
       consecutiveErrors = 0;
 
       if (onProgress) {
-        onProgress({ ...page, results: newResults });
+        onProgress({ ...page, results: newCellResults });
       }
 
       // Check termination conditions
       if (!page.hasNextPage) break;
-      if (maxResults && results.length >= maxResults) break;
+      if (maxResults && cellResults.length >= maxResults) break;
 
       offset += ITEMS_PER_PAGE;
       pageIndex++;
@@ -260,7 +258,12 @@ async function searchAirbnbCell(
     }
   }
 
-  return { results, apiKey: currentKey, sawRateLimit, encounteredFatalError };
+  return {
+    cellResults,
+    apiKey: currentKey,
+    sawRateLimit,
+    encounteredFatalError,
+  };
 }
 
 // --- SSR fallback ---
@@ -353,16 +356,10 @@ async function searchAirbnbSSR(
         seenIds.add(id);
 
         const coord = listing.location?.coordinate || listing.coordinate;
-        const priceDisplay = item?.structuredDisplayPrice?.primaryLine;
-
-        let price: SearchResult['price'] = null;
-        if (priceDisplay?.discountedPrice || priceDisplay?.originalPrice) {
-          const priceStr = (priceDisplay.discountedPrice || priceDisplay.originalPrice) as string;
-          const amount = parseFloat(priceStr.replace(/[^0-9.]/g, ''));
-          if (!isNaN(amount)) {
-            price = { amount, currency: params.currency, period: 'night' };
-          }
-        }
+        const pricing = parseAirbnbStructuredDisplayPrice(
+          item?.structuredDisplayPrice,
+          params.currency,
+        );
 
         // Check for superhost badge
         const badges = item?.badges || [];
@@ -403,8 +400,7 @@ async function searchAirbnbSSR(
           url: `${AIRBNB_BASE_URL}/rooms/${id}`,
           rating,
           reviewCount,
-          price,
-          totalPrice: null,
+          pricing,
           coordinates: coord ? { lat: coord.latitude, lng: coord.longitude } : null,
           propertyType: listing?.roomType ?? null,
           photoUrl: item?.contextualPictures?.[0]?.picture || null,
@@ -470,60 +466,149 @@ export async function searchAirbnb(
     if (onProgress) onProgress(page);
   };
 
+  const addUniqueResults = (results: SearchResult[]): SearchResult[] => {
+    const newResults: SearchResult[] = [];
+    for (const result of results) {
+      if (!seenIds.has(result.id)) {
+        seenIds.add(result.id);
+        newResults.push(result);
+      }
+    }
+    allResults.push(...newResults);
+    return newResults;
+  };
+
+  let currentKey = apiKey;
+  const markFallbackIfNeeded = (output: AirbnbCellSearchOutput) => {
+    if (
+      allResults.length === 0 &&
+      (output.sawRateLimit || output.encounteredFatalError)
+    ) {
+      shouldFallbackToSSR = true;
+    }
+  };
+
   if (!params.exhaustive) {
     // Quick mode: search the bbox directly
     console.log(`🔍 Quick search: paginating bbox directly (max ${params.maxResults || 'unlimited'} results)...`);
-    const { results, apiKey: updatedKey, sawRateLimit, encounteredFatalError } = await searchAirbnbCell(
-      params, bbox, apiKey, seenIds, params.maxResults, progressTracker,
+    const output = await searchAirbnbCell(
+      params,
+      bbox,
+      currentKey,
+      params.maxResults,
+      progressTracker,
     );
-    allResults.push(...results);
-    apiKey = updatedKey;
-    shouldFallbackToSSR = allResults.length === 0 && (sawRateLimit || encounteredFatalError);
+    currentKey = output.apiKey;
+    addUniqueResults(output.cellResults);
+    markFallbackIfNeeded(output);
   } else {
-    // Exhaustive mode: grid subdivision + price pivoting
-    console.log('🔍 Exhaustive search: subdividing bbox into grid cells...');
-    const cells = createSearchGrid(bbox, 5);
-    console.log(`   ${cells.length} cells to search`);
+    console.log('🔍 Exhaustive search: adaptive quadrant subdivision...');
+    let visitedCells = 0;
 
-    let currentKey = apiKey;
+    const visitCell = async (
+      cell: BoundingBox,
+      depth: number,
+      seededResults?: SearchResult[],
+    ): Promise<void> => {
+      visitedCells++;
+      const label = `Cell ${visitedCells} (depth ${depth})`;
+      console.log(`  📍 ${label}`);
 
-    for (let i = 0; i < cells.length; i++) {
-      const cell = cells[i];
-      console.log(`  📍 Cell ${i + 1}/${cells.length}`);
+      let effectiveResults = seededResults ?? [];
 
-      const { results, apiKey: updatedKey, sawRateLimit, encounteredFatalError } = await searchAirbnbCell(
-        params, cell, currentKey, seenIds, undefined, progressTracker,
-      );
-      currentKey = updatedKey;
-
-      allResults.push(...results);
-      if (allResults.length === 0 && (sawRateLimit || encounteredFatalError)) {
-        shouldFallbackToSSR = true;
+      if (!seededResults) {
+        const output = await searchAirbnbCell(
+          params,
+          cell,
+          currentKey,
+          undefined,
+          progressTracker,
+        );
+        currentKey = output.apiKey;
+        markFallbackIfNeeded(output);
+        effectiveResults = output.cellResults;
+        addUniqueResults(output.cellResults);
       }
 
-      // If cell returned many results (~40+), subdivide and try with price pivoting
-      if (results.length >= 40) {
-        console.log(`    ⚡ Dense cell (${results.length} results), applying price pivoting...`);
-        const priceMin = params.priceMin ?? 0;
-        const priceMax = params.priceMax ?? 1000;
-        const ranges = createPriceRanges(priceMin, priceMax, 5);
+      console.log(`    ↳ ${effectiveResults.length} filtered results`);
 
-        const subCells = subdivideBbox(cell);
-        for (const subCell of subCells) {
-          for (const range of ranges) {
-            const subParams = { ...params, priceMin: range.min, priceMax: range.max };
-            const { results: subResults, apiKey: subKey } = await searchAirbnbCell(
-              subParams, subCell, currentKey, seenIds, undefined, progressTracker,
-            );
-            currentKey = subKey;
-            allResults.push(...subResults);
-            await sleep(CELL_DELAY_MS);
-          }
+      if (
+        !shouldProbeChildren({
+          bbox: cell,
+          depth,
+          resultCount: effectiveResults.length,
+          config: AIRBNB_SUBDIVISION_CONFIG,
+        }) ||
+        (params.maxResults && allResults.length >= params.maxResults)
+      ) {
+        return;
+      }
+
+      const childCells = subdivideBbox(cell).filter(
+        (child) => !params.circle || bboxIntersectsCircle(child, params.circle),
+      );
+      if (childCells.length === 0) {
+        return;
+      }
+
+      console.log(`    ↳ probing ${childCells.length} exact quadrants`);
+      const parentIds = new Set(effectiveResults.map((result) => result.id));
+      const childSearches: Array<{ cell: BoundingBox; results: SearchResult[] }> = [];
+      const childUnionIds = new Set<string>();
+
+      for (const child of childCells) {
+        await sleep(CELL_DELAY_MS);
+        const output = await searchAirbnbCell(
+          params,
+          child,
+          currentKey,
+          undefined,
+          progressTracker,
+        );
+        currentKey = output.apiKey;
+        markFallbackIfNeeded(output);
+        addUniqueResults(output.cellResults);
+        childSearches.push({ cell: child, results: output.cellResults });
+        for (const result of output.cellResults) {
+          childUnionIds.add(result.id);
+        }
+        if (params.maxResults && allResults.length >= params.maxResults) {
+          break;
         }
       }
 
-      await sleep(CELL_DELAY_MS);
-    }
+      const newIdCount = countNewChildIds(parentIds, childUnionIds);
+      const gain = hasMeaningfulChildGain({
+        parentCount: parentIds.size,
+        newIdCount,
+        config: AIRBNB_SUBDIVISION_CONFIG,
+      });
+      const shouldRecurse = shouldRecurseIntoChildren({
+        depth,
+        parentCount: parentIds.size,
+        newIdCount,
+        config: AIRBNB_SUBDIVISION_CONFIG,
+      });
+      const forcedRecursion = depth < AIRBNB_SUBDIVISION_CONFIG.forceProbeDepth;
+      console.log(
+        `    ↳ child cells added ${newIdCount} new IDs beyond parent${
+          forcedRecursion && !gain ? ' (continuing to forced depth)' : ''
+        }`,
+      );
+
+      if (!shouldRecurse || (params.maxResults && allResults.length >= params.maxResults)) {
+        return;
+      }
+
+      for (const child of childSearches) {
+        await visitCell(child.cell, depth + 1, child.results);
+        if (params.maxResults && allResults.length >= params.maxResults) {
+          break;
+        }
+      }
+    };
+
+    await visitCell(bbox, 0, undefined);
   }
 
   if (allResults.length === 0 && shouldFallbackToSSR) {

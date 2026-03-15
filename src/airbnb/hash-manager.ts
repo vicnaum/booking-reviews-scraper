@@ -12,8 +12,8 @@ import { getConfigDir } from '../config.js';
 
 // --- Hardcoded defaults (current known-good hashes) ---
 
-const DEFAULT_LISTING_HASH = '817db68da8bfce0eeea799a4531a191ea2aa0238830f398b9c16e6c98d3249fa';
-const DEFAULT_REVIEWS_HASH = 'dec1c8061483e78373602047450322fd474e79ba9afa8d3dbbc27f504030f91d';
+const DEFAULT_LISTING_HASH = 'afdcdd1d8f9ef08796219168939390c345898c01e42c8155148c52e6d4bf2818';
+const DEFAULT_REVIEWS_HASH = '2ed951bfedf71b87d9d30e24a419e15517af9fbed7ac560a8d1cc7feadfa22e6';
 
 // --- Interfaces ---
 

@@ -3,9 +3,9 @@
 import { Marker, Tooltip } from 'react-leaflet';
 import L from 'leaflet';
 import type { SearchResult, Platform } from '@/types';
-import type { PriceDisplay } from '@/lib/format';
-import { formatPrice, formatRating } from '@/lib/format';
+import { getPriceDisplayInfo } from '@/lib/format';
 import { useSearchStore } from '@/hooks/useSearchStore';
+import MapListingTooltip from './MapListingTooltip';
 
 function createPriceIcon(price: string, platform: Platform, isSelected: boolean) {
   const borderColor = platform === 'airbnb' ? '#ff5a5f' : '#003580';
@@ -36,10 +36,6 @@ function createPriceIcon(price: string, platform: Platform, isSelected: boolean)
   });
 }
 
-function formatMarkerPrice(result: SearchResult, mode: PriceDisplay): string {
-  return formatPrice(result, mode);
-}
-
 interface PriceMarkerProps {
   result: SearchResult;
   isSelected: boolean;
@@ -48,11 +44,13 @@ interface PriceMarkerProps {
 
 export default function PriceMarker({ result, isSelected, onClick }: PriceMarkerProps) {
   const priceDisplay = useSearchStore((s) => s.priceDisplay);
+  const checkin = useSearchStore((s) => s.checkin);
+  const checkout = useSearchStore((s) => s.checkout);
 
   if (!result.coordinates) return null;
 
   const icon = createPriceIcon(
-    formatMarkerPrice(result, priceDisplay),
+    getPriceDisplayInfo(result, priceDisplay, { checkin, checkout }).marker,
     result.platform,
     isSelected,
   );
@@ -61,20 +59,17 @@ export default function PriceMarker({ result, isSelected, onClick }: PriceMarker
     <Marker
       position={[result.coordinates.lat, result.coordinates.lng]}
       icon={icon}
+      zIndexOffset={isSelected ? 200 : 0}
       eventHandlers={{
         click: () => onClick(result.id),
       }}
     >
-      <Tooltip direction="top" offset={[0, -10]}>
-        <div style={{ maxWidth: 200 }}>
-          <div style={{ fontWeight: 600, fontSize: 13 }}>{result.name}</div>
-          {formatRating(result) && (
-            <div style={{ fontSize: 12, color: '#666' }}>
-              {formatRating(result)}
-              {result.reviewCount > 0 && ` (${result.reviewCount})`}
-            </div>
-          )}
-        </div>
+      <Tooltip
+        direction="auto"
+        offset={[0, -10]}
+        className="stayreviewr-map-tooltip"
+      >
+        <MapListingTooltip result={result} />
       </Tooltip>
     </Marker>
   );

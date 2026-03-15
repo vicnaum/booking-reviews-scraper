@@ -344,11 +344,25 @@ function formatUsageSummary(usageMetadata: any, modelName: string, durationMs: n
 
 // --- Listing context helpers ---
 
-function formatListingContext(listingData: any): string {
+function formatPoiDistance(meters: number): string {
+  if (meters < 1000) {
+    return `${Math.round(meters)} m`;
+  }
+
+  return `${(meters / 1000).toFixed(1)} km`;
+}
+
+export function formatListingContext(listingData: any): string {
   const lines: string[] = ['=== LISTING DETAILS (for cross-referencing with photos) ==='];
 
   if (listingData.title) lines.push(`Title: ${listingData.title}`);
   if (listingData.description) lines.push(`Description: ${listingData.description}`);
+  if (listingData.poiDistanceMeters != null) {
+    lines.push(`Distance to POI: ${formatPoiDistance(listingData.poiDistanceMeters)}`);
+  }
+  if (listingData.poi?.lat != null && listingData.poi?.lng != null) {
+    lines.push(`POI: ${listingData.poi.lat}, ${listingData.poi.lng}`);
+  }
 
   // Booking.com listing
   if (listingData.amenities && Array.isArray(listingData.amenities) && typeof listingData.amenities[0] === 'string') {
