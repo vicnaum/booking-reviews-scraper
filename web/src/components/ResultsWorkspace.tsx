@@ -29,7 +29,6 @@ import PlatformBadge from './PlatformBadge';
 import ResultsJobMap from './ResultsJobMap';
 
 const MIN_MAP_HEIGHT = 280;
-const MAX_MAP_HEIGHT = 920;
 const TIER_ORDER = ['top_pick', 'shortlist', 'consider', 'unlikely', 'no_go'] as const;
 const SCORE_ORDER = [
   'fit',
@@ -1001,6 +1000,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   const [isUpdatingSharing, setIsUpdatingSharing] = useState(false);
   const [shareMessage, setShareMessage] = useState<string | null>(null);
   const rowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
+  const resizeFrameRef = useRef<number | null>(null);
 
   const applyJobUpdate = useCallback((nextData: ReviewJobResponse) => {
     setData(nextData);
@@ -1335,17 +1335,38 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       event.preventDefault();
       const startY = event.clientY;
       const startHeight = mapHeight;
+      let nextHeight = startHeight;
+
+      const previousCursor = document.body.style.cursor;
+      const previousUserSelect = document.body.style.userSelect;
+      document.body.style.cursor = 'ns-resize';
+      document.body.style.userSelect = 'none';
 
       const handleMove = (moveEvent: globalThis.MouseEvent) => {
         const delta = (moveEvent.clientY - startY) * direction;
-        setMapHeight(
-          Math.max(MIN_MAP_HEIGHT, Math.min(MAX_MAP_HEIGHT, startHeight + delta)),
-        );
+        nextHeight = Math.max(MIN_MAP_HEIGHT, startHeight + delta);
+
+        if (resizeFrameRef.current != null) {
+          return;
+        }
+
+        resizeFrameRef.current = window.requestAnimationFrame(() => {
+          resizeFrameRef.current = null;
+          setMapHeight(nextHeight);
+        });
       };
 
       const handleUp = () => {
         window.removeEventListener('mousemove', handleMove);
         window.removeEventListener('mouseup', handleUp);
+        document.body.style.cursor = previousCursor;
+        document.body.style.userSelect = previousUserSelect;
+
+        if (resizeFrameRef.current != null) {
+          window.cancelAnimationFrame(resizeFrameRef.current);
+          resizeFrameRef.current = null;
+          setMapHeight(nextHeight);
+        }
       };
 
       window.addEventListener('mousemove', handleMove);
@@ -1353,6 +1374,12 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     },
     [mapHeight],
   );
+
+  useEffect(() => () => {
+    if (resizeFrameRef.current != null) {
+      window.cancelAnimationFrame(resizeFrameRef.current);
+    }
+  }, []);
 
   const handleSort = useCallback((nextKey: SortKey) => {
     setSortKey((current) => {

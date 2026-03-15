@@ -281,6 +281,43 @@ function JobPoiDistanceOverlay({
   );
 }
 
+function MapSizeSync() {
+  const map = useMap();
+
+  useEffect(() => {
+    let frameId: number | null = null;
+    const container = map.getContainer();
+
+    const invalidate = () => {
+      if (frameId != null) {
+        window.cancelAnimationFrame(frameId);
+      }
+
+      frameId = window.requestAnimationFrame(() => {
+        frameId = null;
+        map.invalidateSize({ pan: false, animate: false });
+      });
+    };
+
+    invalidate();
+
+    const observer = new ResizeObserver(() => {
+      invalidate();
+    });
+
+    observer.observe(container);
+
+    return () => {
+      observer.disconnect();
+      if (frameId != null) {
+        window.cancelAnimationFrame(frameId);
+      }
+    };
+  }, [map]);
+
+  return null;
+}
+
 interface JobMapProps {
   results: ReviewJobListing[];
   selectedId: string | null;
@@ -337,6 +374,7 @@ export default function JobMap({
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
       />
+      <MapSizeSync />
 
       <JobViewport
         searchAreaMode={searchAreaMode}
