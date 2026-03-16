@@ -46,6 +46,7 @@ import {
   type ReviewJobSearchPlatformFailure,
 } from './reviewJobSearch.js';
 import { createSearchLogger } from './searchLog.js';
+import { buildAiCostBreakdown } from './aiCosts.js';
 import type {
   SearchResult,
 } from '../types.js';
@@ -559,6 +560,7 @@ type PersistableManifestEntry = AnalysisManifest['listings'][string] | BatchPhas
 
 interface ReviewJobListingPersistenceRow {
   id: string;
+  jobId: string;
   platform: 'airbnb' | 'booking';
   url: string;
   lat: number | null;
@@ -584,6 +586,10 @@ interface ReviewJobListingAnalysisSnapshot {
   triage: Prisma.InputJsonValue | typeof Prisma.DbNull;
   reviewCount: number | null;
   photoCount: number | null;
+  aiReviewsCostUsd: number;
+  aiPhotosCostUsd: number;
+  triageCostUsd: number;
+  totalAiCostUsd: number;
   startedAt: Date | null;
   completedAt: Date | null;
   durationMs: number | null;
@@ -614,6 +620,10 @@ function createReviewJobAnalysisSnapshot(
       triage: Prisma.JsonValue | null;
       reviewCount: number | null;
       photoCount: number | null;
+      aiReviewsCostUsd: number;
+      aiPhotosCostUsd: number;
+      triageCostUsd: number;
+      totalAiCostUsd: number;
       startedAt: Date | null;
       completedAt: Date | null;
       durationMs: number | null;
@@ -641,6 +651,10 @@ function createReviewJobAnalysisSnapshot(
     triage: toStoredAnalysisValue(listing.analysis.triage),
     reviewCount: listing.analysis.reviewCount,
     photoCount: listing.analysis.photoCount,
+    aiReviewsCostUsd: listing.analysis.aiReviewsCostUsd,
+    aiPhotosCostUsd: listing.analysis.aiPhotosCostUsd,
+    triageCostUsd: listing.analysis.triageCostUsd,
+    totalAiCostUsd: listing.analysis.totalAiCostUsd,
     startedAt: listing.analysis.startedAt,
     completedAt: listing.analysis.completedAt,
     durationMs: listing.analysis.durationMs,
@@ -671,6 +685,10 @@ async function restoreReviewJobAnalysisSnapshots(
         triage: snapshot.triage,
         reviewCount: snapshot.reviewCount,
         photoCount: snapshot.photoCount,
+        aiReviewsCostUsd: snapshot.aiReviewsCostUsd,
+        aiPhotosCostUsd: snapshot.aiPhotosCostUsd,
+        triageCostUsd: snapshot.triageCostUsd,
+        totalAiCostUsd: snapshot.totalAiCostUsd,
         startedAt: snapshot.startedAt,
         completedAt: snapshot.completedAt,
         durationMs: snapshot.durationMs,
@@ -691,6 +709,10 @@ async function restoreReviewJobAnalysisSnapshots(
         triage: snapshot.triage,
         reviewCount: snapshot.reviewCount,
         photoCount: snapshot.photoCount,
+        aiReviewsCostUsd: snapshot.aiReviewsCostUsd,
+        aiPhotosCostUsd: snapshot.aiPhotosCostUsd,
+        triageCostUsd: snapshot.triageCostUsd,
+        totalAiCostUsd: snapshot.totalAiCostUsd,
         startedAt: snapshot.startedAt,
         completedAt: snapshot.completedAt,
         durationMs: snapshot.durationMs,
@@ -709,6 +731,55 @@ function getManifestEntryError(entry: PersistableManifestEntry): string | null {
     ?? entry.details.error
     ?? null
   );
+}
+
+function getManifestEntryAiCostFields(entry: PersistableManifestEntry) {
+  const costs = buildAiCostBreakdown({
+    aiReviewsCostUsd: entry.aiReviews.cost,
+    aiPhotosCostUsd: entry.aiPhotos.cost,
+    triageCostUsd: entry.triage.cost,
+  });
+
+  return {
+    aiReviewsCostUsd: costs.aiReviewsUsd,
+    aiPhotosCostUsd: costs.aiPhotosUsd,
+    triageCostUsd: costs.triageUsd,
+    totalAiCostUsd: costs.totalUsd,
+  };
+}
+
+async function getAggregatedReviewJobAiCostFields(
+  tx: Prisma.TransactionClient,
+  reviewJobId: string,
+) {
+  const aggregate = await tx.reviewJobListingAnalysis.aggregate({
+    where: {
+      jobListing: {
+        jobId: reviewJobId,
+        hidden: false,
+      },
+    },
+    _sum: {
+      aiReviewsCostUsd: true,
+      aiPhotosCostUsd: true,
+      triageCostUsd: true,
+      totalAiCostUsd: true,
+    },
+  });
+
+  const costs = buildAiCostBreakdown({
+    aiReviewsCostUsd: aggregate._sum.aiReviewsCostUsd,
+    aiPhotosCostUsd: aggregate._sum.aiPhotosCostUsd,
+    triageCostUsd: aggregate._sum.triageCostUsd,
+    totalAiCostUsd: aggregate._sum.totalAiCostUsd,
+  });
+
+  return {
+    aiReviewsCostUsd: costs.aiReviewsUsd,
+    aiPhotosCostUsd: costs.aiPhotosUsd,
+    triageCostUsd: costs.triageUsd,
+    totalAiCostUsd: costs.totalUsd,
+  };
 }
 
 function readArtifactJson(
@@ -804,6 +875,7 @@ async function persistReviewJobManifestEntryToDb(input: {
   const aiReviews = readArtifactJson(input.artifactRoot, input.entry.aiReviews.file);
   const aiPhotos = readArtifactJson(input.artifactRoot, input.entry.aiPhotos.file);
   const triage = readArtifactJson(input.artifactRoot, input.entry.triage.file);
+  const aiCostFields = getManifestEntryAiCostFields(input.entry);
   const terminalStatus = summarizeManifestEntryStatus(input.entry);
   const completedAt =
     input.finalize && ['completed', 'partial', 'failed', 'skipped'].includes(terminalStatus)
@@ -841,6 +913,10 @@ async function persistReviewJobManifestEntryToDb(input: {
         triage: triage == null ? Prisma.DbNull : (triage as Prisma.InputJsonValue),
         reviewCount: input.entry.reviews.count ?? null,
         photoCount: input.entry.photos.count ?? null,
+        aiReviewsCostUsd: aiCostFields.aiReviewsCostUsd,
+        aiPhotosCostUsd: aiCostFields.aiPhotosCostUsd,
+        triageCostUsd: aiCostFields.triageCostUsd,
+        totalAiCostUsd: aiCostFields.totalAiCostUsd,
         completedAt,
         durationMs,
       },
@@ -860,6 +936,10 @@ async function persistReviewJobManifestEntryToDb(input: {
         triage: triage == null ? Prisma.DbNull : (triage as Prisma.InputJsonValue),
         reviewCount: input.entry.reviews.count ?? null,
         photoCount: input.entry.photos.count ?? null,
+        aiReviewsCostUsd: aiCostFields.aiReviewsCostUsd,
+        aiPhotosCostUsd: aiCostFields.aiPhotosCostUsd,
+        triageCostUsd: aiCostFields.triageCostUsd,
+        totalAiCostUsd: aiCostFields.totalAiCostUsd,
         completedAt: completedAt ?? undefined,
         durationMs: durationMs ?? undefined,
       },
@@ -976,6 +1056,10 @@ async function runReviewJobAnalysis(reviewJobId: string) {
     analysisDurationMs: jobRecord.analysisDurationMs,
     artifactRoot: jobRecord.artifactRoot,
     reportPath: jobRecord.reportPath,
+    aiReviewsCostUsd: jobRecord.aiReviewsCostUsd,
+    aiPhotosCostUsd: jobRecord.aiPhotosCostUsd,
+    triageCostUsd: jobRecord.triageCostUsd,
+    totalAiCostUsd: jobRecord.totalAiCostUsd,
   };
   const activeListingIds = activeListings.map((listing) => listing.id);
   const hasSelectedSubset = selectedListings.length > 0;
@@ -1005,6 +1089,10 @@ async function runReviewJobAnalysis(reviewJobId: string) {
         startedAt,
         completedAt: null,
         durationMs: null,
+        aiReviewsCostUsd: 0,
+        aiPhotosCostUsd: 0,
+        triageCostUsd: 0,
+        totalAiCostUsd: 0,
       },
     });
     await tx.reviewJob.update({
@@ -1178,6 +1266,10 @@ async function runReviewJobAnalysis(reviewJobId: string) {
             triage: Prisma.DbNull,
             reviewCount: null,
             photoCount: null,
+            aiReviewsCostUsd: 0,
+            aiPhotosCostUsd: 0,
+            triageCostUsd: 0,
+            totalAiCostUsd: 0,
           },
         });
       }
@@ -1194,6 +1286,7 @@ async function runReviewJobAnalysis(reviewJobId: string) {
       overallStatus = summarizeAnalysisStatus(finalAnalyses);
       const resultsReady =
         overallStatus === 'completed' || overallStatus === 'partial';
+      const aggregatedAiCosts = await getAggregatedReviewJobAiCostFields(tx, reviewJobId);
 
       await tx.reviewJob.update({
         where: { id: reviewJobId },
@@ -1208,6 +1301,7 @@ async function runReviewJobAnalysis(reviewJobId: string) {
           analysisDurationMs: completedAt.getTime() - startedAt.getTime(),
           artifactRoot,
           reportPath,
+          ...aggregatedAiCosts,
         },
       });
       await tx.reviewJobEvent.create({
@@ -1221,6 +1315,7 @@ async function runReviewJobAnalysis(reviewJobId: string) {
             resultsReady,
             legacyReportAvailable: !!reportPath,
             selectedSubset: hasSelectedSubset,
+            costs: aggregatedAiCosts,
           },
         }),
       });
@@ -1264,6 +1359,10 @@ async function runReviewJobAnalysis(reviewJobId: string) {
             : completedAt.getTime() - startedAt.getTime(),
           artifactRoot: previousJobState.artifactRoot,
           reportPath: previousJobState.reportPath,
+          aiReviewsCostUsd: previousJobState.aiReviewsCostUsd,
+          aiPhotosCostUsd: previousJobState.aiPhotosCostUsd,
+          triageCostUsd: previousJobState.triageCostUsd,
+          totalAiCostUsd: previousJobState.totalAiCostUsd,
         },
       });
       await tx.reviewJobEvent.create({

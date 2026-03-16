@@ -12,6 +12,7 @@ import {
   type ReactNode,
 } from 'react';
 import type { PriceDisplayMode, ReviewJobListing, ReviewJobResponse } from '@/types';
+import { formatUsdCost, hasAiCosts } from '@/lib/aiCosts';
 import { getPriceDisplayInfo, resolveComparablePrice } from '@/lib/pricing';
 import { buildListingUrl } from '@/lib/listingLinks';
 import {
@@ -596,6 +597,11 @@ function ListingDetailPanel({
                   {priceInfo.primary}
                   {priceInfo.secondary ? ` (${priceInfo.secondary})` : ''}
                 </span>
+                {listing.analysis && hasAiCosts(listing.analysis.costs) && (
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    AI cost {formatUsdCost(listing.analysis.costs.totalUsd)}
+                  </span>
+                )}
                 {listing.poiDistanceMeters != null && (
                   <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
                     {poiDistanceLabel} from POI
@@ -745,6 +751,28 @@ function ListingDetailPanel({
                   {triage.tierReason && (
                     <p className="mt-3 text-xs leading-6 text-stone-500">{triage.tierReason}</p>
                   )}
+                </section>
+              )}
+
+              {listing.analysis && hasAiCosts(listing.analysis.costs) && (
+                <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                  <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
+                    AI cost
+                  </h3>
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs text-stone-300">
+                    <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-stone-100">
+                      Total {formatUsdCost(listing.analysis.costs.totalUsd)}
+                    </span>
+                    <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                      Reviews {formatUsdCost(listing.analysis.costs.aiReviewsUsd)}
+                    </span>
+                    <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                      Photos {formatUsdCost(listing.analysis.costs.aiPhotosUsd)}
+                    </span>
+                    <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                      Triage {formatUsdCost(listing.analysis.costs.triageUsd)}
+                    </span>
+                  </div>
                 </section>
               )}
 
@@ -1817,6 +1845,25 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 Brief
               </p>
               {data.job.prompt}
+            </div>
+          )}
+
+          {hasAiCosts(data.job.costs) && (
+            <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full border border-white/10 bg-white/[0.05] px-3 py-1.5 text-sm font-semibold text-stone-100">
+                  Total AI spend {formatUsdCost(data.job.costs.totalUsd)}
+                </span>
+                <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-stone-300">
+                  Reviews {formatUsdCost(data.job.costs.aiReviewsUsd)}
+                </span>
+                <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-stone-300">
+                  Photos {formatUsdCost(data.job.costs.aiPhotosUsd)}
+                </span>
+                <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-stone-300">
+                  Triage {formatUsdCost(data.job.costs.triageUsd)}
+                </span>
+              </div>
             </div>
           )}
         </header>

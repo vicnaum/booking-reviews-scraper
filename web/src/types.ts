@@ -42,6 +42,13 @@ export interface SearchPricing {
   display: SearchDisplayPriceValue | null;
 }
 
+export interface AiCostBreakdown {
+  aiReviewsUsd: number;
+  aiPhotosUsd: number;
+  triageUsd: number;
+  totalUsd: number;
+}
+
 export type SearchJobStatus =
   | 'pending'
   | 'running'
@@ -191,6 +198,7 @@ export interface ReviewJobListingAnalysis {
   triage: Record<string, unknown> | null;
   reviewCount: number | null;
   photoCount: number | null;
+  costs: AiCostBreakdown;
   durationMs: number | null;
   startedAt: string | null;
   completedAt: string | null;
@@ -238,6 +246,7 @@ export interface ReviewJobState {
   analysisDurationMs: number | null;
   analysisStartedAt: string | null;
   analysisCompletedAt: string | null;
+  costs: AiCostBreakdown;
   durationMs: number | null;
   startedAt: string | null;
   completedAt: string | null;

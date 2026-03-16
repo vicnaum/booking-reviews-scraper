@@ -8,6 +8,7 @@ import type {
   ReviewJobResponse,
 } from '@/types';
 import { resolveComparablePrice } from '@/lib/pricing';
+import { formatUsdCost, hasAiCosts } from '@/lib/aiCosts';
 import {
   fetchReviewJobResponse,
   getStoredReviewJobPriceDisplay,
@@ -499,6 +500,11 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                 <span className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5">
                   Analysis: {phaseStatusLabel(data.job.analysisStatus)}
                 </span>
+                {hasAiCosts(data.job.costs) && (
+                  <span className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5">
+                    AI cost: {formatUsdCost(data.job.costs.totalUsd)}
+                  </span>
+                )}
               </div>
               {(data.job.status === 'pending' || data.job.status === 'running') && (
                 <div className="mt-4">
@@ -593,6 +599,22 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                   )}
                 </div>
               </div>
+              {hasAiCosts(data.job.costs) && (
+                <div className="mt-3 flex flex-wrap gap-2 text-xs text-stone-400">
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-stone-200">
+                    Total AI spend {formatUsdCost(data.job.costs.totalUsd)}
+                  </span>
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    Reviews {formatUsdCost(data.job.costs.aiReviewsUsd)}
+                  </span>
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    Photos {formatUsdCost(data.job.costs.aiPhotosUsd)}
+                  </span>
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    Triage {formatUsdCost(data.job.costs.triageUsd)}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -810,6 +832,27 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                             <li key={item}>• {item}</li>
                           ))}
                         </ul>
+                      </div>
+                    )}
+                    {selectedResult.analysis && hasAiCosts(selectedResult.analysis.costs) && (
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
+                          AI cost
+                        </p>
+                        <div className="mt-2 flex flex-wrap gap-2 text-xs text-stone-300">
+                          <span className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1">
+                            Total {formatUsdCost(selectedResult.analysis.costs.totalUsd)}
+                          </span>
+                          <span className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1">
+                            Reviews {formatUsdCost(selectedResult.analysis.costs.aiReviewsUsd)}
+                          </span>
+                          <span className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1">
+                            Photos {formatUsdCost(selectedResult.analysis.costs.aiPhotosUsd)}
+                          </span>
+                          <span className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1">
+                            Triage {formatUsdCost(selectedResult.analysis.costs.triageUsd)}
+                          </span>
+                        </div>
                       </div>
                     )}
                   </div>
