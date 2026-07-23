@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildBookingReviewListVariables, mapBookingReviewCard } from '../src/booking/scraper.js';
+import {
+  buildBookingReviewListVariables,
+  mapBookingReviewCard,
+  shouldStopBookingReviewPagination,
+} from '../src/booking/scraper.js';
 
 test('buildBookingReviewListVariables preserves the captured ReviewList input shape', () => {
   assert.deepEqual(buildBookingReviewListVariables(8_413_015, 'fr', 20), {
@@ -9,7 +13,7 @@ test('buildBookingReviewListVariables preserves the captured ReviewList input sh
       hotelId: 8_413_015,
       ufi: 0,
       hotelCountryCode: 'fr',
-      sorter: 'MOST_RELEVANT',
+      sorter: 'NEWEST_FIRST',
       filters: {
         text: '',
       },
@@ -22,6 +26,13 @@ test('buildBookingReviewListVariables preserves the captured ReviewList input sh
       },
     },
   });
+});
+
+test('empty approved-card pages stop pagination only after the first page', () => {
+  assert.equal(shouldStopBookingReviewPagination(0, 0), false);
+  assert.equal(shouldStopBookingReviewPagination(1, 0), true);
+  assert.equal(shouldStopBookingReviewPagination(50, 0), true);
+  assert.equal(shouldStopBookingReviewPagination(1, 1), false);
 });
 
 test('mapBookingReviewCard preserves the legacy review artifact contract', () => {

@@ -131,7 +131,9 @@ Duplicate URLs (same hotel_name + country_code) are automatically deduplicated.
 1. Reads all CSV files from `data/booking/input/`
 2. Extracts hotel names and country codes from each URL
 3. Resolves each Booking hotel ID from its page name and country code
-4. Fetches the live review count and paginates the `ReviewList` GraphQL operation, 10 reviews per page with a 0.5s delay
+4. Fetches the live review count and paginates the `ReviewList` GraphQL operation newest-first,
+   10 reviews per page with a 0.5s delay. Pagination stops early if a non-first page has no
+   approved cards, because Booking's advertised count can include filtered cards.
 5. Saves results to JSON in `data/booking/output/`
 6. Skips files that have already been processed
 
@@ -174,6 +176,11 @@ interface Review {
   owner_resp_text: string | null;
 }
 ```
+
+`ReviewList` exposes `helpfulVotesCount` but no unhelpful-vote count. The legacy
+`found_unhelpful` field is therefore retained as an always-`0` compatibility value; it must not
+be interpreted as an observed metric. The `NEWEST_FIRST` sorter was live-probed on 2026-07-23:
+two complete three-page reads returned the same 29 unique IDs in monotonic date order.
 
 ### Error Handling
 
@@ -240,7 +247,8 @@ Before analysis, low-quality reviews are filtered out: reviews with titles <=15 
 - **Temporal Analysis**: Date ranges, years covered, reviews per year
 - **Geographic Data**: Country counts, top 3 review countries by volume
 - **Language Analysis**: Language diversity, top 3 languages
-- **Engagement Metrics**: Helpful votes, owner response rates
+- **Engagement Metrics**: Helpful votes and owner response rates. Unhelpful votes are unavailable
+  from the current GraphQL operation; the raw compatibility column is always `0`.
 
 ### Advanced Business Intelligence Metrics
 
