@@ -93,6 +93,9 @@ near-free and fast. Repeat runs on the same destination are the real usage patte
 
 ## Gotchas
 
+- **Package managers differ by directory**: repo root is **pnpm** (`pnpm-lock.yaml` tracked —
+  use `pnpm install` / `pnpm run build` / `pnpm test`); `web/` is **npm**
+  (`web/package-lock.json` tracked). Never generate a root `package-lock.json`.
 - Proxy config resolution: CLI flag → env → local `.env` → `~/.config/reviewr/.env` → none
   (`src/config.ts`, lazy `getProxyConfig()`).
 - AI photos + triage are currently **Gemini-only**; review analysis is provider-configurable
