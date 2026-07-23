@@ -162,6 +162,10 @@ export interface BatchResult {
   totalTimeMs: number;
 }
 
+export interface BatchDependencies {
+  scrapeBookingHotelReviews?: typeof bookingScraper.scrapeHotelReviews;
+}
+
 // --- Helpers ---
 
 function formatDuration(ms: number): string {
@@ -603,8 +607,14 @@ function buildReviewProgressPayload(input: {
 
 // --- Main batch function ---
 
-export async function runBatch(filePaths: string[], options: BatchOptions): Promise<BatchResult> {
+export async function runBatch(
+  filePaths: string[],
+  options: BatchOptions,
+  dependencies: BatchDependencies = {},
+): Promise<BatchResult> {
   const startTime = Date.now();
+  const scrapeBookingHotelReviews =
+    dependencies.scrapeBookingHotelReviews || bookingScraper.scrapeHotelReviews;
   const manifestPath = getManifestPath(options);
   let artifactCache: ArtifactCache | null = options.artifactCache ?? null;
   if (options.artifactCache === undefined) {
@@ -1390,7 +1400,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           } else {
             const t = Date.now();
             try {
-              const reviews = await bookingScraper.scrapeHotelReviews(
+              const reviews = await scrapeBookingHotelReviews(
                 hotelInfo,
                 async (progress) => {
                   if (!shouldEmitReviewProgressEvent(progress)) {
@@ -2206,7 +2216,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
       message: `${failureCount} listing${failureCount > 1 ? 's' : ''} with failures \u2014 auto-retrying`,
       payload: { failureCount },
     });
-    await runBatch([], { ...options, retryFailed: true });
+    await runBatch([], { ...options, retryFailed: true }, dependencies);
   } else if (failureCount > 0) {
     console.log(`  ${failureCount} listing${failureCount > 1 ? 's' : ''} still failing \u2014 retry with: reviewr batch ${manifestPath} --retry`);
   }
