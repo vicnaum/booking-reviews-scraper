@@ -185,6 +185,25 @@ precedence over `AI_REVIEW_MAX_REVIEWS`. StayReviewr checks its accumulated pers
 after each paid per-listing AI operation; when the budget is reached, it preserves partial
 results and stops before starting the next AI call.
 
+Batch and StayReviewr analysis jobs share fetched details, reviews, and downloaded photos across
+output directories:
+
+```env
+REVIEWR_CACHE_DIR=~/.cache/reviewr/artifacts-v1
+REVIEWR_CACHE_DETAILS_TTL_DAYS=7
+REVIEWR_CACHE_REVIEWS_TTL_DAYS=30
+REVIEWR_CACHE_PHOTOS_TTL_DAYS=180
+```
+
+Details keys include trip dates, guest count, and Booking room selection so request-specific
+pricing cannot leak across trips. Reviews are refreshed monthly; photos use the longer cache
+because their contents change less often. Set an artifact TTL to `0` to disable its cache, or
+run `reviewr batch --force` to bypass fresh entries and replace them after a successful fetch.
+Cache failures fall through to live scraping.
+
+The v1 cache grows without a size limit; removing the configured `REVIEWR_CACHE_DIR` (the
+default is `~/.cache/reviewr/artifacts-v1`) is always safe because the next run refetches it.
+
 ## Project Structure
 
 ```
@@ -196,6 +215,7 @@ booking-reviews-scraper/
 │   ├── config.ts                # Proxy auth resolution & persistence
 │   ├── utils.ts                 # Platform detection, URL parsing, output helpers
 │   ├── batch.ts                 # Batch orchestrator (details + reviews + photos + AI)
+│   ├── artifact-cache.ts        # Cross-job scrape artifact cache
 │   ├── analyze.ts               # AI review analysis (Gemini/OpenAI/xAI)
 │   ├── analyze-photos.ts        # AI photo analysis (Gemini vision)
 │   ├── triage.ts                # AI triage — grade listings against priorities

@@ -49,6 +49,20 @@ the maximum persisted AI spend per analysis run; use `0` to disable that ceiling
 reaches the ceiling stops before its next AI call and keeps its completed artifacts as partial
 results.
 
+Details, reviews, and downloaded photos are reused across jobs through the same cache as the
+CLI:
+
+```dotenv
+REVIEWR_CACHE_DIR=~/.cache/reviewr/artifacts-v1
+REVIEWR_CACHE_DETAILS_TTL_DAYS=7
+REVIEWR_CACHE_REVIEWS_TTL_DAYS=30
+REVIEWR_CACHE_PHOTOS_TTL_DAYS=180
+```
+
+Set an artifact TTL to `0` to disable it. Cache reads and writes fail open, so a missing,
+deleted, or corrupt cache simply triggers the normal scraper. The v1 cache grows without a
+size limit; removing the configured `REVIEWR_CACHE_DIR` is always safe.
+
 `web/.env.local` remains supported as a compatibility fallback for direct `web/` commands, but
 the root `.env` takes precedence. Proxy settings also fall back to
 `~/.config/reviewr/.env` created by `reviewr auth`.
