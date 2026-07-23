@@ -4,3 +4,16 @@ dist/
 *.log
 .env
 data/
+
+# local research captures & experiments (not source)
+*.har
+repomix-output*
+map-search/
+conversations/
+gemini-handoff/
+plugin/
+reviewr-plugin.zip
+
+# build/db artifacts
+*.tsbuildinfo
+web/prisma/*.db
