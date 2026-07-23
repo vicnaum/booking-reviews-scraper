@@ -206,3 +206,38 @@ test('budget stops are exposed as durable partial results with their configured 
     }
   }
 });
+
+test('malformed budget config cannot break job reads and warns once', () => {
+  const previousBudget = process.env[AI_JOB_BUDGET_ENV];
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  process.env[AI_JOB_BUDGET_ENV] = '5 USD';
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.join(' '));
+  };
+
+  try {
+    const first = toReviewJobResponse({
+      job: makeJob(),
+      listings: [makeListing()],
+      events: [],
+    });
+    const second = toReviewJobResponse({
+      job: makeJob(),
+      listings: [makeListing()],
+      events: [],
+    });
+
+    assert.equal(first.job.aiCostBudgetUsd, 5);
+    assert.equal(second.job.aiCostBudgetUsd, 5);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /Using the \$5\.00 default on job read paths/);
+  } finally {
+    console.warn = originalWarn;
+    if (previousBudget == null) {
+      delete process.env[AI_JOB_BUDGET_ENV];
+    } else {
+      process.env[AI_JOB_BUDGET_ENV] = previousBudget;
+    }
+  }
+});

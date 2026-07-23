@@ -3,6 +3,8 @@ export const DEFAULT_AI_JOB_BUDGET_USD = 5;
 
 export type AiBudgetPhase = 'ai-reviews' | 'ai-photos' | 'triage';
 
+const warnedInvalidReadValues = new Set<string>();
+
 export function resolveAiJobBudgetUsd(
   rawValue: string | number | null | undefined = process.env[AI_JOB_BUDGET_ENV],
 ): number | null {
@@ -25,6 +27,24 @@ export function resolveAiJobBudgetUsd(
   }
 
   return parsed === 0 ? null : parsed;
+}
+
+export function resolveAiJobBudgetUsdForRead(
+  rawValue: string | number | null | undefined = process.env[AI_JOB_BUDGET_ENV],
+): number | null {
+  try {
+    return resolveAiJobBudgetUsd(rawValue);
+  } catch (error) {
+    const warningKey = String(rawValue);
+    if (!warnedInvalidReadValues.has(warningKey)) {
+      warnedInvalidReadValues.add(warningKey);
+      console.warn(
+        `Warning: ${error instanceof Error ? error.message : String(error)}. `
+        + `Using the $${DEFAULT_AI_JOB_BUDGET_USD.toFixed(2)} default on job read paths.`,
+      );
+    }
+    return DEFAULT_AI_JOB_BUDGET_USD;
+  }
 }
 
 export function hasReachedAiJobBudget(
