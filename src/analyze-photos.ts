@@ -275,7 +275,7 @@ async function callGeminiVision(
       systemInstruction: systemPrompt,
       maxOutputTokens: 8192,
       temperature: 1.0,
-      mediaResolution: 'MEDIA_RESOLUTION_HIGH',
+      mediaResolution: 'MEDIA_RESOLUTION_MEDIUM',
       responseMimeType: 'application/json',
       responseSchema: jsonSchema,
     },

@@ -44,6 +44,10 @@ function makeJob(overrides: Record<string, unknown> = {}) {
     analysisStartedAt: new Date('2026-03-14T00:03:00.000Z'),
     analysisCompletedAt: new Date('2026-03-14T00:04:00.000Z'),
     analysisDurationMs: 60000,
+    aiReviewsCostUsd: 0.0142,
+    aiPhotosCostUsd: 0.0061,
+    triageCostUsd: 0.0027,
+    totalAiCostUsd: 0.023,
     ...overrides,
   } as any;
 }
@@ -97,6 +101,10 @@ function makeListing(overrides: Record<string, unknown> = {}) {
       triage: { fitScore: 88, tier: 'shortlist' },
       reviewCount: 10,
       photoCount: 12,
+      aiReviewsCostUsd: 0.0142,
+      aiPhotosCostUsd: 0.0061,
+      triageCostUsd: 0.0027,
+      totalAiCostUsd: 0.023,
       createdAt: new Date('2026-03-14T00:00:00.000Z'),
       updatedAt: new Date('2026-03-14T00:05:00.000Z'),
       startedAt: new Date('2026-03-14T00:03:00.000Z'),
@@ -123,6 +131,18 @@ test('native results readiness is derived from persisted analysis state, not rep
 
   assert.equal(response.job.reportReady, true);
   assert.equal(response.job.legacyReportAvailable, false);
+  assert.deepEqual(response.job.costs, {
+    aiReviewsUsd: 0.0142,
+    aiPhotosUsd: 0.0061,
+    triageUsd: 0.0027,
+    totalUsd: 0.023,
+  });
+  assert.deepEqual(response.listings[0].analysis?.costs, {
+    aiReviewsUsd: 0.0142,
+    aiPhotosUsd: 0.0061,
+    triageUsd: 0.0027,
+    totalUsd: 0.023,
+  });
 });
 
 test('legacy html export availability remains separate from native results readiness', () => {

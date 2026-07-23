@@ -27,6 +27,7 @@ import {
   parseSearchFilters,
   parseStoredBoundingBox,
 } from './searchJobs.js';
+import { buildAiCostBreakdown } from './aiCosts.js';
 
 const EARTH_RADIUS_METERS = 6371000;
 
@@ -237,6 +238,12 @@ function toReviewJobListingAnalysisState(
     triage: asJsonObject(row.triage),
     reviewCount: row.reviewCount ?? null,
     photoCount: row.photoCount ?? null,
+    costs: buildAiCostBreakdown({
+      aiReviewsCostUsd: row.aiReviewsCostUsd,
+      aiPhotosCostUsd: row.aiPhotosCostUsd,
+      triageCostUsd: row.triageCostUsd,
+      totalAiCostUsd: row.totalAiCostUsd,
+    }),
     durationMs: row.durationMs ?? null,
     startedAt: row.startedAt?.toISOString() ?? null,
     completedAt: row.completedAt?.toISOString() ?? null,
@@ -351,6 +358,12 @@ export function toReviewJobState(
     analysisDurationMs: job.analysisDurationMs ?? null,
     analysisStartedAt: job.analysisStartedAt?.toISOString() ?? null,
     analysisCompletedAt: job.analysisCompletedAt?.toISOString() ?? null,
+    costs: buildAiCostBreakdown({
+      aiReviewsCostUsd: job.aiReviewsCostUsd,
+      aiPhotosCostUsd: job.aiPhotosCostUsd,
+      triageCostUsd: job.triageCostUsd,
+      totalAiCostUsd: job.totalAiCostUsd,
+    }),
     durationMs: job.durationMs ?? null,
     startedAt: job.startedAt?.toISOString() ?? null,
     completedAt: job.completedAt?.toISOString() ?? null,
