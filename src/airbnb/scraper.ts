@@ -17,6 +17,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { getReviewsApiUrl, getReviewsHash } from './hash-manager.js';
+import { buildProxyUrl, resolveProxyProtocol } from '../config.js';
 
 const AIRBNB_BASE_URL = 'https://www.airbnb.com';
 const INPUT_DIR = 'data/airbnb/input';
@@ -28,12 +29,13 @@ const OUTPUT_DIR = 'data/airbnb/output';
 function getProxyConfig() {
   const USE_PROXY = process.env.USE_PROXY !== 'false';
   const PROXY_CONFIG = {
+    protocol: resolveProxyProtocol(process.env.PROXY_PROTOCOL),
     host: process.env.PROXY_HOST || '',
     port: parseInt(process.env.PROXY_PORT || '0'),
     username: process.env.PROXY_USERNAME || '',
     password: process.env.PROXY_PASSWORD || ''
   };
-  const proxyUrl = `http://${PROXY_CONFIG.username}:${PROXY_CONFIG.password}@${PROXY_CONFIG.host}:${PROXY_CONFIG.port}`;
+  const proxyUrl = buildProxyUrl(PROXY_CONFIG);
   return { USE_PROXY, PROXY_CONFIG, proxyUrl };
 }
 

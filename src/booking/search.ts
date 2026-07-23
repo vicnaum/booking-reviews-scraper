@@ -20,6 +20,10 @@ import {
 } from '../search/adaptive.js';
 import { bboxIntersectsCircle, subdivideBbox } from '../search/geo.js';
 import { filterSearchResults } from '../search/filters.js';
+import {
+  buildProxyUrl,
+  resolveProxyProtocol,
+} from '../config.js';
 import type {
   BookingSearchParams,
   SearchResult,
@@ -111,12 +115,13 @@ function getProxyUrlFromEnv(): string | null {
     return null;
   }
 
-  const username = encodeURIComponent(process.env.PROXY_USERNAME || '');
-  const password = encodeURIComponent(process.env.PROXY_PASSWORD || '');
-  const port = process.env.PROXY_PORT || '';
-  const auth = username || password ? `${username}:${password}@` : '';
-
-  return `http://${auth}${process.env.PROXY_HOST}${port ? `:${port}` : ''}`;
+  return buildProxyUrl({
+    protocol: resolveProxyProtocol(process.env.PROXY_PROTOCOL),
+    host: process.env.PROXY_HOST,
+    port: parseInt(process.env.PROXY_PORT || '0'),
+    username: process.env.PROXY_USERNAME || '',
+    password: process.env.PROXY_PASSWORD || '',
+  });
 }
 
 function buildPlaywrightLaunchOptions(): Record<string, unknown> {
