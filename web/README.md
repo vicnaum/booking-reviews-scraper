@@ -22,6 +22,12 @@ Chromium when needed, waits for Postgres and Redis to become healthy, synchroniz
 schema, and then runs the Next.js app and BullMQ worker together. Open
 <http://localhost:3000>.
 
+The worker launched by `npm run up` intentionally does not watch the filesystem. Changes under
+`data/`, `web/data/`, logs, caches, or a Git pull cannot restart it in the middle of a queued or
+paid AI job. To load worker code changes, wait for active jobs to finish and deliberately restart
+`npm run up`. Use `npm --prefix web run worker:dev` only for interactive worker development where
+watch-mode restarts are expected.
+
 Press Ctrl-C to stop the app and worker. The data services stay available between runs; stop
 them with:
 
