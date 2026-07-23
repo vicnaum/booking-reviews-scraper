@@ -16,6 +16,14 @@ import { runAnalyze, parseModelConfig, getProviderApiKey, PROVIDER_KEY_NAMES, ty
 import { runAnalyzePhotos, type PhotoAnalysisResult } from './analyze-photos.js';
 import { runTriage, type TriageResult } from './triage.js';
 import {
+  buildDetailsCacheVariant,
+  buildPhotosCacheVariant,
+  createArtifactCache,
+  type ArtifactCache,
+  type ArtifactCacheHit,
+  type ArtifactCacheKey,
+} from './artifact-cache.js';
+import {
   formatReviewProgressLabel,
   getScrapeProgressFraction,
   shouldEmitReviewProgressEvent,
@@ -46,6 +54,7 @@ export interface BatchOptions {
   print: boolean;
   programmatic?: boolean;
   hooks?: BatchHooks;
+  artifactCache?: ArtifactCache | null;
 }
 
 // --- Manifest types ---
@@ -60,6 +69,9 @@ export interface ManifestPhase {
   expected?: number;
   model?: string;
   cost?: number;        // USD cost of AI processing
+  source?: 'network' | 'cache' | 'local';
+  cachedAt?: string;
+  cacheAgeMs?: number;
 }
 
 export interface ManifestEntry {
@@ -163,6 +175,183 @@ function formatDuration(ms: number): string {
 function dirExistsAndNonEmpty(dirPath: string): boolean {
   if (!fs.existsSync(dirPath)) return false;
   return fs.readdirSync(dirPath).length > 0;
+}
+
+function readJsonFile<T>(filePath: string): T | null {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as T;
+  } catch {
+    return null;
+  }
+}
+
+function formatCacheAge(ageMs: number): string {
+  const minutes = Math.floor(ageMs / (60 * 1000));
+  if (minutes < 60) return `${minutes}m old`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h old`;
+  return `${Math.floor(hours / 24)}d old`;
+}
+
+function getBookingLinkedRoomId(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const blockId =
+      parsed.searchParams.get('matching_block_id')
+      || parsed.searchParams.get('highlighted_blocks');
+    return blockId?.match(/^(\d+)/)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function cacheProvenance(hit: ArtifactCacheHit) {
+  return {
+    source: 'cache' as const,
+    cachedAt: hit.cachedAt,
+    cacheAgeMs: hit.ageMs,
+  };
+}
+
+function restoreCachedJson<T>(input: {
+  cache: ArtifactCache | null;
+  key: ArtifactCacheKey;
+  destinationPath: string;
+}): { data: T; hit: ArtifactCacheHit } | null {
+  if (!input.cache) {
+    return null;
+  }
+
+  try {
+    const hit = input.cache.restoreFile(input.key, input.destinationPath);
+    if (!hit) {
+      return null;
+    }
+
+    const data = readJsonFile<T>(input.destinationPath);
+    if (data == null) {
+      input.cache.invalidate(input.key);
+      fs.rmSync(input.destinationPath, { force: true });
+      console.warn(
+        `Warning: ignored corrupt ${input.key.artifact} cache for `
+        + `${input.key.platform}/${input.key.listingId}`,
+      );
+      return null;
+    }
+
+    return { data, hit };
+  } catch (error) {
+    console.warn(
+      `Warning: ${input.key.artifact} cache read failed for `
+      + `${input.key.platform}/${input.key.listingId}: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+}
+
+function restoreCachedPhotos(input: {
+  cache: ArtifactCache | null;
+  key: ArtifactCacheKey;
+  destinationPath: string;
+}): ArtifactCacheHit | null {
+  if (!input.cache) {
+    return null;
+  }
+
+  try {
+    const hit = input.cache.restoreDirectory(input.key, input.destinationPath);
+    if (!hit) {
+      return null;
+    }
+
+    const actualCount = fs.readdirSync(input.destinationPath).length;
+    if (hit.count != null && actualCount !== hit.count) {
+      input.cache.invalidate(input.key);
+      fs.rmSync(input.destinationPath, { recursive: true, force: true });
+      console.warn(
+        `Warning: ignored incomplete photos cache for `
+        + `${input.key.platform}/${input.key.listingId}`,
+      );
+      return null;
+    }
+
+    return {
+      ...hit,
+      count: hit.count ?? actualCount,
+    };
+  } catch (error) {
+    console.warn(
+      `Warning: photos cache read failed for ${input.key.platform}/${input.key.listingId}: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+}
+
+function publishCachedFile(input: {
+  cache: ArtifactCache | null;
+  key: ArtifactCacheKey;
+  sourcePath: string;
+  count?: number;
+  expected?: number;
+}): void {
+  if (!input.cache) {
+    return;
+  }
+
+  try {
+    input.cache.publishFile(input.key, input.sourcePath, {
+      count: input.count,
+      expected: input.expected,
+    });
+  } catch (error) {
+    console.warn(
+      `Warning: ${input.key.artifact} cache write failed for `
+      + `${input.key.platform}/${input.key.listingId}: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+function publishCachedPhotos(input: {
+  cache: ArtifactCache | null;
+  key: ArtifactCacheKey;
+  sourcePath: string;
+  count: number;
+  expected?: number;
+}): void {
+  if (!input.cache) {
+    return;
+  }
+
+  try {
+    input.cache.publishDirectory(input.key, input.sourcePath, {
+      count: input.count,
+      expected: input.expected,
+    });
+  } catch (error) {
+    console.warn(
+      `Warning: photos cache write failed for ${input.key.platform}/${input.key.listingId}: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+function getExpectedBookingPhotoCount(
+  details: bookingListing.BookingListingDetails,
+  downloadAll: boolean,
+): number {
+  if (downloadAll || !details.linkedRoomId) {
+    return details.photos.length;
+  }
+
+  const selectedPhotos = details.photos.filter(
+    (photo) =>
+      photo.associatedRooms.includes(details.linkedRoomId!)
+      || photo.associatedRooms.length === 0,
+  );
+  return selectedPhotos.length > 0 ? selectedPhotos.length : details.photos.length;
 }
 
 function getManifestPath(options: BatchOptions): string {
@@ -417,6 +606,17 @@ function buildReviewProgressPayload(input: {
 export async function runBatch(filePaths: string[], options: BatchOptions): Promise<BatchResult> {
   const startTime = Date.now();
   const manifestPath = getManifestPath(options);
+  let artifactCache: ArtifactCache | null = options.artifactCache ?? null;
+  if (options.artifactCache === undefined) {
+    try {
+      artifactCache = createArtifactCache();
+    } catch (error) {
+      console.warn(
+        `Warning: artifact cache disabled: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
 
   // 1. Load or create manifest (v2 format with subdirectories)
   let manifest: BatchManifest = loadManifest(manifestPath) || {
@@ -502,11 +702,20 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
   if (options.aiPhotos) phases.push('ai-photos');
   if (options.triage) phases.push('triage');
   console.log(`Phases: ${phases.join(', ')}\n`);
+  if (artifactCache) {
+    console.log(`Cache: ${artifactCache.policy.rootDir}\n`);
+  }
   await emitBatchEvent(options, {
     phase: 'batch',
     level: 'info',
     message: `Batch started (${phases.join(', ')})`,
-    payload: { phases, checkIn, checkOut, adults },
+    payload: {
+      phases,
+      checkIn,
+      checkOut,
+      adults,
+      cacheRoot: artifactCache?.policy.rootDir ?? null,
+    },
   });
 
   const dateOpts = { checkIn, checkOut, adults };
@@ -519,21 +728,33 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
   if (preprocessed.airbnb.count > 0) {
     const airbnbOutputDir = options.outputDir || 'data/airbnb/output';
     let apiKey: string | null = null;
+    let apiKeyAttempted = false;
+    const ensureAirbnbApiKey = async (refresh = false): Promise<string | null> => {
+      if (apiKey && !refresh) {
+        return apiKey;
+      }
+      if (apiKeyAttempted && !refresh) {
+        return null;
+      }
+
+      apiKeyAttempted = true;
+      try {
+        apiKey = await airbnbScraper.getApiKey();
+      } catch (error) {
+        console.error(
+          `Failed to get Airbnb API key: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+        );
+        apiKey = null;
+      }
+      return apiKey;
+    };
     await emitBatchEvent(options, {
       phase: 'scrape',
       level: 'info',
       message: 'Starting Airbnb scrape phases',
       payload: { platform: 'airbnb', listings: preprocessed.airbnb.count },
     });
-
-    // Get API key once if needed for details or reviews
-    if (options.fetchDetails || options.fetchReviews) {
-      try {
-        apiKey = await airbnbScraper.getApiKey();
-      } catch (err: any) {
-        console.error(`Failed to get Airbnb API key: ${err.message}`);
-      }
-    }
 
     for (const url of preprocessed.airbnb.urls) {
       currentIndex++;
@@ -542,6 +763,24 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
       const prefix = `[${currentIndex}/${totalCount}] ${manifestKey}`;
       const statusParts: string[] = [];
       let details: airbnbListing.AirbnbListingDetails | null = null;
+      const cacheHits: string[] = [];
+      const detailsCacheKey: ArtifactCacheKey = {
+        platform: 'airbnb',
+        listingId: roomId,
+        artifact: 'details',
+        variant: buildDetailsCacheVariant(dateOpts),
+      };
+      const reviewsCacheKey: ArtifactCacheKey = {
+        platform: 'airbnb',
+        listingId: roomId,
+        artifact: 'reviews',
+      };
+      const photosCacheKey: ArtifactCacheKey = {
+        platform: 'airbnb',
+        listingId: roomId,
+        artifact: 'photos',
+        variant: buildPhotosCacheVariant({ platform: 'airbnb' }),
+      };
 
       // Initialize manifest entry (preserve existing or create new)
       if (!manifest.listings[manifestKey]) {
@@ -565,42 +804,88 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
 
       // --- Details ---
       if (doDetails) {
-        if (!apiKey) {
-          statusParts.push('details \u2717 no API key');
-          airbnbResult.details.failed++;
-          airbnbResult.errors.push({ id: roomId, phase: 'details', message: 'No API key' });
-          entry.details = { status: 'failed', error: 'No API key' };
+        const listingsDir = getListingsDir(airbnbOutputDir);
+        const detailsFile = path.join(listingsDir, `listing_${roomId}.json`);
+        const relativeDetailsFile = `listings/listing_${roomId}.json`;
+        const localDetails = !options.force
+          ? readJsonFile<airbnbListing.AirbnbListingDetails>(detailsFile)
+          : null;
+
+        if (localDetails) {
+          details = localDetails;
+          statusParts.push('details \u2298 local');
+          airbnbResult.details.skipped++;
+          entry.details = {
+            status: 'skipped',
+            file: relativeDetailsFile,
+            source: 'local',
+          };
           await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
         } else {
-          const listingsDir = getListingsDir(airbnbOutputDir);
-          const detailsFile = path.join(listingsDir, `listing_${roomId}.json`);
-          if (!options.force && fs.existsSync(detailsFile)) {
-            statusParts.push('details \u2298 skip');
+          const cachedDetails = !options.force
+            ? restoreCachedJson<airbnbListing.AirbnbListingDetails>({
+                cache: artifactCache,
+                key: detailsCacheKey,
+                destinationPath: detailsFile,
+              })
+            : null;
+
+          if (cachedDetails) {
+            details = cachedDetails.data;
+            cacheHits.push('details');
+            statusParts.push(`details \u26a1 cache (${formatCacheAge(cachedDetails.hit.ageMs)})`);
             airbnbResult.details.skipped++;
-            entry.details = { status: 'skipped', file: `listings/listing_${roomId}.json` };
+            entry.details = {
+              status: 'fetched',
+              file: relativeDetailsFile,
+              ...cacheProvenance(cachedDetails.hit),
+            };
             await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
-            if (options.fetchPhotos) {
-              try { details = JSON.parse(fs.readFileSync(detailsFile, 'utf-8')); } catch {}
-            }
           } else {
-            const t = Date.now();
-            try {
-              details = await airbnbListing.fetchListingDetails(apiKey, roomId, dateOpts);
-              if (!options.print) {
-                airbnbListing.saveListingDetails(details, `listing_${roomId}.json`, listingsDir);
-              }
-              statusParts.push(`details \u2713 (${formatDuration(Date.now() - t)})`);
-              airbnbResult.details.fetched++;
-              entry.details = { status: 'fetched', file: `listings/listing_${roomId}.json` };
-              await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
-            } catch (err: any) {
-              statusParts.push('details \u2717 error');
+            const resolvedApiKey = await ensureAirbnbApiKey();
+            if (!resolvedApiKey) {
+              statusParts.push('details \u2717 no API key');
               airbnbResult.details.failed++;
-              airbnbResult.errors.push({ id: roomId, phase: 'details', message: err.message });
-              entry.details = { status: 'failed', error: err.message };
+              airbnbResult.errors.push({ id: roomId, phase: 'details', message: 'No API key' });
+              entry.details = { status: 'failed', error: 'No API key' };
               await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
-              if (err.message?.includes('401') || err.message?.includes('403')) {
-                try { apiKey = await airbnbScraper.getApiKey(); } catch {}
+            } else {
+              const t = Date.now();
+              try {
+                details = await airbnbListing.fetchListingDetails(
+                  resolvedApiKey,
+                  roomId,
+                  dateOpts,
+                );
+                if (!options.print) {
+                  airbnbListing.saveListingDetails(
+                    details,
+                    `listing_${roomId}.json`,
+                    listingsDir,
+                  );
+                  publishCachedFile({
+                    cache: artifactCache,
+                    key: detailsCacheKey,
+                    sourcePath: detailsFile,
+                  });
+                }
+                statusParts.push(`details \u2713 (${formatDuration(Date.now() - t)})`);
+                airbnbResult.details.fetched++;
+                entry.details = {
+                  status: 'fetched',
+                  file: relativeDetailsFile,
+                  source: 'network',
+                };
+                await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
+              } catch (err: any) {
+                statusParts.push('details \u2717 error');
+                airbnbResult.details.failed++;
+                airbnbResult.errors.push({ id: roomId, phase: 'details', message: err.message });
+                entry.details = { status: 'failed', error: err.message };
+                await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
+                if (err.message?.includes('401') || err.message?.includes('403')) {
+                  await ensureAirbnbApiKey(true);
+                }
               }
             }
           }
@@ -622,96 +907,155 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
 
       // --- Reviews ---
       if (doReviews) {
-        if (!apiKey) {
-          statusParts.push('reviews \u2717 no API key');
-          airbnbResult.reviews.failed++;
-          airbnbResult.errors.push({ id: roomId, phase: 'reviews', message: 'No API key' });
-          entry.reviews = { status: 'failed', error: 'No API key' };
+        const reviewsDir = getReviewsDir(airbnbOutputDir);
+        const reviewsFile = path.join(reviewsDir, `room_${roomId}_reviews.json`);
+        const relativeReviewsFile = `reviews/room_${roomId}_reviews.json`;
+        const localReviews =
+          !options.force && !shouldRetryPhase(manifest, manifestKey, 'reviews')
+            ? readJsonFile<{ total_reviews?: number; reviews?: unknown[] }>(reviewsFile)
+            : null;
+
+        if (localReviews) {
+          const reviewCount = localReviews.total_reviews ?? localReviews.reviews?.length ?? 0;
+          statusParts.push('reviews \u2298 local');
+          airbnbResult.reviews.skipped++;
+          airbnbResult.reviews.totalReviewCount += reviewCount;
+          entry.reviews = {
+            status: 'skipped',
+            file: relativeReviewsFile,
+            count: reviewCount,
+            source: 'local',
+          };
           await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
         } else {
-          const reviewsDir = getReviewsDir(airbnbOutputDir);
-          const reviewsFile = path.join(reviewsDir, `room_${roomId}_reviews.json`);
-          if (!options.force && fs.existsSync(reviewsFile) && !shouldRetryPhase(manifest, manifestKey, 'reviews')) {
-            statusParts.push('reviews \u2298 skip');
+          const cachedReviews = !options.force
+            ? restoreCachedJson<{ total_reviews?: number; reviews?: unknown[] }>({
+                cache: artifactCache,
+                key: reviewsCacheKey,
+                destinationPath: reviewsFile,
+              })
+            : null;
+
+          if (cachedReviews) {
+            const reviewCount =
+              cachedReviews.hit.count
+              ?? cachedReviews.data.total_reviews
+              ?? cachedReviews.data.reviews?.length
+              ?? 0;
+            cacheHits.push('reviews');
+            statusParts.push(`reviews \u26a1 cache (${formatCacheAge(cachedReviews.hit.ageMs)})`);
             airbnbResult.reviews.skipped++;
-            entry.reviews = { status: 'skipped', file: `reviews/room_${roomId}_reviews.json` };
+            airbnbResult.reviews.totalReviewCount += reviewCount;
+            entry.reviews = {
+              status: 'fetched',
+              file: relativeReviewsFile,
+              count: reviewCount,
+              expected: cachedReviews.hit.expected,
+              ...cacheProvenance(cachedReviews.hit),
+            };
             await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
           } else {
-            const t = Date.now();
-            try {
-              const property: airbnbScraper.PropertyInfo = {
-                id: roomId,
-                url,
-                room_type: 'Unknown',
-                title: details?.title || `Room ${roomId}`,
-                rating_score: '',
-                review_count: '',
-                status: 'Unknown',
-              };
-              const reviews = await airbnbScraper.fetchPropertyReviews(
-                apiKey,
-                property,
-                async (progress) => {
-                  if (!shouldEmitReviewProgressEvent(progress)) {
-                    return;
-                  }
-
-                  const payload = buildReviewProgressPayload({
-                    platform: 'airbnb',
-                    listingId: roomId,
-                    listingIndex: currentIndex,
-                    listingCount: totalCount,
-                    currentPage: progress.currentPage,
-                    totalPages: progress.totalPages,
-                    totalReviewsSoFar: progress.totalReviewsSoFar,
-                    reportedReviewCount: progress.reportedReviewCount,
-                  });
-
-                  await emitBatchEvent(options, {
-                    phase: 'scrape',
-                    level: 'info',
-                    message: payload.progressLabel as string,
-                    manifestKey,
-                    platform: 'airbnb',
-                    listingId: roomId,
-                    payload,
-                  });
-                },
-              );
-              if (!options.print) {
-                if (!fs.existsSync(reviewsDir)) fs.mkdirSync(reviewsDir, { recursive: true });
-                const output = {
-                  scraped_at: new Date().toISOString(),
-                  total_reviews: reviews.length,
-                  properties_processed: [roomId],
-                  reviews,
-                };
-                fs.writeFileSync(
-                  path.join(reviewsDir, `room_${roomId}_reviews.json`),
-                  JSON.stringify(output, null, 2),
-                );
-              }
-              statusParts.push(`reviews \u2713 ${reviews.length} (${formatDuration(Date.now() - t)})`);
-              airbnbResult.reviews.fetched++;
-              airbnbResult.reviews.totalReviewCount += reviews.length;
-
-              // Review completeness check
-              const expectedReviews = details?.reviewCount;
-              if (expectedReviews && reviews.length < expectedReviews * 0.8) {
-                entry.reviews = { status: 'partial', file: `reviews/room_${roomId}_reviews.json`, count: reviews.length, expected: expectedReviews };
-                console.warn(`  Warning: got ${reviews.length}/${expectedReviews} reviews (partial)`);
-              } else {
-                entry.reviews = { status: 'fetched', file: `reviews/room_${roomId}_reviews.json`, count: reviews.length, expected: expectedReviews || undefined };
-              }
-              await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
-            } catch (err: any) {
-              statusParts.push('reviews \u2717 error');
+            const resolvedApiKey = await ensureAirbnbApiKey();
+            if (!resolvedApiKey) {
+              statusParts.push('reviews \u2717 no API key');
               airbnbResult.reviews.failed++;
-              airbnbResult.errors.push({ id: roomId, phase: 'reviews', message: err.message });
-              entry.reviews = { status: 'failed', error: err.message };
+              airbnbResult.errors.push({ id: roomId, phase: 'reviews', message: 'No API key' });
+              entry.reviews = { status: 'failed', error: 'No API key' };
               await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
-              if (err.message?.includes('401') || err.message?.includes('403')) {
-                try { apiKey = await airbnbScraper.getApiKey(); } catch {}
+            } else {
+              const t = Date.now();
+              try {
+                const property: airbnbScraper.PropertyInfo = {
+                  id: roomId,
+                  url,
+                  room_type: 'Unknown',
+                  title: details?.title || `Room ${roomId}`,
+                  rating_score: '',
+                  review_count: '',
+                  status: 'Unknown',
+                };
+                const reviews = await airbnbScraper.fetchPropertyReviews(
+                  resolvedApiKey,
+                  property,
+                  async (progress) => {
+                    if (!shouldEmitReviewProgressEvent(progress)) {
+                      return;
+                    }
+
+                    const payload = buildReviewProgressPayload({
+                      platform: 'airbnb',
+                      listingId: roomId,
+                      listingIndex: currentIndex,
+                      listingCount: totalCount,
+                      currentPage: progress.currentPage,
+                      totalPages: progress.totalPages,
+                      totalReviewsSoFar: progress.totalReviewsSoFar,
+                      reportedReviewCount: progress.reportedReviewCount,
+                    });
+
+                    await emitBatchEvent(options, {
+                      phase: 'scrape',
+                      level: 'info',
+                      message: payload.progressLabel as string,
+                      manifestKey,
+                      platform: 'airbnb',
+                      listingId: roomId,
+                      payload,
+                    });
+                  },
+                );
+                if (!options.print) {
+                  if (!fs.existsSync(reviewsDir)) fs.mkdirSync(reviewsDir, { recursive: true });
+                  const output = {
+                    scraped_at: new Date().toISOString(),
+                    total_reviews: reviews.length,
+                    properties_processed: [roomId],
+                    reviews,
+                  };
+                  fs.writeFileSync(reviewsFile, JSON.stringify(output, null, 2));
+                }
+                statusParts.push(`reviews \u2713 ${reviews.length} (${formatDuration(Date.now() - t)})`);
+                airbnbResult.reviews.fetched++;
+                airbnbResult.reviews.totalReviewCount += reviews.length;
+
+                const expectedReviews = details?.reviewCount;
+                if (expectedReviews && reviews.length < expectedReviews * 0.8) {
+                  entry.reviews = {
+                    status: 'partial',
+                    file: relativeReviewsFile,
+                    count: reviews.length,
+                    expected: expectedReviews,
+                    source: 'network',
+                  };
+                  console.warn(`  Warning: got ${reviews.length}/${expectedReviews} reviews (partial)`);
+                } else {
+                  entry.reviews = {
+                    status: 'fetched',
+                    file: relativeReviewsFile,
+                    count: reviews.length,
+                    expected: expectedReviews || undefined,
+                    source: 'network',
+                  };
+                  if (!options.print) {
+                    publishCachedFile({
+                      cache: artifactCache,
+                      key: reviewsCacheKey,
+                      sourcePath: reviewsFile,
+                      count: reviews.length,
+                      expected: expectedReviews || undefined,
+                    });
+                  }
+                }
+                await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
+              } catch (err: any) {
+                statusParts.push('reviews \u2717 error');
+                airbnbResult.reviews.failed++;
+                airbnbResult.errors.push({ id: roomId, phase: 'reviews', message: err.message });
+                entry.reviews = { status: 'failed', error: err.message };
+                await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
+                if (err.message?.includes('401') || err.message?.includes('403')) {
+                  await ensureAirbnbApiKey(true);
+                }
               }
             }
           }
@@ -732,37 +1076,85 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         const photosIncomplete = dirExists && details && expectedPhotos > 0 && actualPhotos < expectedPhotos;
 
         if (!options.force && dirExistsAndNonEmpty(photosDir) && !photosIncomplete) {
-          statusParts.push('photos \u2298 skip');
+          statusParts.push('photos \u2298 local');
           airbnbResult.photos.skipped++;
-          entry.photos = { status: 'skipped', dir: `photos/${roomId}`, count: actualPhotos, expected: expectedPhotos || undefined };
-          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
-        } else if (!details) {
-          statusParts.push('photos \u2298 skip (no details)');
-          airbnbResult.photos.skipped++;
-          entry.photos = { status: 'skipped', reason: 'no details' };
+          entry.photos = {
+            status: 'skipped',
+            dir: `photos/${roomId}`,
+            count: actualPhotos,
+            expected: expectedPhotos || undefined,
+            source: 'local',
+          };
           await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
         } else {
-          if (photosIncomplete) {
-            statusParts.push(`photos: ${actualPhotos}/${expectedPhotos} incomplete, re-downloading`);
-          }
-          try {
-            await airbnbListing.downloadPhotos(details, photosBase, { dirName: roomId });
-            const finalCount = fs.existsSync(photosDir) ? fs.readdirSync(photosDir).length : 0;
-            if (expectedPhotos > 0 && finalCount < expectedPhotos) {
-              statusParts.push(`photos \u2713 ${finalCount}/${expectedPhotos} (partial)`);
-              entry.photos = { status: 'partial', dir: `photos/${roomId}`, count: finalCount, expected: expectedPhotos };
-            } else {
-              statusParts.push(`photos \u2713 ${finalCount}`);
-              entry.photos = { status: 'fetched', dir: `photos/${roomId}`, count: finalCount, expected: expectedPhotos || undefined };
+          const cachedPhotos = !options.force
+            ? restoreCachedPhotos({
+                cache: artifactCache,
+                key: photosCacheKey,
+                destinationPath: photosDir,
+              })
+            : null;
+
+          if (cachedPhotos) {
+            const cachedCount = cachedPhotos.count ?? 0;
+            cacheHits.push('photos');
+            statusParts.push(`photos \u26a1 cache (${formatCacheAge(cachedPhotos.ageMs)})`);
+            airbnbResult.photos.skipped++;
+            entry.photos = {
+              status: 'fetched',
+              dir: `photos/${roomId}`,
+              count: cachedCount,
+              expected: cachedPhotos.expected,
+              ...cacheProvenance(cachedPhotos),
+            };
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
+          } else if (!details) {
+            statusParts.push('photos \u2298 skip (no details)');
+            airbnbResult.photos.skipped++;
+            entry.photos = { status: 'skipped', reason: 'no details' };
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
+          } else {
+            if (photosIncomplete) {
+              statusParts.push(`photos: ${actualPhotos}/${expectedPhotos} incomplete, re-downloading`);
             }
-            airbnbResult.photos.fetched++;
-            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
-          } catch (err: any) {
-            statusParts.push('photos \u2717 error');
-            airbnbResult.photos.failed++;
-            airbnbResult.errors.push({ id: roomId, phase: 'photos', message: err.message });
-            entry.photos = { status: 'failed', dir: `photos/${roomId}`, error: err.message };
-            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
+            try {
+              await airbnbListing.downloadPhotos(details, photosBase, { dirName: roomId });
+              const finalCount = fs.existsSync(photosDir) ? fs.readdirSync(photosDir).length : 0;
+              if (expectedPhotos > 0 && finalCount < expectedPhotos) {
+                statusParts.push(`photos \u2713 ${finalCount}/${expectedPhotos} (partial)`);
+                entry.photos = {
+                  status: 'partial',
+                  dir: `photos/${roomId}`,
+                  count: finalCount,
+                  expected: expectedPhotos,
+                  source: 'network',
+                };
+              } else {
+                statusParts.push(`photos \u2713 ${finalCount}`);
+                entry.photos = {
+                  status: 'fetched',
+                  dir: `photos/${roomId}`,
+                  count: finalCount,
+                  expected: expectedPhotos || undefined,
+                  source: 'network',
+                };
+                publishCachedPhotos({
+                  cache: artifactCache,
+                  key: photosCacheKey,
+                  sourcePath: photosDir,
+                  count: finalCount,
+                  expected: expectedPhotos || undefined,
+                });
+              }
+              airbnbResult.photos.fetched++;
+              await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
+            } catch (err: any) {
+              statusParts.push('photos \u2717 error');
+              airbnbResult.photos.failed++;
+              airbnbResult.errors.push({ id: roomId, phase: 'photos', message: err.message });
+              entry.photos = { status: 'failed', dir: `photos/${roomId}`, error: err.message };
+              await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
+            }
           }
         }
       } else if (options.fetchPhotos) {
@@ -779,7 +1171,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         manifestKey,
         platform: 'airbnb',
         listingId: roomId,
-        payload: { url },
+        payload: { url, cacheHits },
       });
 
       // Save manifest after each listing
@@ -815,6 +1207,34 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
       const prefix = `[${currentIndex}/${totalCount}] ${manifestKey}`;
       const statusParts: string[] = [];
       let details: bookingListing.BookingListingDetails | null = null;
+      const cacheHits: string[] = [];
+      const cacheListingId =
+        `${hotelInfo.country_code.toLowerCase()}/${hotelInfo.hotel_name.toLowerCase()}`;
+      const linkedRoomId = getBookingLinkedRoomId(url);
+      const detailsCacheKey: ArtifactCacheKey = {
+        platform: 'booking',
+        listingId: cacheListingId,
+        artifact: 'details',
+        variant: buildDetailsCacheVariant({
+          ...dateOpts,
+          linkedRoomId,
+        }),
+      };
+      const reviewsCacheKey: ArtifactCacheKey = {
+        platform: 'booking',
+        listingId: cacheListingId,
+        artifact: 'reviews',
+      };
+      const photosCacheKey: ArtifactCacheKey = {
+        platform: 'booking',
+        listingId: cacheListingId,
+        artifact: 'photos',
+        variant: buildPhotosCacheVariant({
+          platform: 'booking',
+          downloadAll: options.downloadPhotosAll,
+          linkedRoomId,
+        }),
+      };
 
       // Initialize manifest entry
       if (!manifest.listings[manifestKey]) {
@@ -840,31 +1260,68 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
       if (doDetails) {
         const listingsDir = getListingsDir(bookingOutputDir);
         const detailsFile = path.join(listingsDir, `listing_${id}.json`);
-        if (!options.force && fs.existsSync(detailsFile)) {
-          statusParts.push('details \u2298 skip');
+        const relativeDetailsFile = `listings/listing_${id}.json`;
+        const localDetails = !options.force
+          ? readJsonFile<bookingListing.BookingListingDetails>(detailsFile)
+          : null;
+
+        if (localDetails) {
+          details = localDetails;
+          statusParts.push('details \u2298 local');
           bookingResult.details.skipped++;
-          entry.details = { status: 'skipped', file: `listings/listing_${id}.json` };
+          entry.details = {
+            status: 'skipped',
+            file: relativeDetailsFile,
+            source: 'local',
+          };
           await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
-          if (options.fetchPhotos) {
-            try { details = JSON.parse(fs.readFileSync(detailsFile, 'utf-8')); } catch {}
-          }
         } else {
-          const t = Date.now();
-          try {
-            details = await bookingListing.scrapeListingDetails(url, dateOpts);
-            if (!options.print) {
-              bookingListing.saveListingDetails(details, `listing_${id}.json`, listingsDir);
+          const cachedDetails = !options.force
+            ? restoreCachedJson<bookingListing.BookingListingDetails>({
+                cache: artifactCache,
+                key: detailsCacheKey,
+                destinationPath: detailsFile,
+              })
+            : null;
+
+          if (cachedDetails) {
+            details = cachedDetails.data;
+            cacheHits.push('details');
+            statusParts.push(`details \u26a1 cache (${formatCacheAge(cachedDetails.hit.ageMs)})`);
+            bookingResult.details.skipped++;
+            entry.details = {
+              status: 'fetched',
+              file: relativeDetailsFile,
+              ...cacheProvenance(cachedDetails.hit),
+            };
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
+          } else {
+            const t = Date.now();
+            try {
+              details = await bookingListing.scrapeListingDetails(url, dateOpts);
+              if (!options.print) {
+                bookingListing.saveListingDetails(details, `listing_${id}.json`, listingsDir);
+                publishCachedFile({
+                  cache: artifactCache,
+                  key: detailsCacheKey,
+                  sourcePath: detailsFile,
+                });
+              }
+              statusParts.push(`details \u2713 (${formatDuration(Date.now() - t)})`);
+              bookingResult.details.fetched++;
+              entry.details = {
+                status: 'fetched',
+                file: relativeDetailsFile,
+                source: 'network',
+              };
+              await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
+            } catch (err: any) {
+              statusParts.push('details \u2717 error');
+              bookingResult.details.failed++;
+              bookingResult.errors.push({ id, phase: 'details', message: err.message });
+              entry.details = { status: 'failed', error: err.message };
+              await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
             }
-            statusParts.push(`details \u2713 (${formatDuration(Date.now() - t)})`);
-            bookingResult.details.fetched++;
-            entry.details = { status: 'fetched', file: `listings/listing_${id}.json` };
-            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
-          } catch (err: any) {
-            statusParts.push('details \u2717 error');
-            bookingResult.details.failed++;
-            bookingResult.errors.push({ id, phase: 'details', message: err.message });
-            entry.details = { status: 'failed', error: err.message };
-            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
           }
         }
       } else if (options.fetchDetails) {
@@ -885,74 +1342,132 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
       if (doReviews) {
         const reviewsDir = getReviewsDir(bookingOutputDir);
         const reviewsFile = path.join(reviewsDir, `${id}_reviews.json`);
-        if (!options.force && fs.existsSync(reviewsFile) && !shouldRetryPhase(manifest, manifestKey, 'reviews')) {
-          statusParts.push('reviews \u2298 skip');
+        const relativeReviewsFile = `reviews/${id}_reviews.json`;
+        const localReviews =
+          !options.force && !shouldRetryPhase(manifest, manifestKey, 'reviews')
+            ? readJsonFile<{ total_reviews?: number; reviews?: unknown[] }>(reviewsFile)
+            : null;
+
+        if (localReviews) {
+          const reviewCount = localReviews.total_reviews ?? localReviews.reviews?.length ?? 0;
+          statusParts.push('reviews \u2298 local');
           bookingResult.reviews.skipped++;
-          entry.reviews = { status: 'skipped', file: `reviews/${id}_reviews.json` };
+          bookingResult.reviews.totalReviewCount += reviewCount;
+          entry.reviews = {
+            status: 'skipped',
+            file: relativeReviewsFile,
+            count: reviewCount,
+            source: 'local',
+          };
           await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
         } else {
-          const t = Date.now();
-          try {
-            const reviews = await bookingScraper.scrapeHotelReviews(
-              hotelInfo,
-              async (progress) => {
-                if (!shouldEmitReviewProgressEvent(progress)) {
-                  return;
-                }
+          const cachedReviews = !options.force
+            ? restoreCachedJson<{ total_reviews?: number; reviews?: unknown[] }>({
+                cache: artifactCache,
+                key: reviewsCacheKey,
+                destinationPath: reviewsFile,
+              })
+            : null;
 
-                const payload = buildReviewProgressPayload({
-                  platform: 'booking',
-                  listingId: id,
-                  listingIndex: currentIndex,
-                  listingCount: totalCount,
-                  currentPage: progress.currentPage,
-                  totalPages: progress.totalPages,
-                  totalReviewsSoFar: progress.totalReviewsSoFar,
-                });
+          if (cachedReviews) {
+            const reviewCount =
+              cachedReviews.hit.count
+              ?? cachedReviews.data.total_reviews
+              ?? cachedReviews.data.reviews?.length
+              ?? 0;
+            cacheHits.push('reviews');
+            statusParts.push(`reviews \u26a1 cache (${formatCacheAge(cachedReviews.hit.ageMs)})`);
+            bookingResult.reviews.skipped++;
+            bookingResult.reviews.totalReviewCount += reviewCount;
+            entry.reviews = {
+              status: 'fetched',
+              file: relativeReviewsFile,
+              count: reviewCount,
+              expected: cachedReviews.hit.expected,
+              ...cacheProvenance(cachedReviews.hit),
+            };
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
+          } else {
+            const t = Date.now();
+            try {
+              const reviews = await bookingScraper.scrapeHotelReviews(
+                hotelInfo,
+                async (progress) => {
+                  if (!shouldEmitReviewProgressEvent(progress)) {
+                    return;
+                  }
 
-                await emitBatchEvent(options, {
-                  phase: 'scrape',
-                  level: 'info',
-                  message: payload.progressLabel as string,
-                  manifestKey,
-                  platform: 'booking',
-                  listingId: id,
-                  payload,
-                });
-              },
-            );
-            if (!options.print) {
-              if (!fs.existsSync(reviewsDir)) fs.mkdirSync(reviewsDir, { recursive: true });
-              const output = {
-                scraped_at: new Date().toISOString(),
-                total_reviews: reviews.length,
-                hotels_processed: [id],
-                reviews,
-              };
-              fs.writeFileSync(
-                path.join(reviewsDir, `${id}_reviews.json`),
-                JSON.stringify(output, null, 2),
+                  const payload = buildReviewProgressPayload({
+                    platform: 'booking',
+                    listingId: id,
+                    listingIndex: currentIndex,
+                    listingCount: totalCount,
+                    currentPage: progress.currentPage,
+                    totalPages: progress.totalPages,
+                    totalReviewsSoFar: progress.totalReviewsSoFar,
+                  });
+
+                  await emitBatchEvent(options, {
+                    phase: 'scrape',
+                    level: 'info',
+                    message: payload.progressLabel as string,
+                    manifestKey,
+                    platform: 'booking',
+                    listingId: id,
+                    payload,
+                  });
+                },
               );
-            }
-            statusParts.push(`reviews \u2713 ${reviews.length} (${formatDuration(Date.now() - t)})`);
-            bookingResult.reviews.fetched++;
-            bookingResult.reviews.totalReviewCount += reviews.length;
+              if (!options.print) {
+                if (!fs.existsSync(reviewsDir)) fs.mkdirSync(reviewsDir, { recursive: true });
+                const output = {
+                  scraped_at: new Date().toISOString(),
+                  total_reviews: reviews.length,
+                  hotels_processed: [id],
+                  reviews,
+                };
+                fs.writeFileSync(reviewsFile, JSON.stringify(output, null, 2));
+              }
+              statusParts.push(`reviews \u2713 ${reviews.length} (${formatDuration(Date.now() - t)})`);
+              bookingResult.reviews.fetched++;
+              bookingResult.reviews.totalReviewCount += reviews.length;
 
-            // Review completeness check
-            const expectedReviews = details?.reviewCount;
-            if (expectedReviews && reviews.length < expectedReviews * 0.8) {
-              entry.reviews = { status: 'partial', file: `reviews/${id}_reviews.json`, count: reviews.length, expected: expectedReviews };
-              console.warn(`  Warning: got ${reviews.length}/${expectedReviews} reviews (partial)`);
-            } else {
-              entry.reviews = { status: 'fetched', file: `reviews/${id}_reviews.json`, count: reviews.length, expected: expectedReviews || undefined };
+              const expectedReviews = details?.reviewCount;
+              if (expectedReviews && reviews.length < expectedReviews * 0.8) {
+                entry.reviews = {
+                  status: 'partial',
+                  file: relativeReviewsFile,
+                  count: reviews.length,
+                  expected: expectedReviews,
+                  source: 'network',
+                };
+                console.warn(`  Warning: got ${reviews.length}/${expectedReviews} reviews (partial)`);
+              } else {
+                entry.reviews = {
+                  status: 'fetched',
+                  file: relativeReviewsFile,
+                  count: reviews.length,
+                  expected: expectedReviews || undefined,
+                  source: 'network',
+                };
+                if (!options.print) {
+                  publishCachedFile({
+                    cache: artifactCache,
+                    key: reviewsCacheKey,
+                    sourcePath: reviewsFile,
+                    count: reviews.length,
+                    expected: expectedReviews || undefined,
+                  });
+                }
+              }
+              await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
+            } catch (err: any) {
+              statusParts.push('reviews \u2717 error');
+              bookingResult.reviews.failed++;
+              bookingResult.errors.push({ id, phase: 'reviews', message: err.message });
+              entry.reviews = { status: 'failed', error: err.message };
+              await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
             }
-            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
-          } catch (err: any) {
-            statusParts.push('reviews \u2717 error');
-            bookingResult.reviews.failed++;
-            bookingResult.errors.push({ id, phase: 'reviews', message: err.message });
-            entry.reviews = { status: 'failed', error: err.message };
-            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'reviews');
           }
         }
       } else if (options.fetchReviews) {
@@ -966,45 +1481,95 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         const photosBase = getPhotosDir(bookingOutputDir);
         const photosDir = path.join(photosBase, id);
         const dirExists = fs.existsSync(photosDir);
-        const expectedPhotos = details?.photos?.length || 0;
+        const expectedPhotos = details
+          ? getExpectedBookingPhotoCount(details, options.downloadPhotosAll)
+          : 0;
         const actualPhotos = dirExists ? fs.readdirSync(photosDir).length : 0;
         const photosIncomplete = dirExists && details && expectedPhotos > 0 && actualPhotos < expectedPhotos;
 
         if (!options.force && dirExistsAndNonEmpty(photosDir) && !photosIncomplete) {
-          statusParts.push('photos \u2298 skip');
+          statusParts.push('photos \u2298 local');
           bookingResult.photos.skipped++;
-          entry.photos = { status: 'skipped', dir: `photos/${id}`, count: actualPhotos, expected: expectedPhotos || undefined };
-          await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
-        } else if (!details) {
-          statusParts.push('photos \u2298 skip (no details)');
-          bookingResult.photos.skipped++;
-          entry.photos = { status: 'skipped', reason: 'no details' };
+          entry.photos = {
+            status: 'skipped',
+            dir: `photos/${id}`,
+            count: actualPhotos,
+            expected: expectedPhotos || undefined,
+            source: 'local',
+          };
           await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
         } else {
-          if (photosIncomplete) {
-            statusParts.push(`photos: ${actualPhotos}/${expectedPhotos} incomplete, re-downloading`);
-          }
-          try {
-            await bookingListing.downloadPhotos(details, photosBase, {
-              downloadAll: options.downloadPhotosAll,
-              dirName: id,
-            });
-            const finalCount = fs.existsSync(photosDir) ? fs.readdirSync(photosDir).length : 0;
-            if (expectedPhotos > 0 && finalCount < expectedPhotos) {
-              statusParts.push(`photos \u2713 ${finalCount}/${expectedPhotos} (partial)`);
-              entry.photos = { status: 'partial', dir: `photos/${id}`, count: finalCount, expected: expectedPhotos };
-            } else {
-              statusParts.push(`photos \u2713 ${finalCount}`);
-              entry.photos = { status: 'fetched', dir: `photos/${id}`, count: finalCount, expected: expectedPhotos || undefined };
+          const cachedPhotos = !options.force
+            ? restoreCachedPhotos({
+                cache: artifactCache,
+                key: photosCacheKey,
+                destinationPath: photosDir,
+              })
+            : null;
+
+          if (cachedPhotos) {
+            const cachedCount = cachedPhotos.count ?? 0;
+            cacheHits.push('photos');
+            statusParts.push(`photos \u26a1 cache (${formatCacheAge(cachedPhotos.ageMs)})`);
+            bookingResult.photos.skipped++;
+            entry.photos = {
+              status: 'fetched',
+              dir: `photos/${id}`,
+              count: cachedCount,
+              expected: cachedPhotos.expected,
+              ...cacheProvenance(cachedPhotos),
+            };
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
+          } else if (!details) {
+            statusParts.push('photos \u2298 skip (no details)');
+            bookingResult.photos.skipped++;
+            entry.photos = { status: 'skipped', reason: 'no details' };
+            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
+          } else {
+            if (photosIncomplete) {
+              statusParts.push(`photos: ${actualPhotos}/${expectedPhotos} incomplete, re-downloading`);
             }
-            bookingResult.photos.fetched++;
-            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
-          } catch (err: any) {
-            statusParts.push('photos \u2717 error');
-            bookingResult.photos.failed++;
-            bookingResult.errors.push({ id, phase: 'photos', message: err.message });
-            entry.photos = { status: 'failed', dir: `photos/${id}`, error: err.message };
-            await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
+            try {
+              await bookingListing.downloadPhotos(details, photosBase, {
+                downloadAll: options.downloadPhotosAll,
+                dirName: id,
+              });
+              const finalCount = fs.existsSync(photosDir) ? fs.readdirSync(photosDir).length : 0;
+              if (expectedPhotos > 0 && finalCount < expectedPhotos) {
+                statusParts.push(`photos \u2713 ${finalCount}/${expectedPhotos} (partial)`);
+                entry.photos = {
+                  status: 'partial',
+                  dir: `photos/${id}`,
+                  count: finalCount,
+                  expected: expectedPhotos,
+                  source: 'network',
+                };
+              } else {
+                statusParts.push(`photos \u2713 ${finalCount}`);
+                entry.photos = {
+                  status: 'fetched',
+                  dir: `photos/${id}`,
+                  count: finalCount,
+                  expected: expectedPhotos || undefined,
+                  source: 'network',
+                };
+                publishCachedPhotos({
+                  cache: artifactCache,
+                  key: photosCacheKey,
+                  sourcePath: photosDir,
+                  count: finalCount,
+                  expected: expectedPhotos || undefined,
+                });
+              }
+              bookingResult.photos.fetched++;
+              await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
+            } catch (err: any) {
+              statusParts.push('photos \u2717 error');
+              bookingResult.photos.failed++;
+              bookingResult.errors.push({ id, phase: 'photos', message: err.message });
+              entry.photos = { status: 'failed', dir: `photos/${id}`, error: err.message };
+              await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'photos');
+            }
           }
         }
       } else if (options.fetchPhotos) {
@@ -1021,7 +1586,7 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         manifestKey,
         platform: 'booking',
         listingId: id,
-        payload: { url },
+        payload: { url, cacheHits },
       });
 
       // Save manifest after each listing

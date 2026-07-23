@@ -134,6 +134,9 @@ export interface AnalysisManifestPhase {
   expected?: number;
   model?: string;
   cost?: number;
+  source?: 'network' | 'cache' | 'local';
+  cachedAt?: string;
+  cacheAgeMs?: number;
 }
 
 export interface AnalysisManifestEntry {

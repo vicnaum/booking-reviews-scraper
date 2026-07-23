@@ -119,6 +119,23 @@ the same temporary file inputs that `runAnalyze`, `runAnalyzePhotos`, and
 - Photo count remains governed by the existing photo pipeline. There is no separate
   per-listing photo cap.
 
+## Shared Scrape Cache
+
+- `runBatch` restores listing details, raw reviews, and downloaded photos from the shared
+  schema-versioned cache before making an upstream request. CLI batches and web-worker jobs use
+  the same default root, `~/.cache/reviewr/artifacts-v1`.
+- Airbnb keys use room ID. Booking keys use `country_code/hotel_name`. Details additionally
+  fingerprint exact dates, guest count, and Booking linked-room selection; Booking photo keys
+  fingerprint linked-room versus download-all selection.
+- Default TTLs are 7 days for details, 30 days for reviews, and 180 days for photos. Cache hits
+  are copied into the run's normal v2 artifact layout and recorded with `source = cache`,
+  `cachedAt`, and `cacheAgeMs` in the manifest.
+- Only complete `fetched` outputs populate the cache. Partial, failed, stale, corrupt, and
+  missing entries fall through to live scraping. `--force` bypasses reads and refreshes entries
+  after successful fetches. AI analysis and triage outputs are not cached.
+- The v1 cache has no size bound. Removing the configured `REVIEWR_CACHE_DIR` is always safe;
+  later jobs recreate it as needed.
+
 ## Persistence Goals For The Web Job
 
 The web job should persist:
