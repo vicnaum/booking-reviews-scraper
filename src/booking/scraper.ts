@@ -11,15 +11,85 @@
 //   reviewr <booking-url>                   # Single URL via CLI
 
 import 'dotenv/config';
-import fetch from 'node-fetch';
+import fetch, { type RequestInit } from 'node-fetch';
 import { HttpsProxyAgent } from 'https-proxy-agent';
-import * as cheerio from 'cheerio';
 import * as fs from 'fs';
 import * as path from 'path';
 
-const BASE_URL = 'https://www.booking.com/reviewlist.en-gb.html';
+const BOOKING_GRAPHQL_URL = 'https://www.booking.com/dml/graphql';
 const INPUT_DIR = 'data/booking/input';
 const OUTPUT_DIR = 'data/booking/output';
+const REVIEWS_PER_PAGE = 10;
+
+// Captured from Booking.com's live hotel page on 2026-07-23. Keep these
+// operations explicit: Booking disables GraphQL introspection, while the
+// browser's real request payload remains usable over plain HTTP.
+const LOCATION_PROPERTY_DETAILS_QUERY = `
+  query LocationPropertyDetails($input: HotelPageByPageNameInput!) {
+    hotelPageByPageName(input: $input) {
+      ... on HotelPageType {
+        propertyDetails {
+          id
+          name
+          __typename
+        }
+        __typename
+      }
+      __typename
+    }
+  }
+`;
+
+const REVIEW_LIST_QUERY = `
+  query ReviewList($input: ReviewListFrontendInput!) {
+    reviewListFrontend(input: $input) {
+      ... on ReviewListFrontendResult {
+        reviewCard {
+          reviewUrl
+          guestDetails {
+            username
+            countryName
+            guestTypeTranslation
+            __typename
+          }
+          bookingDetails {
+            customerType
+            roomType {
+              name
+              __typename
+            }
+            numNights
+            __typename
+          }
+          reviewedDate
+          helpfulVotesCount
+          reviewScore
+          textDetails {
+            title
+            positiveText
+            negativeText
+            lang
+            __typename
+          }
+          isApproved
+          partnerReply {
+            reply
+            __typename
+          }
+          __typename
+        }
+        reviewsCount
+        __typename
+      }
+      ... on ReviewsFrontendError {
+        statusCode
+        message
+        __typename
+      }
+      __typename
+    }
+  }
+`;
 
 /**
  * Get proxy configuration lazily from current environment variables
@@ -30,7 +100,7 @@ function getProxyConfig() {
     host: process.env.PROXY_HOST || '',
     port: parseInt(process.env.PROXY_PORT || '0'),
     username: process.env.PROXY_USERNAME || '',
-    password: process.env.PROXY_PASSWORD || ''
+    password: process.env.PROXY_PASSWORD || '',
   };
   const proxyUrl = `http://${PROXY_CONFIG.username}:${PROXY_CONFIG.password}@${PROXY_CONFIG.host}:${PROXY_CONFIG.port}`;
   return { USE_PROXY, PROXY_CONFIG, proxyUrl };
@@ -38,11 +108,13 @@ function getProxyConfig() {
 
 // It's crucial to set a User-Agent, as many sites block requests without one.
 const BROWSER_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+  'User-Agent':
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
   'Accept-Language': 'en-US,en;q=0.9',
   'Accept-Encoding': 'gzip, deflate, br',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
-  'Connection': 'keep-alive',
+  Accept:
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+  Connection: 'keep-alive',
 };
 
 // Define the structure for a single review object for type safety - matching Python version fields
@@ -80,12 +152,71 @@ export interface BookingReviewScrapeProgress {
   totalReviewsSoFar: number;
 }
 
+interface BookingGraphQlResponse<T> {
+  data?: T;
+  errors?: Array<{ message?: string }>;
+}
+
+interface LocationPropertyDetailsData {
+  hotelPageByPageName?: {
+    __typename?: string;
+    propertyDetails?: {
+      id?: number;
+      name?: string;
+    } | null;
+  } | null;
+}
+
+export interface BookingReviewCard {
+  reviewUrl?: string | null;
+  guestDetails?: {
+    username?: string | null;
+    countryName?: string | null;
+    guestTypeTranslation?: string | null;
+  } | null;
+  bookingDetails?: {
+    customerType?: string | null;
+    roomType?: {
+      name?: string | null;
+    } | null;
+    numNights?: number | null;
+  } | null;
+  reviewedDate?: number | null;
+  helpfulVotesCount?: number | null;
+  reviewScore?: number | null;
+  textDetails?: {
+    title?: string | null;
+    positiveText?: string | null;
+    negativeText?: string | null;
+    lang?: string | null;
+  } | null;
+  isApproved?: boolean | null;
+  partnerReply?: {
+    reply?: string | null;
+  } | null;
+}
+
+interface ReviewListData {
+  reviewListFrontend?: {
+    __typename?: string;
+    reviewCard?: BookingReviewCard[] | null;
+    reviewsCount?: number | null;
+    statusCode?: number | null;
+    message?: string | null;
+  } | null;
+}
+
 /**
  * Make HTTP request with retry logic and proxy support using Fetch
  */
-export async function makeRequest(url: string, maxRetries: number = 3): Promise<{ data: string; status: number; statusText: string }> {
+export async function makeRequest(
+  url: string,
+  maxRetries: number = 3,
+  init: RequestInit = {},
+): Promise<{ data: string; status: number; statusText: string }> {
   const { USE_PROXY, PROXY_CONFIG, proxyUrl } = getProxyConfig();
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
       if (attempt === 1 && USE_PROXY) {
         console.log(`🔗 Using HTTP proxy: ${PROXY_CONFIG.host}:${PROXY_CONFIG.port}`);
@@ -93,35 +224,39 @@ export async function makeRequest(url: string, maxRetries: number = 3): Promise<
 
       // Create AbortController for timeout
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 seconds timeout
+      timeoutId = setTimeout(() => controller.abort(), 60000); // 60 seconds timeout
+      const extraHeaders = init.headers as Record<string, string> | undefined;
 
-      const fetchOptions: any = {
-        headers: BROWSER_HEADERS,
-        signal: controller.signal
+      const fetchOptions: RequestInit = {
+        ...init,
+        headers: {
+          ...BROWSER_HEADERS,
+          ...extraHeaders,
+        },
+        signal: controller.signal,
       };
 
       // Add proxy if enabled
       if (USE_PROXY) {
         fetchOptions.agent = new HttpsProxyAgent(proxyUrl);
       }
-      
+
       const response = await fetch(url, fetchOptions);
-      clearTimeout(timeoutId);
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status} ${response.statusText}`);
       }
-      
+
       const data = await response.text();
-      
+
       return {
         data,
         status: response.status,
-        statusText: response.statusText
+        statusText: response.statusText,
       };
     } catch (error: any) {
       const isLastAttempt = attempt === maxRetries;
-      
+
       if (error.name === 'AbortError') {
         console.log(`❌ Request timeout (attempt ${attempt}/${maxRetries})`);
       } else if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
@@ -131,18 +266,22 @@ export async function makeRequest(url: string, maxRetries: number = 3): Promise<
       } else {
         console.log(`❌ Request failed (attempt ${attempt}/${maxRetries}): ${error.message}`);
       }
-      
+
       if (isLastAttempt) {
         throw error;
       }
-      
+
       // Wait before retry (exponential backoff)
       const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
       console.log(`⏳ Retrying in ${delay}ms...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
     }
   }
-  
+
   throw new Error('This should never be reached');
 }
 
@@ -154,18 +293,18 @@ export function extractHotelInfo(url: string): HotelInfo | null {
     // Pattern: https://www.booking.com/hotel/[COUNTRY]/[HOTEL_NAME].[LANG].html
     const regex = /https:\/\/www\.booking\.com\/hotel\/([a-z]{2})\/([^.]+)\./;
     const match = url.match(regex);
-    
+
     if (match) {
       const country_code = match[1];
       const hotel_name = match[2];
-      
+
       return {
         hotel_name,
         country_code,
-        url
+        url,
       };
     }
-    
+
     return null;
   } catch (error) {
     console.error(`Error extracting hotel info from URL: ${url}`, error);
@@ -179,10 +318,11 @@ export function extractHotelInfo(url: string): HotelInfo | null {
 export function readUrlsFromCsv(filePath: string): string[] {
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
-    const urls = content.split('\n')
-      .map(line => line.trim())
-      .filter(line => line.length > 0);
-    
+    const urls = content
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
     return urls;
   } catch (error) {
     console.error(`Error reading CSV file: ${filePath}`, error);
@@ -209,32 +349,35 @@ export async function scrapeHotelReviews(
   console.log(`Starting scraper for hotel: ${hotelInfo.hotel_name} (${hotelInfo.country_code})...`);
 
   try {
-    // 1. Discover the total number of pages to scrape
-    const maxOffset = await getMaxOffset(hotelInfo.hotel_name, hotelInfo.country_code);
-    if (maxOffset === 0) {
-      console.log('Only one page of reviews found, or no pagination present.');
-    } else {
-      console.log(`Discovered max page offset: ${maxOffset}. Total pages to scrape: ${maxOffset / 10 + 1}`);
-    }
-
+    const hotelId = await resolveBookingHotelId(hotelInfo);
+    const firstPage = await fetchReviewPage(hotelId, hotelInfo.country_code, 0);
+    const totalReviews = Math.max(firstPage.reviewsCount, firstPage.cards.length);
+    const totalPages = Math.max(1, Math.ceil(totalReviews / REVIEWS_PER_PAGE));
+    const maxOffset = (totalPages - 1) * REVIEWS_PER_PAGE;
     const allReviews: Review[] = [];
-    const totalPages = Math.floor(maxOffset / 10) + 1;
+    const seenReviewIds = new Set<string>();
 
-    // 2. Loop through each page of reviews
-    for (let offset = 0; offset <= maxOffset; offset += 10) {
-      const pageUrl = new URL(BASE_URL);
-      pageUrl.searchParams.append('cc1', hotelInfo.country_code);
-      pageUrl.searchParams.append('pagename', hotelInfo.hotel_name);
-      pageUrl.searchParams.append('offset', offset.toString());
-      pageUrl.searchParams.append('rows', '10');
+    console.log(`  Discovered ${totalReviews} reviews across ${totalPages} page${totalPages === 1 ? '' : 's'}.`);
 
-      console.log(`  Scraping page: ${offset / 10 + 1}...`);
-      
-      const response = await makeRequest(pageUrl.href);
-      const reviewsOnPage = parseReviewsFromHtml(response.data, hotelInfo.hotel_name);
-      allReviews.push(...reviewsOnPage);
+    for (let pageIndex = 0; pageIndex < totalPages; pageIndex++) {
+      const offset = pageIndex * REVIEWS_PER_PAGE;
+      console.log(`  Scraping page: ${pageIndex + 1}/${totalPages}...`);
+
+      const page = pageIndex === 0 ? firstPage : await fetchReviewPage(hotelId, hotelInfo.country_code, offset);
+
+      for (const card of page.cards) {
+        const reviewId = card.reviewUrl || null;
+        if (reviewId && seenReviewIds.has(reviewId)) {
+          continue;
+        }
+        if (reviewId) {
+          seenReviewIds.add(reviewId);
+        }
+        allReviews.push(mapBookingReviewCard(card, hotelInfo.hotel_name));
+      }
+
       await onProgress?.({
-        currentPage: offset / 10 + 1,
+        currentPage: pageIndex + 1,
         totalPages,
         offset,
         maxOffset,
@@ -242,205 +385,208 @@ export async function scrapeHotelReviews(
       });
 
       // Be a good internet citizen: add a small delay between requests
-      await new Promise(resolve => setTimeout(resolve, 500)); // 0.5-second delay
+      if (pageIndex + 1 < totalPages) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
     }
 
     console.log(`  ✅ Scraped ${allReviews.length} reviews for ${hotelInfo.hotel_name}`);
     return allReviews;
-
   } catch (error) {
     console.error(`Error scraping hotel ${hotelInfo.hotel_name}:`, error);
     return [];
   }
 }
 
-/**
- * Fetches the first page to find the last page's offset value.
- */
-async function getMaxOffset(hotelName: string, countryCode: string): Promise<number> {
-  const initialUrl = new URL(BASE_URL);
-  initialUrl.searchParams.append('cc1', countryCode);
-  initialUrl.searchParams.append('pagename', hotelName);
-  initialUrl.searchParams.append('rows', '10');
-
-  const { data } = await makeRequest(initialUrl.href);
-  const $ = cheerio.load(data);
-  
-  // Find the pagination links - looking for the last page link with "Page " text
-  const paginationLinks = $('div.bui-pagination__pages > div.bui-pagination__list > div.bui-pagination__item > a');
-  let maxOffset = 0;
-
-  paginationLinks.each((_, element) => {
-    const $link = $(element);
-    const href = $link.attr('href');
-    const text = $link.text();
-    
-    if (href && text.includes('Page ')) {
-      const url = new URL(href, BASE_URL);
-      const offset = url.searchParams.get('offset');
-      if (offset) {
-        const offsetValue = parseInt(offset.split(';')[0], 10);
-        if (!isNaN(offsetValue) && offsetValue > maxOffset) {
-          maxOffset = offsetValue;
-        }
-      }
-    }
+async function makeBookingGraphQlRequest<T>(
+  operationName: string,
+  variables: Record<string, unknown>,
+  query: string,
+): Promise<T> {
+  const response = await makeRequest(BOOKING_GRAPHQL_URL, 3, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      operationName,
+      variables,
+      extensions: {},
+      query,
+    }),
   });
 
-  return maxOffset;
-}
-
-/**
- * Utility function to validate and clean text content
- */
-function validateText(element: cheerio.Cheerio<any> | string | null): string | null {
-  if (!element) return null;
-  
-  let text: string;
-  if (typeof element === 'string') {
-    text = element;
-  } else {
-    text = element.text();
+  let payload: BookingGraphQlResponse<T>;
+  try {
+    payload = JSON.parse(response.data) as BookingGraphQlResponse<T>;
+  } catch {
+    throw new Error(`Booking GraphQL ${operationName} returned invalid JSON`);
   }
-  
-  // Remove multiple spaces and strip newlines
-  text = text.replace(/\s+/g, ' ').trim();
-  return text.length > 0 ? text : null;
+
+  if (payload.errors?.length) {
+    const messages = payload.errors
+      .map((error) => error.message)
+      .filter(Boolean)
+      .join('; ');
+    throw new Error(`Booking GraphQL ${operationName} failed: ${messages || 'unknown error'}`);
+  }
+  if (!payload.data) {
+    throw new Error(`Booking GraphQL ${operationName} returned no data`);
+  }
+
+  return payload.data;
 }
 
-/**
- * Parses the HTML content of a review page to extract review details.
- */
-function parseReviewsFromHtml(html: string, hotelName: string): Review[] {
-  const $ = cheerio.load(html);
-  const reviews: Review[] = [];
+async function resolveBookingHotelId(hotelInfo: HotelInfo): Promise<number> {
+  const data = await makeBookingGraphQlRequest<LocationPropertyDetailsData>(
+    'LocationPropertyDetails',
+    {
+      input: {
+        pageNameDetails: {
+          countryCode: hotelInfo.country_code,
+          pagename: hotelInfo.hotel_name,
+        },
+      },
+    },
+    LOCATION_PROPERTY_DETAILS_QUERY,
+  );
 
-  // Use the correct selector from the Python version
-  $('ul.review_list > li').each((_, element) => {
-    const el = $(element);
+  const hotelPage = data.hotelPageByPageName;
+  const hotelId = hotelPage?.propertyDetails?.id;
+  if (hotelPage?.__typename !== 'HotelPageType' || !Number.isFinite(hotelId)) {
+    throw new Error(`Booking could not resolve hotel ID for ${hotelInfo.hotel_name}`);
+  }
 
-    // Extract username
-    const username = validateText(el.find('div.c-review-block__guest span.bui-avatar-block__title'));
-    
-    // Extract user country
-    const user_country = validateText(el.find('div.c-review-block__guest span.bui-avatar-block__subtitle'));
-    
-    // Extract room view
-    const room_view = validateText(el.find('div.c-review-block__room-info-row div.bui-list__body'));
-    
-    // Extract stay duration
-    let stay_duration = validateText(el.find('ul.c-review-block__stay-date div.bui-list__body'));
-    if (stay_duration) {
-      stay_duration = stay_duration.split(' ·')[0];
-    }
-    
-    // Extract stay type
-    const stay_type = validateText(el.find('ul.review-panel-wide__traveller_type div.bui-list__body'));
-    
-    // Extract review title
-    const review_title = validateText(el.find('h3.c-review-block__title'));
-    
-    // Extract review date
-    let review_post_date: string | null = null;
-    el.find('span').each((_, span) => {
-      const spanText = $(span).text();
-      if (spanText.includes('Reviewed:')) {
-        const dateText = spanText.split(':').slice(1).join(':').trim();
-        try {
-          const date = new Date(dateText);
-          review_post_date = date.toISOString().slice(0, 19).replace('T', ' ');
-        } catch (e) {
-          review_post_date = dateText;
-        }
-      }
-    });
-    
-    // Extract rating
-    const ratingStr = validateText(el.find('div.bui-review-score__badge'));
-    const rating = ratingStr ? parseFloat(ratingStr) : null;
-    
-    // Extract review texts
-    const reviewTexts = el.find('div.c-review span.c-review__body');
-    let review_text_liked: string | null = null;
-    let review_text_disliked: string | null = null;
-    let original_lang: string | null = null;
-    
-    if (reviewTexts.length > 0) {
-      const firstReview = reviewTexts.eq(0);
-      review_text_liked = validateText(firstReview);
-      original_lang = firstReview.attr('lang') || null;
-      
-      // Check if it's a "no comments" message
-      if (review_text_liked && review_text_liked.toLowerCase().includes('there are no comments available')) {
-        review_text_liked = null;
-      }
-      
-      if (reviewTexts.length > 1) {
-        review_text_disliked = validateText(reviewTexts.eq(1));
-        if (!review_text_disliked && reviewTexts.length > 2) {
-          review_text_disliked = validateText(reviewTexts.eq(2));
-        }
-      }
-    }
-    
-    // Create full review text
-    const titlePart = review_title ? `title: ${review_title}${review_title.match(/[.!?]$/) ? '' : '.'}` : '';
-    const likedPart = review_text_liked ? `liked: ${review_text_liked}${review_text_liked.match(/[.!?]$/) ? '' : '.'}` : '';
-    const dislikedPart = review_text_disliked ? `disliked: ${review_text_disliked}${review_text_disliked.match(/[.!?]$/) ? '' : '.'}` : '';
-    
-    const full_review = validateText([titlePart, likedPart, dislikedPart].filter(p => p).join(' '));
-    const en_full_review = original_lang && original_lang.includes('en') ? full_review : null;
-    
-    // Extract helpful votes
-    let found_helpful = 0;
-    const helpfulText = validateText(el.find('div.c-review-block__row--helpful-vote p.review-helpful__vote-others-helpful'));
-    if (helpfulText) {
-      const helpfulMatch = helpfulText.match(/(\d+)\s+(people|person)/);
-      if (helpfulMatch) {
-        found_helpful = parseInt(helpfulMatch[1], 10);
-      }
-    }
-    
-    // Extract unhelpful votes
-    let found_unhelpful = 0;
-    const unhelpfulText = validateText(el.find('div.c-review-block__row--helpful-vote p.--unhelpful'));
-    if (unhelpfulText) {
-      const unhelpfulMatch = unhelpfulText.match(/(\d+)\s+(people|person)/);
-      if (unhelpfulMatch) {
-        found_unhelpful = parseInt(unhelpfulMatch[1], 10);
-      }
-    }
-    
-    // Extract owner response
-    const ownerResponseElements = el.find('div.c-review-block__response span.c-review-block__response__body');
-    const owner_resp_text = ownerResponseElements.length > 0 
-      ? validateText(ownerResponseElements.last()) 
-      : null;
+  return hotelId as number;
+}
 
-    const review: Review = {
-      hotel_name: hotelName,
-      username,
-      user_country,
-      room_view,
-      stay_duration,
-      stay_type,
-      review_post_date,
-      review_title,
-      rating,
-      original_lang,
-      review_text_liked,
-      review_text_disliked,
-      full_review,
-      en_full_review,
-      found_helpful,
-      found_unhelpful,
-      owner_resp_text,
-    };
+export function buildBookingReviewListVariables(
+  hotelId: number,
+  countryCode: string,
+  skip: number,
+  limit: number = REVIEWS_PER_PAGE,
+): Record<string, unknown> {
+  return {
+    input: {
+      hotelId,
+      ufi: 0,
+      hotelCountryCode: countryCode,
+      sorter: 'MOST_RELEVANT',
+      filters: {
+        text: '',
+      },
+      skip,
+      limit,
+      upsortReviewUrl: '',
+      searchFeatures: {
+        destId: 0,
+        destType: 'CITY',
+      },
+    },
+  };
+}
 
-    reviews.push(review);
-  });
+async function fetchReviewPage(
+  hotelId: number,
+  countryCode: string,
+  skip: number,
+): Promise<{ cards: BookingReviewCard[]; reviewsCount: number }> {
+  const data = await makeBookingGraphQlRequest<ReviewListData>(
+    'ReviewList',
+    buildBookingReviewListVariables(hotelId, countryCode, skip),
+    REVIEW_LIST_QUERY,
+  );
 
-  return reviews;
+  const result = data.reviewListFrontend;
+  if (!result) {
+    throw new Error('Booking GraphQL ReviewList returned no result');
+  }
+  if (result.__typename !== 'ReviewListFrontendResult') {
+    throw new Error(
+      `Booking GraphQL ReviewList failed: ${result.message || result.statusCode || result.__typename || 'unknown error'}`,
+    );
+  }
+
+  const cards = (result.reviewCard || []).filter((card) => card.isApproved !== false);
+  return {
+    cards,
+    reviewsCount: result.reviewsCount || 0,
+  };
+}
+
+function cleanNullableText(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const cleaned = value.replace(/\s+/g, ' ').trim();
+  return cleaned || null;
+}
+
+function withTerminalPunctuation(value: string): string {
+  return /[.!?]$/.test(value) ? value : `${value}.`;
+}
+
+function formatReviewDate(value: number | null | undefined): string | null {
+  if (!value || !Number.isFinite(value)) return null;
+  const milliseconds = value > 1_000_000_000_000 ? value : value * 1000;
+  const date = new Date(milliseconds);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+function formatCustomerType(value: string | null | undefined): string | null {
+  const cleaned = cleanNullableText(value);
+  if (!cleaned) return null;
+  return cleaned
+    .toLowerCase()
+    .split('_')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+export function mapBookingReviewCard(card: BookingReviewCard, hotelName: string): Review {
+  const reviewTitle = cleanNullableText(card.textDetails?.title);
+  let reviewTextLiked = cleanNullableText(card.textDetails?.positiveText);
+  const reviewTextDisliked = cleanNullableText(card.textDetails?.negativeText);
+  const originalLang = cleanNullableText(card.textDetails?.lang);
+
+  if (reviewTextLiked?.toLowerCase().includes('there are no comments available')) {
+    reviewTextLiked = null;
+  }
+
+  const fullReview = cleanNullableText(
+    [
+      reviewTitle ? `title: ${withTerminalPunctuation(reviewTitle)}` : '',
+      reviewTextLiked ? `liked: ${withTerminalPunctuation(reviewTextLiked)}` : '',
+      reviewTextDisliked ? `disliked: ${withTerminalPunctuation(reviewTextDisliked)}` : '',
+    ]
+      .filter(Boolean)
+      .join(' '),
+  );
+
+  const numNights = card.bookingDetails?.numNights;
+  const stayDuration = numNights && numNights > 0 ? `${numNights} night${numNights === 1 ? '' : 's'}` : null;
+
+  return {
+    hotel_name: hotelName,
+    username: cleanNullableText(card.guestDetails?.username),
+    user_country: cleanNullableText(card.guestDetails?.countryName),
+    room_view: cleanNullableText(card.bookingDetails?.roomType?.name),
+    stay_duration: stayDuration,
+    stay_type:
+      cleanNullableText(card.guestDetails?.guestTypeTranslation) ||
+      formatCustomerType(card.bookingDetails?.customerType),
+    review_post_date: formatReviewDate(card.reviewedDate),
+    review_title: reviewTitle,
+    rating: Number.isFinite(card.reviewScore) ? (card.reviewScore as number) : null,
+    original_lang: originalLang,
+    review_text_liked: reviewTextLiked,
+    review_text_disliked: reviewTextDisliked,
+    full_review: fullReview,
+    en_full_review: originalLang?.toLowerCase().startsWith('en') ? fullReview : null,
+    found_helpful: Number.isFinite(card.helpfulVotesCount) ? Math.max(0, card.helpfulVotesCount as number) : 0,
+    found_unhelpful: 0,
+    owner_resp_text: cleanNullableText(card.partnerReply?.reply),
+  };
 }
 
 /**
@@ -459,8 +605,8 @@ export function saveToJson(reviews: Review[], inputFileName: string, outputDir: 
     input_file: inputFileName,
     scraped_at: new Date().toISOString(),
     total_reviews: reviews.length,
-    hotels_processed: [...new Set(reviews.map(r => r.hotel_name))],
-    reviews: reviews
+    hotels_processed: [...new Set(reviews.map((r) => r.hotel_name))],
+    reviews: reviews,
   };
 
   const jsonString = JSON.stringify(jsonOutput, null, 2);
@@ -471,7 +617,11 @@ export function saveToJson(reviews: Review[], inputFileName: string, outputDir: 
 /**
  * Process a single CSV file
  */
-export async function processCsvFile(inputFileName: string, inputDir: string = INPUT_DIR, outputDir: string = OUTPUT_DIR): Promise<void> {
+export async function processCsvFile(
+  inputFileName: string,
+  inputDir: string = INPUT_DIR,
+  outputDir: string = OUTPUT_DIR,
+): Promise<void> {
   console.log(`\n📁 Processing: ${inputFileName}`);
 
   // Check if output already exists
@@ -482,7 +632,7 @@ export async function processCsvFile(inputFileName: string, inputDir: string = I
 
   const inputPath = path.join(inputDir, inputFileName);
   const urls = readUrlsFromCsv(inputPath);
-  
+
   if (urls.length === 0) {
     console.log(`⚠️  No URLs found in: ${inputFileName}`);
     return;
@@ -496,7 +646,7 @@ export async function processCsvFile(inputFileName: string, inputDir: string = I
 
   for (const url of urls) {
     const hotelInfo = extractHotelInfo(url);
-    
+
     if (!hotelInfo) {
       console.log(`❌ Failed to extract hotel info from URL: ${url}`);
       failedUrls.push(url);
@@ -505,7 +655,7 @@ export async function processCsvFile(inputFileName: string, inputDir: string = I
 
     // Create unique key: hotel_name + country_code
     const hotelKey = `${hotelInfo.hotel_name}_${hotelInfo.country_code}`;
-    
+
     if (!hotelInfoMap.has(hotelKey)) {
       hotelInfoMap.set(hotelKey, hotelInfo);
     } else {
@@ -523,14 +673,14 @@ export async function processCsvFile(inputFileName: string, inputDir: string = I
 
   for (const hotelInfo of uniqueHotels) {
     console.log(`🏨 Processing hotel: ${hotelInfo.hotel_name} (${hotelInfo.country_code})`);
-    
+
     try {
       const reviews = await scrapeHotelReviews(hotelInfo);
       allReviews.push(...reviews);
       processedHotels.push(hotelInfo.hotel_name);
-      
+
       // Add delay between hotels
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     } catch (error) {
       console.error(`❌ Error processing hotel ${hotelInfo.hotel_name}:`, error);
       failedHotels.push(hotelInfo.hotel_name);
@@ -550,7 +700,7 @@ export async function processCsvFile(inputFileName: string, inputDir: string = I
   console.log(`  ❌ Failed to parse URLs: ${failedUrls.length}`);
   console.log(`  ❌ Failed to scrape hotels: ${failedHotels.length}`);
   console.log(`  📊 Total reviews: ${allReviews.length}`);
-  
+
   if (failedUrls.length > 0) {
     console.log(`  ⚠️  Failed URLs: ${failedUrls.join(', ')}`);
   }
@@ -579,8 +729,9 @@ export async function runBatchScrape(inputDir: string = INPUT_DIR, outputDir: st
     process.exit(1);
   }
 
-  const csvFiles = fs.readdirSync(inputDir)
-    .filter(file => file.endsWith('.csv'))
+  const csvFiles = fs
+    .readdirSync(inputDir)
+    .filter((file) => file.endsWith('.csv'))
     .sort();
 
   if (csvFiles.length === 0) {
@@ -628,8 +779,9 @@ async function main(): Promise<void> {
   }
 
   // Get all CSV files from input directory
-  const csvFiles = fs.readdirSync(INPUT_DIR)
-    .filter(file => file.endsWith('.csv'))
+  const csvFiles = fs
+    .readdirSync(INPUT_DIR)
+    .filter((file) => file.endsWith('.csv'))
     .sort();
 
   if (csvFiles.length === 0) {
@@ -654,7 +806,7 @@ async function main(): Promise<void> {
 // --- Run the Scraper (only when executed directly) ---
 const isDirectRun = process.argv[1]?.includes('booking/scraper') || process.argv[1]?.includes('booking\\scraper');
 if (isDirectRun) {
-  main().catch(error => {
+  main().catch((error) => {
     console.error('❌ Fatal error:', error);
     process.exit(1);
   });

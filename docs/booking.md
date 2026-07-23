@@ -6,7 +6,7 @@ A TypeScript-based toolkit for extracting hotel listing details and reviews from
 
 The toolkit has two main scrapers:
 - **Listing Details** (`src/booking/listing.ts`) — Uses **Playwright** headless browser to bypass Booking.com's AWS WAF JS challenge and extract full property details (name, description, photos, amenities, ratings, coordinates, etc.)
-- **Reviews** (`src/booking/scraper.ts`) — Uses **Cheerio** + **node-fetch** with proxy to scrape review list pages (no WAF on review endpoints)
+- **Reviews** (`src/booking/scraper.ts`) — Uses **node-fetch** with optional proxy support to call Booking.com's captured `LocationPropertyDetails` and paginated `ReviewList` GraphQL operations (no Playwright required)
 
 ## Listing Details Scraper
 
@@ -130,8 +130,8 @@ Duplicate URLs (same hotel_name + country_code) are automatically deduplicated.
 
 1. Reads all CSV files from `data/booking/input/`
 2. Extracts hotel names and country codes from each URL
-3. Discovers total review pages via pagination
-4. Scrapes 10 reviews per page with 0.5s delay between requests
+3. Resolves each Booking hotel ID from its page name and country code
+4. Fetches the live review count and paginates the `ReviewList` GraphQL operation, 10 reviews per page with a 0.5s delay
 5. Saves results to JSON in `data/booking/output/`
 6. Skips files that have already been processed
 
