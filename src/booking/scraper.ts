@@ -22,6 +22,7 @@ const INPUT_DIR = 'data/booking/input';
 const OUTPUT_DIR = 'data/booking/output';
 const REVIEWS_PER_PAGE = 10;
 const REVIEW_SORTER = 'NEWEST_FIRST';
+const GRAPHQL_INVALID_JSON_ATTEMPTS = 5;
 
 // Captured from Booking.com's live hotel page on 2026-07-23. Keep these
 // operations explicit: Booking disables GraphQL introspection, while the
@@ -153,6 +154,29 @@ export interface BookingReviewScrapeProgress {
   offset: number;
   maxOffset: number;
   totalReviewsSoFar: number;
+}
+
+export interface BookingReviewPage {
+  cards: BookingReviewCard[];
+  reviewsCount: number;
+}
+
+export type BookingHttpRequest = (
+  url: string,
+  maxRetries?: number,
+  init?: RequestInit,
+) => Promise<{ data: string; status: number; statusText: string }>;
+
+export interface BookingGraphQlRequestDependencies {
+  request?: BookingHttpRequest;
+  sleep?: (delayMs: number) => Promise<void>;
+  maxInvalidJsonAttempts?: number;
+}
+
+export interface BookingReviewScrapeDependencies {
+  resolveHotelId?: (hotelInfo: HotelInfo) => Promise<number>;
+  fetchPage?: (hotelId: number, countryCode: string, skip: number) => Promise<BookingReviewPage>;
+  sleep?: (delayMs: number) => Promise<void>;
 }
 
 export function shouldStopBookingReviewPagination(
@@ -358,12 +382,16 @@ function outputFileExists(inputFileName: string, outputDir: string = OUTPUT_DIR)
 export async function scrapeHotelReviews(
   hotelInfo: HotelInfo,
   onProgress?: (progress: BookingReviewScrapeProgress) => void | Promise<void>,
+  dependencies: BookingReviewScrapeDependencies = {},
 ): Promise<Review[]> {
   console.log(`Starting scraper for hotel: ${hotelInfo.hotel_name} (${hotelInfo.country_code})...`);
 
   try {
-    const hotelId = await resolveBookingHotelId(hotelInfo);
-    const firstPage = await fetchReviewPage(hotelId, hotelInfo.country_code, 0);
+    const resolveHotelId = dependencies.resolveHotelId || resolveBookingHotelId;
+    const fetchPage = dependencies.fetchPage || fetchReviewPage;
+    const sleep = dependencies.sleep || ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
+    const hotelId = await resolveHotelId(hotelInfo);
+    const firstPage = await fetchPage(hotelId, hotelInfo.country_code, 0);
     const totalReviews = Math.max(firstPage.reviewsCount, firstPage.cards.length);
     const totalPages = Math.max(1, Math.ceil(totalReviews / REVIEWS_PER_PAGE));
     const maxOffset = (totalPages - 1) * REVIEWS_PER_PAGE;
@@ -376,7 +404,7 @@ export async function scrapeHotelReviews(
       const offset = pageIndex * REVIEWS_PER_PAGE;
       console.log(`  Scraping page: ${pageIndex + 1}/${totalPages}...`);
 
-      const page = pageIndex === 0 ? firstPage : await fetchReviewPage(hotelId, hotelInfo.country_code, offset);
+      const page = pageIndex === 0 ? firstPage : await fetchPage(hotelId, hotelInfo.country_code, offset);
 
       for (const card of page.cards) {
         const reviewId = card.reviewUrl || null;
@@ -407,24 +435,51 @@ export async function scrapeHotelReviews(
 
       // Be a good internet citizen: add a small delay between requests
       if (pageIndex + 1 < totalPages) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await sleep(500);
       }
+    }
+
+    if (totalReviews > 0 && allReviews.length === 0) {
+      throw new Error(
+        `Booking advertised ${totalReviews} reviews for ${hotelInfo.hotel_name} `
+        + 'but returned no approved review cards',
+      );
     }
 
     console.log(`  ✅ Scraped ${allReviews.length} reviews for ${hotelInfo.hotel_name}`);
     return allReviews;
   } catch (error) {
     console.error(`Error scraping hotel ${hotelInfo.hotel_name}:`, error);
-    return [];
+    throw error;
   }
 }
 
-async function makeBookingGraphQlRequest<T>(
+function describeBookingNonJsonResponse(body: string): string {
+  const prefix = body.trimStart().slice(0, 4096).toLowerCase();
+  const looksLikeHtml = /^(?:<!doctype\s+html|<html|<head|<body)/.test(prefix);
+  if (!looksLikeHtml) {
+    return 'non-JSON response';
+  }
+
+  const looksLikeChallenge =
+    /aws.?waf|captcha|challenge|verify you are human|access denied|robot check/.test(prefix);
+  return looksLikeChallenge ? 'HTML challenge response' : 'HTML response';
+}
+
+export async function makeBookingGraphQlRequest<T>(
   operationName: string,
   variables: Record<string, unknown>,
   query: string,
+  dependencies: BookingGraphQlRequestDependencies = {},
 ): Promise<T> {
-  const response = await makeRequest(BOOKING_GRAPHQL_URL, 3, {
+  const request = dependencies.request || makeRequest;
+  const sleep = dependencies.sleep || ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
+  const requestedAttempts = dependencies.maxInvalidJsonAttempts ?? GRAPHQL_INVALID_JSON_ATTEMPTS;
+  const maxInvalidJsonAttempts =
+    Number.isFinite(requestedAttempts) && requestedAttempts >= 1
+      ? Math.floor(requestedAttempts)
+      : GRAPHQL_INVALID_JSON_ATTEMPTS;
+  const requestInit: RequestInit = {
     method: 'POST',
     headers: {
       Accept: 'application/json',
@@ -436,27 +491,49 @@ async function makeBookingGraphQlRequest<T>(
       extensions: {},
       query,
     }),
-  });
+  };
 
-  let payload: BookingGraphQlResponse<T>;
-  try {
-    payload = JSON.parse(response.data) as BookingGraphQlResponse<T>;
-  } catch {
-    throw new Error(`Booking GraphQL ${operationName} returned invalid JSON`);
+  for (let attempt = 1; attempt <= maxInvalidJsonAttempts; attempt++) {
+    const response = await request(BOOKING_GRAPHQL_URL, 3, requestInit);
+    let payload: BookingGraphQlResponse<T>;
+    try {
+      const parsed = JSON.parse(response.data) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Unexpected JSON payload type');
+      }
+      payload = parsed as BookingGraphQlResponse<T>;
+    } catch {
+      const responseKind = describeBookingNonJsonResponse(response.data);
+      const message =
+        `Booking GraphQL ${operationName} returned invalid JSON (${responseKind})`;
+      if (attempt === maxInvalidJsonAttempts) {
+        throw new Error(`${message} after ${maxInvalidJsonAttempts} attempts`);
+      }
+
+      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+      console.warn(
+        `${message}; retrying with a fresh connection `
+        + `(attempt ${attempt}/${maxInvalidJsonAttempts})`,
+      );
+      await sleep(delay);
+      continue;
+    }
+
+    if (payload.errors?.length) {
+      const messages = payload.errors
+        .map((error) => error.message)
+        .filter(Boolean)
+        .join('; ');
+      throw new Error(`Booking GraphQL ${operationName} failed: ${messages || 'unknown error'}`);
+    }
+    if (!payload.data) {
+      throw new Error(`Booking GraphQL ${operationName} returned no data`);
+    }
+
+    return payload.data;
   }
 
-  if (payload.errors?.length) {
-    const messages = payload.errors
-      .map((error) => error.message)
-      .filter(Boolean)
-      .join('; ');
-    throw new Error(`Booking GraphQL ${operationName} failed: ${messages || 'unknown error'}`);
-  }
-  if (!payload.data) {
-    throw new Error(`Booking GraphQL ${operationName} returned no data`);
-  }
-
-  return payload.data;
+  throw new Error(`Booking GraphQL ${operationName} exhausted invalid JSON retries`);
 }
 
 async function resolveBookingHotelId(hotelInfo: HotelInfo): Promise<number> {
@@ -514,7 +591,7 @@ async function fetchReviewPage(
   hotelId: number,
   countryCode: string,
   skip: number,
-): Promise<{ cards: BookingReviewCard[]; reviewsCount: number }> {
+): Promise<BookingReviewPage> {
   const data = await makeBookingGraphQlRequest<ReviewListData>(
     'ReviewList',
     buildBookingReviewListVariables(hotelId, countryCode, skip),
