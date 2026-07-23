@@ -127,9 +127,34 @@ function stripHtml(html: string): string {
     .trim();
 }
 
-interface AirbnbPdpPageData {
+export interface AirbnbPdpPageData {
   sections: any[];
   metadata: any;
+}
+
+type AirbnbRequest = typeof makeRequest;
+
+const MAX_DOMAIN_SWITCHES = 2;
+
+export function extractAirbnbDomainSwitchOrigin(html: string): string | null {
+  const formAction = html.match(
+    /<form\b[^>]*\baction=["']([^"']+\/v2\/domain_switch\/handoff(?:\?[^"']*)?)["'][^>]*>/i,
+  )?.[1];
+  if (!formAction) {
+    return null;
+  }
+
+  try {
+    const target = new URL(formAction);
+    const isAirbnbHostname = /^www\.airbnb\.[a-z]{2,}(?:\.[a-z]{2,})?$/.test(target.hostname);
+    if (target.protocol !== 'https:' || !isAirbnbHostname || target.pathname !== '/v2/domain_switch/handoff') {
+      return null;
+    }
+
+    return target.origin;
+  } catch {
+    return null;
+  }
 }
 
 export function extractPdpSectionsFromHtml(html: string): AirbnbPdpPageData | null {
@@ -189,24 +214,48 @@ function buildListingPageUrl(
   return url.toString();
 }
 
-async function fetchListingPageData(
+export async function fetchListingPageData(
   roomId: string,
   options?: { checkIn?: string; checkOut?: string; adults?: number },
+  request: AirbnbRequest = makeRequest,
 ): Promise<AirbnbPdpPageData> {
-  const pageUrl = buildListingPageUrl(roomId, options);
-  const response = await makeRequest(pageUrl, {
-    headers: {
-      ...BROWSER_HEADERS,
-      'User-Agent': API_HEADERS['User-Agent'],
-    },
-  });
+  let pageUrl = buildListingPageUrl(roomId, options);
+  const visitedOrigins = new Set<string>();
 
-  const extracted = extractPdpSectionsFromHtml(response.data);
-  if (!extracted) {
-    throw new Error('Could not extract PDP sections from Airbnb listing HTML');
+  for (let attempt = 0; attempt <= MAX_DOMAIN_SWITCHES; attempt++) {
+    const response = await request(pageUrl, {
+      headers: {
+        ...BROWSER_HEADERS,
+        'User-Agent': API_HEADERS['User-Agent'],
+      },
+    });
+
+    const extracted = extractPdpSectionsFromHtml(response.data);
+    if (extracted) {
+      return extracted;
+    }
+
+    // Rotating proxy exits can make airbnb.com return an HTTP-200 auto-submit
+    // handoff page instead of PDP HTML. The localized hostname serves the same
+    // deferred-state payload without requiring the form POST or shared cookies.
+    const targetOrigin = extractAirbnbDomainSwitchOrigin(response.data);
+    const currentUrl = new URL(pageUrl);
+    if (
+      !targetOrigin
+      || targetOrigin === currentUrl.origin
+      || visitedOrigins.has(targetOrigin)
+    ) {
+      break;
+    }
+
+    const targetUrl = new URL(targetOrigin);
+    visitedOrigins.add(currentUrl.origin);
+    currentUrl.hostname = targetUrl.hostname;
+    pageUrl = currentUrl.toString();
+    console.log(`  ↪ Following Airbnb domain handoff to ${targetUrl.hostname} for ${roomId}`);
   }
 
-  return extracted;
+  throw new Error('Could not extract PDP sections from Airbnb listing HTML');
 }
 
 function buildListingDetails(
