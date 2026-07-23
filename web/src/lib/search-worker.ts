@@ -57,7 +57,7 @@ for (const envPath of [
   path.resolve(process.cwd(), '.env'),
   path.resolve(process.cwd(), '../.env'),
 ]) {
-  loadDotEnv({ path: envPath, override: false });
+  loadDotEnv({ path: envPath, override: false, quiet: true });
 }
 
 bootstrapRuntimeProxyEnv();

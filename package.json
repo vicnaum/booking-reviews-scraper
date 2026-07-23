@@ -7,6 +7,8 @@
     "reviewr": "./dist/src/cli.js"
   },
   "scripts": {
+    "up": "node scripts/up.mjs",
+    "down": "docker compose -f web/docker-compose.yml down",
     "test": "tsx --test tests/**/*.test.ts",
     "dev": "tsx watch src/booking/scraper.ts",
     "dev:cli": "tsx src/cli.ts",
@@ -30,6 +32,7 @@
     "@types/papaparse": "^5.5.2",
     "@typescript-eslint/eslint-plugin": "^8.36.0",
     "@typescript-eslint/parser": "^8.36.0",
+    "concurrently": "^9.2.4",
     "eslint": "^9.31.0",
     "prettier": "^3.6.2",
     "tsx": "^4.20.3",

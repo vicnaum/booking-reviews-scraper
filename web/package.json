@@ -3,18 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "dotenv -e ../.env -e .env.local -- next dev",
     "dev:stack": "./scripts/dev-stack.sh",
-    "build": "next build",
-    "start": "next start",
-    "worker": "dotenv -e .env.local -- tsx src/lib/search-worker.ts",
-    "worker:dev": "dotenv -e .env.local -- tsx watch src/lib/search-worker.ts",
+    "build": "dotenv -e ../.env -e .env.local -- next build",
+    "start": "dotenv -e ../.env -e .env.local -- next start",
+    "worker": "dotenv -e ../.env -e .env.local -- tsx src/lib/search-worker.ts",
+    "worker:dev": "dotenv -e ../.env -e .env.local -- tsx watch src/lib/search-worker.ts",
     "test:pricing": "tsx --test src/lib/pricing.test.ts",
     "lint": "eslint .",
-    "db:generate": "dotenv -e .env.local -- prisma generate",
-    "db:push": "dotenv -e .env.local -- prisma db push",
-    "db:migrate": "dotenv -e .env.local -- prisma migrate dev",
-    "db:studio": "dotenv -e .env.local -- prisma studio"
+    "db:generate": "dotenv -e ../.env -e .env.local -- prisma generate",
+    "db:push": "dotenv -e ../.env -e .env.local -- prisma db push",
+    "db:migrate": "dotenv -e ../.env -e .env.local -- prisma migrate dev",
+    "db:studio": "dotenv -e ../.env -e .env.local -- prisma studio"
   },
   "dependencies": {
     "@prisma/client": "^6.2.0",
