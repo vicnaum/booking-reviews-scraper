@@ -20,6 +20,7 @@ const BOOKING_GRAPHQL_URL = 'https://www.booking.com/dml/graphql';
 const INPUT_DIR = 'data/booking/input';
 const OUTPUT_DIR = 'data/booking/output';
 const REVIEWS_PER_PAGE = 10;
+const REVIEW_SORTER = 'NEWEST_FIRST';
 
 // Captured from Booking.com's live hotel page on 2026-07-23. Keep these
 // operations explicit: Booking disables GraphQL introspection, while the
@@ -150,6 +151,13 @@ export interface BookingReviewScrapeProgress {
   offset: number;
   maxOffset: number;
   totalReviewsSoFar: number;
+}
+
+export function shouldStopBookingReviewPagination(
+  pageIndex: number,
+  cardCount: number,
+): boolean {
+  return pageIndex > 0 && cardCount === 0;
 }
 
 interface BookingGraphQlResponse<T> {
@@ -384,6 +392,14 @@ export async function scrapeHotelReviews(
         totalReviewsSoFar: allReviews.length,
       });
 
+      if (shouldStopBookingReviewPagination(pageIndex, page.cards.length)) {
+        console.warn(
+          `  Booking returned no approved review cards on page ${pageIndex + 1}; `
+          + 'stopping pagination before the advertised review count.',
+        );
+        break;
+      }
+
       // Be a good internet citizen: add a small delay between requests
       if (pageIndex + 1 < totalPages) {
         await new Promise((resolve) => setTimeout(resolve, 500));
@@ -472,7 +488,9 @@ export function buildBookingReviewListVariables(
       hotelId,
       ufi: 0,
       hotelCountryCode: countryCode,
-      sorter: 'MOST_RELEVANT',
+      // Live-probed on 2026-07-23: unlike relevance ranking, this keeps
+      // offset pages in a deterministic chronological order.
+      sorter: REVIEW_SORTER,
       filters: {
         text: '',
       },
@@ -584,6 +602,8 @@ export function mapBookingReviewCard(card: BookingReviewCard, hotelName: string)
     full_review: fullReview,
     en_full_review: originalLang?.toLowerCase().startsWith('en') ? fullReview : null,
     found_helpful: Number.isFinite(card.helpfulVotesCount) ? Math.max(0, card.helpfulVotesCount as number) : 0,
+    // ReviewList exposes helpfulVotesCount but no corresponding unhelpful count.
+    // Keep the legacy field at 0 for artifact/analytics schema compatibility.
     found_unhelpful: 0,
     owner_resp_text: cleanNullableText(card.partnerReply?.reply),
   };
