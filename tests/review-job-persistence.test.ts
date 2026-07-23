@@ -4,6 +4,7 @@ import {
   hasPersistedReviewJobResults,
   toReviewJobResponse,
 } from '../web/src/lib/reviewJobs.js';
+import { AI_JOB_BUDGET_ENV } from '../web/src/lib/aiBudget.js';
 
 function makeJob(overrides: Record<string, unknown> = {}) {
   return {
@@ -157,4 +158,51 @@ test('legacy html export availability remains separate from native results readi
 
   assert.equal(response.job.reportReady, false);
   assert.equal(response.job.legacyReportAvailable, true);
+});
+
+test('budget stops are exposed as durable partial results with their configured ceiling', () => {
+  const previousBudget = process.env[AI_JOB_BUDGET_ENV];
+  process.env[AI_JOB_BUDGET_ENV] = '99';
+
+  try {
+    const response = toReviewJobResponse({
+      job: makeJob({
+        analysisStatus: 'partial',
+        analysisCurrentPhase: 'budget-exceeded',
+        analysisErrorMessage: 'Analysis stopped before the next AI call.',
+      }),
+      listings: [makeListing()],
+      events: [
+        {
+          id: 'event_1',
+          jobId: 'job_1',
+          phase: 'analysis',
+          level: 'warning',
+          message: 'Analysis stopped before the next AI call.',
+          payload: {
+            reason: 'ai-cost-budget',
+            budgetUsd: 7.5,
+            totalCostUsd: 7.7,
+          },
+          listingId: null,
+          listingPlatform: null,
+          createdAt: new Date('2026-03-14T00:04:00.000Z'),
+        } as any,
+      ],
+    });
+
+    assert.equal(response.job.reportReady, true);
+    assert.equal(response.job.aiCostBudgetUsd, 7.5);
+    assert.equal(response.job.aiCostBudgetExceeded, true);
+    assert.equal(
+      response.job.analysisErrorMessage,
+      'Analysis stopped before the next AI call.',
+    );
+  } finally {
+    if (previousBudget == null) {
+      delete process.env[AI_JOB_BUDGET_ENV];
+    } else {
+      process.env[AI_JOB_BUDGET_ENV] = previousBudget;
+    }
+  }
 });

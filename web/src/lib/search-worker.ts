@@ -47,6 +47,11 @@ import {
 } from './reviewJobSearch.js';
 import { createSearchLogger } from './searchLog.js';
 import { buildAiCostBreakdown } from './aiCosts.js';
+import {
+  AiJobBudgetExceededError,
+  hasReachedAiJobBudget,
+  resolveAiJobBudgetUsd,
+} from './aiBudget.js';
 import type {
   SearchResult,
 } from '../types.js';
@@ -751,12 +756,14 @@ function getManifestEntryAiCostFields(entry: PersistableManifestEntry) {
 async function getAggregatedReviewJobAiCostFields(
   tx: Prisma.TransactionClient,
   reviewJobId: string,
+  jobListingIds?: string[],
 ) {
   const aggregate = await tx.reviewJobListingAnalysis.aggregate({
     where: {
       jobListing: {
         jobId: reviewJobId,
         hidden: false,
+        ...(jobListingIds ? { id: { in: jobListingIds } } : {}),
       },
     },
     _sum: {
@@ -780,6 +787,47 @@ async function getAggregatedReviewJobAiCostFields(
     triageCostUsd: costs.triageUsd,
     totalAiCostUsd: costs.totalUsd,
   };
+}
+
+async function resetReviewJobListingAnalyses(
+  tx: Prisma.TransactionClient,
+  jobListingIds: string[],
+) {
+  if (jobListingIds.length === 0) {
+    return;
+  }
+
+  await tx.reviewJobListingAnalysis.updateMany({
+    where: {
+      jobListingId: {
+        in: jobListingIds,
+      },
+    },
+    data: {
+      status: 'pending',
+      currentPhase: 'pending',
+      errorMessage: null,
+      startedAt: null,
+      completedAt: null,
+      durationMs: null,
+      detailsStatus: 'pending',
+      reviewsStatus: 'pending',
+      photosStatus: 'pending',
+      aiReviewsStatus: 'pending',
+      aiPhotosStatus: 'pending',
+      triageStatus: 'pending',
+      details: Prisma.DbNull,
+      aiReviews: Prisma.DbNull,
+      aiPhotos: Prisma.DbNull,
+      triage: Prisma.DbNull,
+      reviewCount: null,
+      photoCount: null,
+      aiReviewsCostUsd: 0,
+      aiPhotosCostUsd: 0,
+      triageCostUsd: 0,
+      totalAiCostUsd: 0,
+    },
+  });
 }
 
 function readArtifactJson(
@@ -1030,6 +1078,7 @@ async function runReviewJobAnalysis(reviewJobId: string) {
     },
   });
   const analysisModel = process.env.LLM_MODEL || 'gemini-3-flash-preview:high';
+  const aiBudgetUsd = resolveAiJobBudgetUsd();
   const poi = asStoredMapPoint(jobRecord.poi);
   const activeListingByKey = new Map(
     activeListings.map((listing) => [
@@ -1068,6 +1117,12 @@ async function runReviewJobAnalysis(reviewJobId: string) {
       .filter((listing) => !listing.selected)
       .map((listing) => listing.id)
     : [];
+  let persistedAiCosts = {
+    aiReviewsCostUsd: 0,
+    aiPhotosCostUsd: 0,
+    triageCostUsd: 0,
+    totalAiCostUsd: 0,
+  };
 
   fs.writeFileSync(
     urlsFilePath,
@@ -1107,6 +1162,10 @@ async function runReviewJobAnalysis(reviewJobId: string) {
         analysisStartedAt: startedAt,
         analysisCompletedAt: null,
         analysisDurationMs: null,
+        aiReviewsCostUsd: 0,
+        aiPhotosCostUsd: 0,
+        triageCostUsd: 0,
+        totalAiCostUsd: 0,
       },
     });
   });
@@ -1119,6 +1178,7 @@ async function runReviewJobAnalysis(reviewJobId: string) {
       listingCount: activeListings.length,
       artifactRoot,
       model: analysisModel,
+      aiBudgetUsd,
     },
   });
 
@@ -1183,6 +1243,32 @@ async function runReviewJobAnalysis(reviewJobId: string) {
             currentPhase: phaseUpdate.phase,
           });
         },
+        onBeforeAiCall: async (checkpoint) => {
+          if (
+            aiBudgetUsd != null
+            && hasReachedAiJobBudget(persistedAiCosts.totalAiCostUsd, aiBudgetUsd)
+          ) {
+            throw new AiJobBudgetExceededError({
+              totalCostUsd: persistedAiCosts.totalAiCostUsd,
+              budgetUsd: aiBudgetUsd,
+              phase: checkpoint.phase,
+            });
+          }
+        },
+        onAiCheckpoint: async () => {
+          persistedAiCosts = await prisma.$transaction(async (tx) => {
+            const costs = await getAggregatedReviewJobAiCostFields(
+              tx,
+              reviewJobId,
+              activeListingIds,
+            );
+            await tx.reviewJob.update({
+              where: { id: reviewJobId },
+              data: costs,
+            });
+            return costs;
+          });
+        },
         onScrapeComplete: async ({ outputDir, manifest }) => {
           injectPoiContextIntoListingArtifacts({
             rootDir: outputDir,
@@ -1240,39 +1326,7 @@ async function runReviewJobAnalysis(reviewJobId: string) {
     const completedAt = new Date();
     let overallStatus: 'completed' | 'partial' | 'failed' = 'completed';
     await prisma.$transaction(async (tx) => {
-      if (inactiveListingIds.length > 0) {
-        await tx.reviewJobListingAnalysis.updateMany({
-          where: {
-            jobListingId: {
-              in: inactiveListingIds,
-            },
-          },
-          data: {
-            status: 'pending',
-            currentPhase: 'pending',
-            errorMessage: null,
-            startedAt: null,
-            completedAt: null,
-            durationMs: null,
-            detailsStatus: 'pending',
-            reviewsStatus: 'pending',
-            photosStatus: 'pending',
-            aiReviewsStatus: 'pending',
-            aiPhotosStatus: 'pending',
-            triageStatus: 'pending',
-            details: Prisma.DbNull,
-            aiReviews: Prisma.DbNull,
-            aiPhotos: Prisma.DbNull,
-            triage: Prisma.DbNull,
-            reviewCount: null,
-            photoCount: null,
-            aiReviewsCostUsd: 0,
-            aiPhotosCostUsd: 0,
-            triageCostUsd: 0,
-            totalAiCostUsd: 0,
-          },
-        });
-      }
+      await resetReviewJobListingAnalyses(tx, inactiveListingIds);
 
       const finalAnalyses = await tx.reviewJobListingAnalysis.findMany({
         where: {
@@ -1325,6 +1379,76 @@ async function runReviewJobAnalysis(reviewJobId: string) {
       `[review-worker] analysis completed ${reviewJobId} with status ${overallStatus}`,
     );
   } catch (error) {
+    if (error instanceof AiJobBudgetExceededError) {
+      const completedAt = new Date();
+
+      await syncReviewJobArtifactsToDb({
+        reviewJobId,
+        artifactRoot,
+        poi,
+      });
+
+      await prisma.$transaction(async (tx) => {
+        await resetReviewJobListingAnalyses(tx, inactiveListingIds);
+        await tx.reviewJobListingAnalysis.updateMany({
+          where: {
+            jobListingId: {
+              in: activeListingIds,
+            },
+            status: {
+              not: 'completed',
+            },
+          },
+          data: {
+            status: 'partial',
+            currentPhase: 'budget-exceeded',
+            errorMessage: error.message,
+            completedAt,
+            durationMs: completedAt.getTime() - startedAt.getTime(),
+          },
+        });
+
+        const aggregatedAiCosts = await getAggregatedReviewJobAiCostFields(
+          tx,
+          reviewJobId,
+          activeListingIds,
+        );
+        await tx.reviewJob.update({
+          where: { id: reviewJobId },
+          data: {
+            status: 'completed',
+            currentPhase: 'results-ready',
+            analysisStatus: 'partial',
+            analysisCurrentPhase: 'budget-exceeded',
+            analysisProgress: getAnalysisPhaseProgress(error.phase),
+            analysisErrorMessage: error.message,
+            analysisCompletedAt: completedAt,
+            analysisDurationMs: completedAt.getTime() - startedAt.getTime(),
+            artifactRoot,
+            reportPath: null,
+            ...aggregatedAiCosts,
+          },
+        });
+        await tx.reviewJobEvent.create({
+          data: buildReviewJobEventData(reviewJobId, {
+            phase: 'analysis',
+            level: 'warning',
+            message: error.message,
+            payload: {
+              reason: 'ai-cost-budget',
+              phase: error.phase,
+              budgetUsd: error.budgetUsd,
+              totalCostUsd: error.totalCostUsd,
+              costs: aggregatedAiCosts,
+            },
+          }),
+        });
+      });
+
+      console.warn(`[review-worker] ${error.message}`);
+      return;
+    }
+
     const message =
       error instanceof Error ? error.message : 'Review job analysis failed';
     const completedAt = new Date();

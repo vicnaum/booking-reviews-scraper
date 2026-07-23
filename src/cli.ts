@@ -404,6 +404,7 @@ program
   .option('--triage', 'Run AI triage (grade listings against priorities)')
   .option('--model <model>', 'LLM model for AI phases (default: gemini-3-flash-preview:high)')
   .option('--priorities <text>', 'Guest priorities for AI analysis (e.g. "quiet, fresh air")')
+  .option('--max-ai-reviews <n>', 'Maximum post-filter reviews sent to AI per listing (default: 250)')
   .option('--checkin <date>', 'Check-in date (YYYY-MM-DD)')
   .option('--checkout <date>', 'Check-out date (YYYY-MM-DD)')
   .option('--adults <n>', 'Number of adults')
@@ -435,6 +436,7 @@ program
       triage: hasPhaseFlag ? !!cmdOpts.triage : true,
       aiModel: cmdOpts.model || undefined,
       aiPriorities: cmdOpts.priorities || undefined,
+      aiReviewLimit: cmdOpts.maxAiReviews == null ? undefined : Number(cmdOpts.maxAiReviews),
       aiReviewsExplicit: !!cmdOpts.aiReviews,
       aiPhotosExplicit: !!cmdOpts.aiPhotos,
       triageExplicit: !!cmdOpts.triage,
@@ -477,6 +479,7 @@ program
   .option('--room <text>', 'Filter reviews by room type (substring match on room_view)')
   .option('--priorities <text>', 'Guest priorities to focus on (e.g. "quiet, fresh air, high floor")')
   .option('--all-years', 'Include all reviews regardless of age (default: last 4 years)')
+  .option('--max-ai-reviews <n>', 'Maximum post-filter reviews sent to AI (default: 250)')
   .action(async (reviewsFile: string, listingFile: string | undefined, cmdOpts: any) => {
     // Load .env for GEMINI_API_KEY
     try { await import('dotenv/config'); } catch {}
@@ -491,6 +494,7 @@ program
       room: cmdOpts.room || undefined,
       priorities: cmdOpts.priorities || undefined,
       allYears: !!cmdOpts.allYears,
+      maxReviews: cmdOpts.maxAiReviews == null ? undefined : Number(cmdOpts.maxAiReviews),
     });
     if (result.data !== null) {
       console.log(typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2));

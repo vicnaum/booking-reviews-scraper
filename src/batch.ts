@@ -32,6 +32,7 @@ export interface BatchOptions {
   triage: boolean;
   aiModel?: string;
   aiPriorities?: string;
+  aiReviewLimit?: number;
   aiReviewsExplicit: boolean;  // true when --ai-reviews was explicitly passed
   aiPhotosExplicit: boolean;   // true when --ai-photos was explicitly passed
   triageExplicit: boolean;     // true when --triage was explicitly passed
@@ -108,6 +109,13 @@ export interface BatchPhaseUpdate {
   entry: ManifestEntry;
 }
 
+export interface BatchAiCheckpoint {
+  outputDir: string;
+  manifestKey: string;
+  phase: 'ai-reviews' | 'ai-photos' | 'triage';
+  entry: ManifestEntry;
+}
+
 export interface BatchHooks {
   onEvent?: (event: BatchEvent) => void | Promise<void>;
   onScrapeComplete?: (input: {
@@ -115,6 +123,8 @@ export interface BatchHooks {
     manifest: BatchManifest;
   }) => void | Promise<void>;
   onPhaseUpdate?: (input: BatchPhaseUpdate) => void | Promise<void>;
+  onBeforeAiCall?: (input: BatchAiCheckpoint) => void | Promise<void>;
+  onAiCheckpoint?: (input: BatchAiCheckpoint) => void | Promise<void>;
 }
 
 interface PhaseResult {
@@ -337,6 +347,34 @@ async function persistPhaseUpdate(
     manifestKey,
     phase,
     entry,
+  });
+}
+
+async function emitAiCheckpoint(
+  options: BatchOptions,
+  input: BatchAiCheckpoint,
+): Promise<void> {
+  if (!options.hooks?.onAiCheckpoint) {
+    return;
+  }
+
+  await options.hooks.onAiCheckpoint({
+    ...input,
+    entry: cloneManifestEntry(input.entry),
+  });
+}
+
+async function emitBeforeAiCall(
+  options: BatchOptions,
+  input: BatchAiCheckpoint,
+): Promise<void> {
+  if (!options.hooks?.onBeforeAiCall) {
+    return;
+  }
+
+  await options.hooks.onBeforeAiCall({
+    ...input,
+    entry: cloneManifestEntry(input.entry),
   });
 }
 
@@ -1117,12 +1155,19 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         }
 
         const t = Date.now();
+        await emitBeforeAiCall(options, {
+          outputDir: aiOutputDir,
+          manifestKey,
+          phase: 'ai-reviews',
+          entry,
+        });
         try {
           const result: AnalysisResult = await runAnalyze({
             reviewsFile: reviewsPath,
             listingFile: listingPath && fs.existsSync(listingPath) ? listingPath : undefined,
             model: aiModel,
             priorities: options.aiPriorities,
+            maxReviews: options.aiReviewLimit,
           });
 
           // Write result to ai-reviews dir
@@ -1130,7 +1175,14 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
 
           console.log(`${prefix} \u2014 ai-reviews \u2713 (${formatDuration(Date.now() - t)})`);
           platformResult.aiReviews.fetched++;
-          entry.aiReviews = { status: 'fetched', file: `ai-reviews/${entry.id}.json`, model: result.model, cost: result.usage?.cost };
+          entry.aiReviews = {
+            status: 'fetched',
+            file: `ai-reviews/${entry.id}.json`,
+            model: result.model,
+            count: result.reviewSelection.includedCount,
+            expected: result.reviewSelection.eligibleCount,
+            cost: result.usage?.cost,
+          };
           await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'aiReviews');
           await emitBatchEvent(options, {
             phase: 'ai-reviews',
@@ -1139,6 +1191,9 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
             manifestKey,
             platform: entry.platform,
             listingId: entry.id,
+            payload: {
+              reviewSelection: result.reviewSelection,
+            },
           });
         } catch (err: any) {
           console.log(`${prefix} \u2014 ai-reviews \u2717 ${err.message}`);
@@ -1156,6 +1211,12 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           });
         }
 
+        await emitAiCheckpoint(options, {
+          outputDir: aiOutputDir,
+          manifestKey,
+          phase: 'ai-reviews',
+          entry,
+        });
       }
     }
   }
@@ -1276,6 +1337,12 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         const listingPath = entry.details.file ? path.join(aiOutputDir, entry.details.file) : undefined;
 
         const t = Date.now();
+        await emitBeforeAiCall(options, {
+          outputDir: aiOutputDir,
+          manifestKey,
+          phase: 'ai-photos',
+          entry,
+        });
         try {
           const result: PhotoAnalysisResult = await runAnalyzePhotos({
             photosDir: photosPath,
@@ -1315,6 +1382,12 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           });
         }
 
+        await emitAiCheckpoint(options, {
+          outputDir: aiOutputDir,
+          manifestKey,
+          phase: 'ai-photos',
+          entry,
+        });
       }
     }
   }
@@ -1436,6 +1509,12 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
         const aiPhotosPath = entry.aiPhotos?.file ? path.join(aiOutputDir, entry.aiPhotos.file) : undefined;
 
         const t = Date.now();
+        await emitBeforeAiCall(options, {
+          outputDir: aiOutputDir,
+          manifestKey,
+          phase: 'triage',
+          entry,
+        });
         try {
           const result: TriageResult = await runTriage({
             listingFile: listingPath,
@@ -1478,6 +1557,12 @@ export async function runBatch(filePaths: string[], options: BatchOptions): Prom
           });
         }
 
+        await emitAiCheckpoint(options, {
+          outputDir: aiOutputDir,
+          manifestKey,
+          phase: 'triage',
+          entry,
+        });
       }
     }
   }

@@ -37,6 +37,18 @@ DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/stayreviewr?schema=pu
 REDIS_URL=redis://127.0.0.1:6379
 ```
 
+The analysis cost guardrails are also configured there:
+
+```dotenv
+AI_REVIEW_MAX_REVIEWS=250
+STAYREVIEWR_AI_JOB_BUDGET_USD=5
+```
+
+The first value caps the most recent eligible reviews sent to AI per listing. The second is
+the maximum persisted AI spend per analysis run; use `0` to disable that ceiling. A run that
+reaches the ceiling stops before its next AI call and keeps its completed artifacts as partial
+results.
+
 `web/.env.local` remains supported as a compatibility fallback for direct `web/` commands, but
 the root `.env` takes precedence. Proxy settings also fall back to
 `~/.config/reviewr/.env` created by `reviewr auth`.
