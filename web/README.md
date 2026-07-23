@@ -66,3 +66,15 @@ size limit; removing the configured `REVIEWR_CACHE_DIR` is always safe.
 `web/.env.local` remains supported as a compatibility fallback for direct `web/` commands, but
 the root `.env` takes precedence. Proxy settings also fall back to
 `~/.config/reviewr/.env` created by `reviewr auth`.
+
+Historical jobs created before AI cost columns can be inspected and repaired from their retained
+`batch_manifest.json` files:
+
+```bash
+cd web
+npm run backfill:ai-costs             # dry run
+npm run backfill:ai-costs -- --apply  # persist zero-cost jobs only
+```
+
+The one-shot backfill skips jobs that already have costs or lack a readable manifest, updates
+matching per-listing analyses and job totals transactionally, and records an audit event.
