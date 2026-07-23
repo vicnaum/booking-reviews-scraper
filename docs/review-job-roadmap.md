@@ -90,6 +90,8 @@ Current state:
 - Native results page is live.
 - Analysis phases persist incrementally into the DB while jobs are running.
 - Legacy HTML report is now a fallback export, not the main results surface.
+- Debug/export runs are durable, downloadable as streamed ZIPs, and retained for 30 days by
+  default; their availability never controls the Postgres-backed native results.
 - Remaining work here is mostly UX polish, not architectural plumbing.
 
 ## Milestone 4: Temporary Job History
@@ -117,5 +119,4 @@ Scope:
 
 - Improve per-listing compare/selection UX on the job/results pages.
 - Add richer live progress delivery if polling becomes insufficient.
-- Treat artifact files purely as optional exports and debugging aids over time.
 - Replace temporary browser ownership with real auth later.

@@ -590,6 +590,14 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                     )}
                 </span>
                 <div className="flex items-center gap-2">
+                  {data.job.artifactArchiveAvailable && (
+                    <a
+                      href={`/api/jobs/${data.job.id}/artifacts`}
+                      className="rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-2 text-xs font-semibold text-stone-200 transition hover:bg-white/[0.1]"
+                    >
+                      Download artifacts
+                    </a>
+                  )}
                   {data.job.reportReady && (
                     <Link
                       href={`/jobs/${data.job.id}/results`}

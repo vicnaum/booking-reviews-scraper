@@ -36,8 +36,8 @@ pipeline per job with per-phase progress, and a native results page (ranking, ma
 sort/filter, compare). Near-feature-complete; milestones 1, 2, 4 of `docs/review-job-roadmap.md`
 done, milestone 3 "mostly complete".
 
-**Goal now: reliable personal daily-driver.** NOT public/multi-user. Explicitly deferred: real
-auth (browser `ownerKey` stays), deployment/hosting, rate limiting, issue #25, issue #24.
+**Goal now: reliable personal daily-driver.** NOT public/multi-user. Explicitly deferred:
+issue #25, real auth (browser `ownerKey` stays; issue #36), deployment/hosting, and rate limiting.
 
 ## State as of 2026-07-23
 
@@ -47,8 +47,8 @@ auth (browser `ownerKey` stays), deployment/hosting, rate limiting, issue #25, i
 - **The repo has been dormant since 2026-03-16.** Nothing verified since.
 - Known cost profile (measured 2026-03-15): $3.75 across 3 jobs — photos AI $2.32 (62%),
   triage $0.82, reviews AI $0.62. One listing pushed 1,722 reviews through filters to the model.
-- Open issues: #23 (cross-job scrape cache), #25 (split cached extraction vs prompt reasoning —
-  deferred), #24 (artifacts as optional exports — deferred).
+- The July revival closed the cache, artifact-export, scraper-hardening, proxy-protocol,
+  budget-read, cost-backfill, and web-audit backlog. Issues #25 and #36 remain deferred.
 
 ## Your task queue (priority order)
 
@@ -57,9 +57,9 @@ auth (browser `ownerKey` stays), deployment/hosting, rate limiting, issue #25, i
 > green). Task 2 → PR #30 (`npm run up` one-command startup, root `.env` unified). Task 3 →
 > PR #31 (`AI_REVIEW_MAX_REVIEWS`=250 cap + `STAYREVIEWR_AI_JOB_BUDGET_USD`=$5 per-run
 > ceiling with durable partial state). Task 4 → PR #32 (cross-job artifact cache,
-> ~14x faster repeat runs, issue #23 closed). Remaining backlog: issues #24, #25, #29;
-> malformed-budget-env read-path nit (PR #31 review); web npm audit vulns; proxy 407
-> renewal (Victor). The sections below are kept for historical context.
+> ~14x faster repeat runs, issue #23 closed). A subsequent backlog pass completed #24, #29,
+> #33, #34, #35, and #37; only the needs-decision issues #25 and #36 remain parked. The
+> sections below are kept for historical context.
 
 ### Task 1 — Bitrot smoke test (GATING — do first)
 Booking's WAF bypass and Airbnb's GraphQL usage were reverse-engineered in Feb/Mar 2026 and are

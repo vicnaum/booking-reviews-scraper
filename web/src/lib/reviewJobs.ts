@@ -29,6 +29,10 @@ import {
 } from './searchJobs.js';
 import { buildAiCostBreakdown } from './aiCosts.js';
 import { resolveAiJobBudgetUsdForRead } from './aiBudget.js';
+import {
+  isReviewJobArtifactFileAvailable,
+  isReviewJobArtifactRootAvailable,
+} from './reviewJobArtifacts.js';
 
 const EARTH_RADIUS_METERS = 6371000;
 
@@ -355,6 +359,7 @@ export function toReviewJobState(
   options: {
     resultsReady?: boolean;
     legacyReportAvailable?: boolean;
+    artifactArchiveAvailable?: boolean;
     viewerCanEdit?: boolean;
     aiCostBudgetUsd?: number | null;
   } = {},
@@ -406,7 +411,12 @@ export function toReviewJobState(
     startedAt: job.startedAt?.toISOString() ?? null,
     completedAt: job.completedAt?.toISOString() ?? null,
     reportReady: options.resultsReady ?? hasPersistedReviewJobResults(job),
-    legacyReportAvailable: options.legacyReportAvailable ?? !!job.reportPath,
+    legacyReportAvailable:
+      options.legacyReportAvailable
+      ?? isReviewJobArtifactFileAvailable(job.reportPath),
+    artifactArchiveAvailable:
+      options.artifactArchiveAvailable
+      ?? isReviewJobArtifactRootAvailable(job.artifactRoot),
     createdAt: job.createdAt.toISOString(),
   };
 }
@@ -436,7 +446,8 @@ export function toReviewJobResponse(input: {
   return {
     job: toReviewJobState(input.job, {
       resultsReady,
-      legacyReportAvailable: !!input.job.reportPath,
+      legacyReportAvailable: isReviewJobArtifactFileAvailable(input.job.reportPath),
+      artifactArchiveAvailable: isReviewJobArtifactRootAvailable(input.job.artifactRoot),
       viewerCanEdit: input.viewerCanEdit,
       aiCostBudgetUsd: persistedAiBudgetUsd,
     }),

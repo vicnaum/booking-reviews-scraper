@@ -254,6 +254,7 @@ export interface ReviewJobState {
   completedAt: string | null;
   reportReady: boolean;
   legacyReportAvailable: boolean;
+  artifactArchiveAvailable: boolean;
   createdAt: string;
 }
 

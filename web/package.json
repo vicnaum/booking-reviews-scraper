@@ -10,6 +10,7 @@
     "worker": "dotenv -e ../.env -e .env.local -- tsx src/lib/search-worker.ts",
     "worker:dev": "dotenv -e ../.env -e .env.local -- tsx watch src/lib/search-worker.ts",
     "backfill:ai-costs": "dotenv -e ../.env -e .env.local -- tsx scripts/backfill-ai-costs.ts",
+    "cleanup:artifacts": "dotenv -e ../.env -e .env.local -- tsx scripts/cleanup-artifacts.ts",
     "test:pricing": "tsx --test src/lib/pricing.test.ts",
     "test:ui": "tsx --test src/components/AiBudgetNotice.test.tsx",
     "lint": "eslint .",
@@ -21,6 +22,7 @@
   "dependencies": {
     "@prisma/client": "^6.19.3",
     "@turf/turf": "^7.3.4",
+    "archiver": "^8.0.0",
     "axios": "^1.18.1",
     "bullmq": "^5.80.12",
     "cheerio": "^1.2.0",
@@ -39,6 +41,7 @@
   "devDependencies": {
     "@eslint/eslintrc": "^3.0.0",
     "@tailwindcss/postcss": "^4.0.0",
+    "@types/archiver": "^8.0.0",
     "@types/leaflet": "^1.9.8",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",

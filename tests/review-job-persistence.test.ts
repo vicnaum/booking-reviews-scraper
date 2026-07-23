@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   hasPersistedReviewJobResults,
   toReviewJobResponse,
@@ -132,6 +135,7 @@ test('native results readiness is derived from persisted analysis state, not rep
 
   assert.equal(response.job.reportReady, true);
   assert.equal(response.job.legacyReportAvailable, false);
+  assert.equal(response.job.artifactArchiveAvailable, false);
   assert.deepEqual(response.job.costs, {
     aiReviewsUsd: 0.0142,
     aiPhotosUsd: 0.0061,
@@ -147,17 +151,43 @@ test('native results readiness is derived from persisted analysis state, not rep
 });
 
 test('legacy html export availability remains separate from native results readiness', () => {
-  const response = toReviewJobResponse({
-    job: makeJob({
-      analysisStatus: 'pending',
-      reportPath: '/tmp/report.html',
-    }),
-    listings: [makeListing({ analysis: null })],
-    events: [],
-  });
+  const artifactRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'review-job-export-availability-'),
+  );
+  const reportPath = path.join(artifactRoot, 'report.html');
+  fs.writeFileSync(reportPath, '<html></html>');
 
-  assert.equal(response.job.reportReady, false);
-  assert.equal(response.job.legacyReportAvailable, true);
+  try {
+    const response = toReviewJobResponse({
+      job: makeJob({
+        analysisStatus: 'pending',
+        artifactRoot,
+        reportPath,
+      }),
+      listings: [makeListing({ analysis: null })],
+      events: [],
+    });
+
+    assert.equal(response.job.reportReady, false);
+    assert.equal(response.job.legacyReportAvailable, true);
+    assert.equal(response.job.artifactArchiveAvailable, true);
+
+    fs.rmSync(artifactRoot, { recursive: true, force: true });
+    const expiredResponse = toReviewJobResponse({
+      job: makeJob({
+        analysisStatus: 'completed',
+        artifactRoot,
+        reportPath,
+      }),
+      listings: [makeListing()],
+      events: [],
+    });
+    assert.equal(expiredResponse.job.reportReady, true);
+    assert.equal(expiredResponse.job.legacyReportAvailable, false);
+    assert.equal(expiredResponse.job.artifactArchiveAvailable, false);
+  } finally {
+    fs.rmSync(artifactRoot, { recursive: true, force: true });
+  }
 });
 
 test('budget stops are exposed as durable partial results with their configured ceiling', () => {

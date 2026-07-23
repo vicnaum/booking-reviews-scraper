@@ -1,8 +1,12 @@
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Prisma, ReviewJobListing, ReviewJobListingAnalysis } from '@prisma/client';
 import type { MapPoint, PhaseStatus, Platform } from '../types.js';
+import {
+  ensureReviewJobArtifactWorkspace,
+  getReviewJobArtifactRunDir,
+  getReviewJobArtifactWorkspaceDir,
+} from './reviewJobArtifacts.js';
 
 function sanitize(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]+/g, '-');
@@ -20,17 +24,15 @@ export interface ReviewJobListingWorkspace {
 }
 
 export function getReviewJobWorkspaceDir(jobId: string): string {
-  return path.join(os.tmpdir(), 'stayreviewr-review-jobs', jobId);
+  return getReviewJobArtifactWorkspaceDir(jobId);
 }
 
 export function getReviewJobRunDir(jobId: string, runId: string): string {
-  return path.join(getReviewJobWorkspaceDir(jobId), 'runs', sanitize(runId));
+  return getReviewJobArtifactRunDir(jobId, sanitize(runId));
 }
 
 export function ensureReviewJobWorkspace(jobId: string): string {
-  const dir = getReviewJobWorkspaceDir(jobId);
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
+  return ensureReviewJobArtifactWorkspace(jobId);
 }
 
 export function getReviewJobListingWorkspace(

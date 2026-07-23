@@ -1739,6 +1739,14 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 >
                   Back to job
                 </Link>
+                {data.job.artifactArchiveAvailable && (
+                  <a
+                    href={`/api/jobs/${data.job.id}/artifacts`}
+                    className="rounded-2xl border border-white/10 bg-white/[0.05] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"
+                  >
+                    Download artifacts (.zip)
+                  </a>
+                )}
                 {data.job.legacyReportAvailable && (
                   <a
                     href={`/api/jobs/${data.job.id}/report`}

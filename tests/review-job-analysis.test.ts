@@ -15,6 +15,7 @@ import {
   summarizeAnalysisStatus,
   type AnalysisManifest,
 } from '../web/src/lib/review-job-analysis.js';
+import { REVIEW_JOB_ARTIFACT_DIR_ENV } from '../web/src/lib/reviewJobArtifacts.js';
 
 test('pruneAnalysisManifestToListings keeps only active listings and refreshes dates', () => {
   const rootDir = fs.mkdtempSync(
@@ -164,11 +165,17 @@ test('summarizeAnalysisStatus treats pending listings as partial results', () =>
 
 test('prepareReviewJobRunWorkspace stages a fresh rerun with AI outputs invalidated', () => {
   const jobId = 'job_stage_test';
+  const artifactStore = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'review-job-artifact-store-'),
+  );
   const sourceRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), 'review-job-run-source-'),
   );
+  const previousArtifactDir = process.env[REVIEW_JOB_ARTIFACT_DIR_ENV];
+  process.env[REVIEW_JOB_ARTIFACT_DIR_ENV] = artifactStore;
 
-  const manifest: AnalysisManifest = {
+  try {
+    const manifest: AnalysisManifest = {
     version: 2,
     createdAt: '2026-03-14T00:00:00.000Z',
     updatedAt: '2026-03-14T00:00:00.000Z',
@@ -201,57 +208,66 @@ test('prepareReviewJobRunWorkspace stages a fresh rerun with AI outputs invalida
         triage: { status: 'fetched', file: 'triage/drop.json' },
       },
     },
-  };
+    };
 
-  fs.mkdirSync(path.join(sourceRoot, 'listings'), { recursive: true });
-  fs.mkdirSync(path.join(sourceRoot, 'reviews'), { recursive: true });
-  fs.mkdirSync(path.join(sourceRoot, 'ai-reviews'), { recursive: true });
-  fs.mkdirSync(path.join(sourceRoot, 'ai-photos'), { recursive: true });
-  fs.mkdirSync(path.join(sourceRoot, 'triage'), { recursive: true });
-  fs.writeFileSync(getManifestPathFromRoot(sourceRoot), JSON.stringify(manifest, null, 2));
-  fs.writeFileSync(path.join(sourceRoot, 'listings', 'listing_12345.json'), '{}');
-  fs.writeFileSync(path.join(sourceRoot, 'reviews', 'room_12345_reviews.json'), '[]');
-  fs.writeFileSync(path.join(sourceRoot, 'ai-reviews', '12345.json'), '{}');
-  fs.writeFileSync(path.join(sourceRoot, 'ai-photos', '12345.json'), '{}');
-  fs.writeFileSync(path.join(sourceRoot, 'triage', '12345.json'), '{}');
-  fs.writeFileSync(path.join(sourceRoot, 'report.html'), '<html></html>');
+    fs.mkdirSync(path.join(sourceRoot, 'listings'), { recursive: true });
+    fs.mkdirSync(path.join(sourceRoot, 'reviews'), { recursive: true });
+    fs.mkdirSync(path.join(sourceRoot, 'ai-reviews'), { recursive: true });
+    fs.mkdirSync(path.join(sourceRoot, 'ai-photos'), { recursive: true });
+    fs.mkdirSync(path.join(sourceRoot, 'triage'), { recursive: true });
+    fs.writeFileSync(getManifestPathFromRoot(sourceRoot), JSON.stringify(manifest, null, 2));
+    fs.writeFileSync(path.join(sourceRoot, 'listings', 'listing_12345.json'), '{}');
+    fs.writeFileSync(path.join(sourceRoot, 'reviews', 'room_12345_reviews.json'), '[]');
+    fs.writeFileSync(path.join(sourceRoot, 'ai-reviews', '12345.json'), '{}');
+    fs.writeFileSync(path.join(sourceRoot, 'ai-photos', '12345.json'), '{}');
+    fs.writeFileSync(path.join(sourceRoot, 'triage', '12345.json'), '{}');
+    fs.writeFileSync(path.join(sourceRoot, 'report.html'), '<html></html>');
 
-  const staged = prepareReviewJobRunWorkspace({
-    jobId,
-    runId: 'run_1',
-    previousArtifactRoot: sourceRoot,
-    listings: [
-      {
-        platform: 'airbnb',
-        url: 'https://www.airbnb.com/rooms/12345',
+    const staged = prepareReviewJobRunWorkspace({
+      jobId,
+      runId: 'run_1',
+      previousArtifactRoot: sourceRoot,
+      listings: [
+        {
+          platform: 'airbnb',
+          url: 'https://www.airbnb.com/rooms/12345',
+        },
+      ],
+      dates: {
+        checkIn: '2026-03-20',
+        checkOut: '2026-03-29',
+        adults: 4,
       },
-    ],
-    dates: {
+    });
+
+    assert.equal(staged.rootDir, getReviewJobRunDir(jobId, 'run_1'));
+    const updated = readJsonFile<AnalysisManifest>(getManifestPathFromRoot(staged.rootDir));
+    assert.ok(updated);
+    assert.deepEqual(Object.keys(updated.listings), ['keep']);
+    assert.deepEqual(updated.dates, {
       checkIn: '2026-03-20',
       checkOut: '2026-03-29',
       adults: 4,
-    },
-  });
-
-  assert.equal(staged.rootDir, getReviewJobRunDir(jobId, 'run_1'));
-  const updated = readJsonFile<AnalysisManifest>(getManifestPathFromRoot(staged.rootDir));
-  assert.ok(updated);
-  assert.deepEqual(Object.keys(updated.listings), ['keep']);
-  assert.deepEqual(updated.dates, {
-    checkIn: '2026-03-20',
-    checkOut: '2026-03-29',
-    adults: 4,
-  });
-  assert.equal(updated.listings.keep.aiReviews.status, 'not_requested');
-  assert.equal(updated.listings.keep.aiPhotos.status, 'not_requested');
-  assert.equal(updated.listings.keep.triage.status, 'not_requested');
-  assert.equal(fs.existsSync(path.join(staged.rootDir, 'ai-reviews', '12345.json')), false);
-  assert.equal(fs.existsSync(path.join(staged.rootDir, 'ai-photos', '12345.json')), false);
-  assert.equal(fs.existsSync(path.join(staged.rootDir, 'triage', '12345.json')), false);
-  assert.equal(fs.existsSync(path.join(staged.rootDir, 'report.html')), false);
-  assert.equal(fs.existsSync(path.join(staged.rootDir, 'listings', 'listing_12345.json')), true);
-  assert.equal(fs.existsSync(path.join(staged.rootDir, 'reviews', 'room_12345_reviews.json')), true);
-
-  fs.rmSync(sourceRoot, { recursive: true, force: true });
-  fs.rmSync(path.join(os.tmpdir(), 'stayreviewr-review-jobs', jobId), { recursive: true, force: true });
+    });
+    assert.equal(updated.listings.keep.aiReviews.status, 'not_requested');
+    assert.equal(updated.listings.keep.aiPhotos.status, 'not_requested');
+    assert.equal(updated.listings.keep.triage.status, 'not_requested');
+    assert.equal(fs.existsSync(path.join(staged.rootDir, 'ai-reviews', '12345.json')), false);
+    assert.equal(fs.existsSync(path.join(staged.rootDir, 'ai-photos', '12345.json')), false);
+    assert.equal(fs.existsSync(path.join(staged.rootDir, 'triage', '12345.json')), false);
+    assert.equal(fs.existsSync(path.join(staged.rootDir, 'report.html')), false);
+    assert.equal(fs.existsSync(path.join(staged.rootDir, 'listings', 'listing_12345.json')), true);
+    assert.equal(
+      fs.existsSync(path.join(staged.rootDir, 'reviews', 'room_12345_reviews.json')),
+      true,
+    );
+  } finally {
+    if (previousArtifactDir == null) {
+      delete process.env[REVIEW_JOB_ARTIFACT_DIR_ENV];
+    } else {
+      process.env[REVIEW_JOB_ARTIFACT_DIR_ENV] = previousArtifactDir;
+    }
+    fs.rmSync(sourceRoot, { recursive: true, force: true });
+    fs.rmSync(artifactStore, { recursive: true, force: true });
+  }
 });
