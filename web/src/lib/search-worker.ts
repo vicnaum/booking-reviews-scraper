@@ -52,6 +52,11 @@ import {
   hasReachedAiJobBudget,
   resolveAiJobBudgetUsd,
 } from './aiBudget.js';
+import {
+  cleanupReviewJobArtifacts,
+  formatArtifactBytes,
+  resolveReviewJobArtifactPolicy,
+} from './reviewJobArtifacts.js';
 import type {
   SearchResult,
 } from '../types.js';
@@ -90,6 +95,44 @@ async function appendReviewJobEvent(
   await prisma.reviewJobEvent.create({
     data: buildReviewJobEventData(reviewJobId, input),
   });
+}
+
+async function cleanupExpiredReviewJobArtifactRuns(reason: string) {
+  try {
+    const activeJobs = await prisma.reviewJob.findMany({
+      where: {
+        artifactRoot: { not: null },
+        OR: [
+          { analysisStatus: 'running' },
+          { analysisCurrentPhase: 'queued' },
+        ],
+      },
+      select: { artifactRoot: true },
+    });
+    const report = cleanupReviewJobArtifacts({
+      policy: resolveReviewJobArtifactPolicy(),
+      apply: true,
+      protectedRoots: activeJobs.flatMap((job) =>
+        job.artifactRoot ? [job.artifactRoot] : []),
+    });
+
+    console.log(
+      `[review-worker] artifact cleanup (${reason}): removed `
+      + `${report.removedRunDirs} run dir(s), freed ${report.bytesFreed} bytes `
+      + `(${formatArtifactBytes(report.bytesFreed)}); `
+      + `scanned=${report.scannedRunDirs}, protected=${report.protectedRunDirs}`,
+    );
+    for (const error of report.errors) {
+      console.warn(
+        `[review-worker] artifact cleanup skipped ${error.path}: ${error.message}`,
+      );
+    }
+  } catch (error) {
+    console.warn(
+      `[review-worker] artifact cleanup failed open: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 function createProgressWriter(label: 'search-worker' | 'review-worker') {
@@ -1041,6 +1084,7 @@ async function syncReviewJobArtifactsToDb(input: {
 }
 
 async function runReviewJobAnalysis(reviewJobId: string) {
+  await cleanupExpiredReviewJobArtifactRuns('before-analysis');
   await ensureReviewJobAnalysisRows(reviewJobId);
 
   const jobRecord = await prisma.reviewJob.findUnique({
@@ -1504,6 +1548,8 @@ async function runReviewJobAnalysis(reviewJobId: string) {
   }
 }
 
+const startupArtifactCleanup = cleanupExpiredReviewJobArtifactRuns('startup');
+
 const worker = new Worker<SearchQueueJobData>(
   SEARCH_QUEUE_NAME,
   async (job) => {
@@ -1518,6 +1564,7 @@ const worker = new Worker<SearchQueueJobData>(
 const reviewJobWorker = new Worker<ReviewJobQueueData>(
   REVIEW_JOB_QUEUE_NAME,
   async (job) => {
+    await startupArtifactCleanup;
     if (job.data.phase === 'search') {
       await runReviewJobSearch(job.data.reviewJobId);
       return;

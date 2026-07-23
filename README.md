@@ -207,6 +207,31 @@ Cache failures fall through to live scraping.
 The v1 cache grows without a size limit; removing the configured `REVIEWR_CACHE_DIR` (the
 default is `~/.cache/reviewr/artifacts-v1`) is always safe because the next run refetches it.
 
+StayReviewr also retains each analysis run as an optional debug/export bundle:
+
+```env
+STAYREVIEWR_ARTIFACT_DIR=data/review-jobs
+STAYREVIEWR_ARTIFACT_RETENTION_DAYS=30
+```
+
+These files are durable by default but are not product state: native results, progress, and costs
+come from Postgres. The artifact root must be a dedicated subdirectory; broad paths such as `/`,
+the home directory, or the repo root are rejected. The worker removes expired run directories at
+startup and before each analysis, logging both the directory count and bytes freed. Set retention
+to `0` to keep runs indefinitely. You can inspect or apply the same root-confined policy manually:
+
+```bash
+cd web
+npm run cleanup:artifacts             # dry run
+npm run cleanup:artifacts -- --apply  # delete expired runs
+```
+
+An available run can be downloaded as a streamed ZIP from the job or results page. The per-job
+run intentionally duplicates some details/reviews/photos from the cross-job cache: cache freshness
+is bounded by its 7/30/180-day TTLs, while complete run bundles retain for 30 days by default.
+Disk therefore grows in two locations; the cache still has no global size cap, and either store
+can be removed without losing the Postgres-backed results.
+
 ## Project Structure
 
 ```
