@@ -9,6 +9,7 @@
     "start": "dotenv -e ../.env -e .env.local -- next start",
     "worker": "dotenv -e ../.env -e .env.local -- tsx src/lib/search-worker.ts",
     "worker:dev": "dotenv -e ../.env -e .env.local -- tsx watch src/lib/search-worker.ts",
+    "backfill:ai-costs": "dotenv -e ../.env -e .env.local -- tsx scripts/backfill-ai-costs.ts",
     "test:pricing": "tsx --test src/lib/pricing.test.ts",
     "test:ui": "tsx --test src/components/AiBudgetNotice.test.tsx",
     "lint": "eslint .",
