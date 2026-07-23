@@ -7,7 +7,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
+export type ProxyProtocol = 'http' | 'https';
+
+export const DEFAULT_PROXY_PROTOCOL: ProxyProtocol = 'http';
+
 export interface ProxyConfig {
+  protocol: ProxyProtocol;
   host: string;
   port: number;
   username: string;
@@ -23,12 +28,40 @@ export function getConfigPath(): string {
 }
 
 /**
- * Parse a proxy URL like http://user:pass@host:port into components
+ * Normalize a proxy protocol from URL or environment syntax.
+ */
+export function resolveProxyProtocol(value?: string | null): ProxyProtocol {
+  const protocol = (value || DEFAULT_PROXY_PROTOCOL)
+    .trim()
+    .toLowerCase()
+    .replace(/:$/, '');
+  if (protocol !== 'http' && protocol !== 'https') {
+    throw new Error(
+      `PROXY_PROTOCOL must be "http" or "https"; received "${value}"`,
+    );
+  }
+  return protocol;
+}
+
+/**
+ * Build an authenticated proxy URL without leaking raw credential delimiters.
+ */
+export function buildProxyUrl(config: ProxyConfig): string {
+  const username = encodeURIComponent(config.username);
+  const password = encodeURIComponent(config.password);
+  const auth = username || password ? `${username}:${password}@` : '';
+  const port = config.port > 0 ? `:${config.port}` : '';
+  return `${config.protocol}://${auth}${config.host}${port}`;
+}
+
+/**
+ * Parse a proxy URL like http://user:pass@host:port into components.
  */
 export function parseProxyUrl(url: string): ProxyConfig {
   try {
     const parsed = new URL(url);
     return {
+      protocol: resolveProxyProtocol(parsed.protocol),
       host: parsed.hostname,
       port: parseInt(parsed.port) || 0,
       username: decodeURIComponent(parsed.username),
@@ -52,6 +85,7 @@ export function saveProxy(proxyUrl: string): void {
 
   const envContent = [
     'USE_PROXY=true',
+    `PROXY_PROTOCOL=${config.protocol}`,
     `PROXY_HOST=${config.host}`,
     `PROXY_PORT=${config.port}`,
     `PROXY_USERNAME=${config.username}`,
@@ -132,13 +166,14 @@ export function resolveProxy(
   // 1. CLI flag
   if (cliProxyUrl) {
     const config = parseProxyUrl(cliProxyUrl);
-    const url = `http://${config.username}:${config.password}@${config.host}:${config.port}`;
+    const url = buildProxyUrl(config);
     return { useProxy: true, proxyUrl: url, proxyConfig: config, source: 'cli' };
   }
 
   // 2. Environment variables (already loaded by dotenv or shell)
   if (process.env.PROXY_HOST && process.env.PROXY_HOST !== '') {
     const config: ProxyConfig = {
+      protocol: resolveProxyProtocol(process.env.PROXY_PROTOCOL),
       host: process.env.PROXY_HOST,
       port: parseInt(process.env.PROXY_PORT || '0'),
       username: process.env.PROXY_USERNAME || '',
@@ -146,7 +181,7 @@ export function resolveProxy(
     };
     const useProxy = process.env.USE_PROXY !== 'false';
     if (useProxy) {
-      const url = `http://${config.username}:${config.password}@${config.host}:${config.port}`;
+      const url = buildProxyUrl(config);
       return { useProxy: true, proxyUrl: url, proxyConfig: config, source: 'env' };
     }
   }
@@ -156,6 +191,7 @@ export function resolveProxy(
     const localEnv = loadEnvFile(envPath);
     if (localEnv.PROXY_HOST) {
       const config: ProxyConfig = {
+        protocol: resolveProxyProtocol(localEnv.PROXY_PROTOCOL),
         host: localEnv.PROXY_HOST,
         port: parseInt(localEnv.PROXY_PORT || '0'),
         username: localEnv.PROXY_USERNAME || '',
@@ -163,7 +199,7 @@ export function resolveProxy(
       };
       const useProxy = localEnv.USE_PROXY !== 'false';
       if (useProxy) {
-        const url = `http://${config.username}:${config.password}@${config.host}:${config.port}`;
+        const url = buildProxyUrl(config);
         return { useProxy: true, proxyUrl: url, proxyConfig: config, source: 'local-env' };
       }
     }
@@ -173,6 +209,7 @@ export function resolveProxy(
   const globalEnv = loadEnvFile(getConfigPath());
   if (globalEnv.PROXY_HOST) {
     const config: ProxyConfig = {
+      protocol: resolveProxyProtocol(globalEnv.PROXY_PROTOCOL),
       host: globalEnv.PROXY_HOST,
       port: parseInt(globalEnv.PROXY_PORT || '0'),
       username: globalEnv.PROXY_USERNAME || '',
@@ -180,7 +217,7 @@ export function resolveProxy(
     };
     const useProxy = globalEnv.USE_PROXY !== 'false';
     if (useProxy) {
-      const url = `http://${config.username}:${config.password}@${config.host}:${config.port}`;
+      const url = buildProxyUrl(config);
       return { useProxy: true, proxyUrl: url, proxyConfig: config, source: 'global-config' };
     }
   }
@@ -214,6 +251,7 @@ export function showAuthStatus(): void {
 
   console.log(`  Status: Proxy configured`);
   console.log(`  Source: ${sourceLabels[resolved.source] || resolved.source}`);
+  console.log(`  Protocol: ${resolved.proxyConfig!.protocol}`);
   console.log(`  Host: ${resolved.proxyConfig!.host}:${resolved.proxyConfig!.port}`);
   console.log(`  User: ${resolved.proxyConfig!.username}`);
 }
@@ -224,6 +262,7 @@ export function showAuthStatus(): void {
 export function applyProxyToEnv(resolved: ResolvedProxy): void {
   if (resolved.useProxy && resolved.proxyConfig) {
     process.env.USE_PROXY = 'true';
+    process.env.PROXY_PROTOCOL = resolved.proxyConfig.protocol;
     process.env.PROXY_HOST = resolved.proxyConfig.host;
     process.env.PROXY_PORT = String(resolved.proxyConfig.port);
     process.env.PROXY_USERNAME = resolved.proxyConfig.username;

@@ -58,7 +58,7 @@ pnpm build && npm link            # Makes `reviewr` available system-wide
 Configure proxy (optional, needed for some regions):
 
 ```bash
-reviewr auth http://user:pass@host:port   # Save proxy config
+reviewr auth https://user:pass@host:port  # Save HTTP or HTTPS proxy config
 reviewr auth                               # Check status
 ```
 
@@ -162,6 +162,7 @@ Create a `.env` file in the root directory with your proxy configuration:
 
 ```env
 USE_PROXY=true
+PROXY_PROTOCOL=http
 PROXY_HOST=proxy-host.com
 PROXY_PORT=1000
 PROXY_USERNAME=your_username
@@ -169,6 +170,8 @@ PROXY_PASSWORD=your_password
 ```
 
 Set `USE_PROXY=false` to disable proxy usage.
+`PROXY_PROTOCOL` defaults to `http` for existing configurations. Set it to `https` for a TLS
+connection to the proxy endpoint; both values can still carry HTTPS destination traffic.
 
 AI analysis has two configurable cost guardrails:
 
