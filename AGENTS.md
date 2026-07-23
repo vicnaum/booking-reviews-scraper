@@ -8,7 +8,8 @@ Quick facts:
 - Two products in one repo: `src/` — the `reviewr` CLI (Booking.com + Airbnb scraping + AI
   analysis pipeline); `web/` — StayReviewr, a Next.js 15 app with persistent review jobs
   (Prisma/Postgres + BullMQ/Redis worker wrapping the CLI pipeline).
-- Verify with `npm run build` and `npm test` (repo root; `web/` has its own build).
+- Verify with `pnpm run build` and `pnpm test` at repo root (root is **pnpm**); `web/` is
+  **npm** and has its own build. Never generate a root `package-lock.json`.
 - Work in feature branches, PR to `main`.
 - Concurrent agent sessions coordinate via `agent-chat` (project room; an `orchestrator` agent
   may be active — DM it with `agent-chat send "msg" --to orchestrator`).
