@@ -52,6 +52,15 @@ auth (browser `ownerKey` stays), deployment/hosting, rate limiting, issue #25, i
 
 ## Your task queue (priority order)
 
+> **STATUS 2026-07-23 (end of day): ALL FOUR TASKS COMPLETE.** Task 1 → PR #28 (Booking
+> reviewlist endpoint was retired; replaced with captured `ReviewList` GraphQL, smoke fully
+> green). Task 2 → PR #30 (`npm run up` one-command startup, root `.env` unified). Task 3 →
+> PR #31 (`AI_REVIEW_MAX_REVIEWS`=250 cap + `STAYREVIEWR_AI_JOB_BUDGET_USD`=$5 per-run
+> ceiling with durable partial state). Task 4 → PR #32 (cross-job artifact cache,
+> ~14x faster repeat runs, issue #23 closed). Remaining backlog: issues #24, #25, #29;
+> malformed-budget-env read-path nit (PR #31 review); web npm audit vulns; proxy 407
+> renewal (Victor). The sections below are kept for historical context.
+
 ### Task 1 — Bitrot smoke test (GATING — do first)
 Booking's WAF bypass and Airbnb's GraphQL usage were reverse-engineered in Feb/Mar 2026 and are
 4 months stale. Run one tiny end-to-end job (one Booking + one Airbnb listing, full pipeline
