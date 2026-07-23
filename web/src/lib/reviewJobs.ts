@@ -28,7 +28,7 @@ import {
   parseStoredBoundingBox,
 } from './searchJobs.js';
 import { buildAiCostBreakdown } from './aiCosts.js';
-import { resolveAiJobBudgetUsd } from './aiBudget.js';
+import { resolveAiJobBudgetUsdForRead } from './aiBudget.js';
 
 const EARTH_RADIUS_METERS = 6371000;
 
@@ -400,7 +400,7 @@ export function toReviewJobState(
     aiCostBudgetUsd:
       options.aiCostBudgetUsd !== undefined
         ? options.aiCostBudgetUsd
-        : resolveAiJobBudgetUsd(),
+        : resolveAiJobBudgetUsdForRead(),
     aiCostBudgetExceeded: job.analysisCurrentPhase === 'budget-exceeded',
     durationMs: job.durationMs ?? null,
     startedAt: job.startedAt?.toISOString() ?? null,
