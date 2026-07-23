@@ -28,6 +28,7 @@ import {
 import { useReviewJobPolling } from '@/hooks/useReviewJobPolling';
 import PlatformBadge from './PlatformBadge';
 import ResultsJobMap from './ResultsJobMap';
+import AiBudgetNotice from './AiBudgetNotice';
 
 const MIN_MAP_HEIGHT = 280;
 const TIER_ORDER = ['top_pick', 'shortlist', 'consider', 'unlikely', 'no_go'] as const;
@@ -1767,6 +1768,8 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
               </div>
             </div>
           </div>
+
+          <AiBudgetNotice job={data.job} variant="results" className="mt-4" />
 
           <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">

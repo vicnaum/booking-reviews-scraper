@@ -5,6 +5,10 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import {
+  resolveAiReviewLimit,
+  selectMostRecentReviews,
+} from './review-guardrails.js';
 
 // --- Types ---
 
@@ -935,6 +939,7 @@ export interface AnalyzeOptions {
   room?: string;
   priorities?: string;
   allYears?: boolean;
+  maxReviews?: number;
 }
 
 export interface UsageSummary {
@@ -949,6 +954,12 @@ export interface AnalysisResult {
   model: string;
   provider: LLMProvider;
   multiYear: boolean;
+  reviewSelection: {
+    eligibleCount: number;
+    includedCount: number;
+    limit: number;
+    capped: boolean;
+  };
   usage?: UsageSummary;
 }
 
@@ -1045,14 +1056,37 @@ export async function runAnalyze(options: AnalyzeOptions): Promise<AnalysisResul
     }
   }
 
-  // 5. Count non-empty reviews (after room + date filter)
-  const nonEmptyReviews = platform === 'booking'
+  // 5. Remove empty reviews, then apply the per-listing AI input cap.
+  const nonEmptyReviews: Array<BookingReview | AirbnbReview> = platform === 'booking'
     ? filterEmptyBookingReviews(reviewsData.reviews)
     : filterEmptyAirbnbReviews(reviewsData.reviews);
-  const nonEmptyCount = nonEmptyReviews.length;
-  const emptyCount = reviewsData.reviews.length - nonEmptyCount;
+  const emptyCount = reviewsData.reviews.length - nonEmptyReviews.length;
+  const reviewLimit = resolveAiReviewLimit(options.maxReviews);
+  const selectedReviews = selectMostRecentReviews(
+    nonEmptyReviews,
+    (review) =>
+      platform === 'booking'
+        ? (review as BookingReview).review_post_date
+        : (review as AirbnbReview).review_date,
+    reviewLimit,
+  );
+  const reviewSelection = {
+    eligibleCount: selectedReviews.eligibleCount,
+    includedCount: selectedReviews.includedCount,
+    limit: selectedReviews.limit,
+    capped: selectedReviews.capped,
+  };
+  reviewsData.reviews = selectedReviews.reviews;
 
-  console.error(`Reviews: ${nonEmptyCount} included, ${emptyCount} empty filtered out of ${reviewsData.reviews.length} total`);
+  console.error(
+    `Reviews: ${reviewSelection.eligibleCount} eligible, ${emptyCount} empty filtered out`,
+  );
+  if (reviewSelection.capped) {
+    console.error(
+      `Review cap: using the ${reviewSelection.includedCount} most recent of `
+      + `${reviewSelection.eligibleCount} eligible reviews`,
+    );
+  }
 
   // 6. Build system prompt
   const isCustomPrompt = !!customPrompt;
@@ -1068,7 +1102,7 @@ Include a "priorityAnalysis" section in your response analyzing each priority wi
   const jsonSchema = isCustomPrompt ? null : getAnalysisSchema(hasPriorities);
 
   // 7. Determine mode
-  const isMultiRequest = nonEmptyCount > YEAR_SPLIT_THRESHOLD;
+  const isMultiRequest = reviewSelection.includedCount > YEAR_SPLIT_THRESHOLD;
 
   // --- Dry-run: show combined text with year headers regardless of mode ---
   if (dryRun) {
@@ -1083,12 +1117,12 @@ Include a "priorityAnalysis" section in your response analyzing each priority wi
 
     // Show mode info
     if (isMultiRequest) {
-      const yearGroups = groupReviewsByYear(nonEmptyReviews, platform);
+      const yearGroups = groupReviewsByYear(selectedReviews.reviews, platform);
       const yearSummary = Array.from(yearGroups.entries()).map(([y, revs]) => `${y} (${revs.length})`).join(', ');
-      console.error(`\nMode: multi-request (${nonEmptyCount} reviews > ${YEAR_SPLIT_THRESHOLD} threshold)`);
+      console.error(`\nMode: multi-request (${reviewSelection.includedCount} reviews > ${YEAR_SPLIT_THRESHOLD} threshold)`);
       console.error(`Year groups: ${yearSummary}`);
     } else {
-      console.error(`\nMode: single-request (${nonEmptyCount} reviews)`);
+      console.error(`\nMode: single-request (${reviewSelection.includedCount} reviews)`);
     }
 
     console.log('=== SYSTEM PROMPT ===\n');
@@ -1121,7 +1155,13 @@ Include a "priorityAnalysis" section in your response analyzing each priority wi
 
     console.error(`Content length: ${fullContent.length.toLocaleString()} chars`);
 
-    return { data: null, model: dryRunConfig.model, provider: dryRunConfig.provider, multiYear: isMultiRequest };
+    return {
+      data: null,
+      model: dryRunConfig.model,
+      provider: dryRunConfig.provider,
+      multiYear: isMultiRequest,
+      reviewSelection,
+    };
   }
 
   // --- LLM call ---
@@ -1154,7 +1194,7 @@ Include a "priorityAnalysis" section in your response analyzing each priority wi
 
   if (isMultiRequest) {
     // --- Multi-request mode: per-year analysis ---
-    const yearGroups = groupReviewsByYear(nonEmptyReviews, platform);
+    const yearGroups = groupReviewsByYear(selectedReviews.reviews, platform);
     const years = Array.from(yearGroups.keys());
     const yearResults: { year: number; result: string }[] = [];
 
@@ -1205,7 +1245,19 @@ Include a "priorityAnalysis" section in your response analyzing each priority wi
     };
     console.error(`\n${formatUsageSummary(usage, modelName)}`);
     const meta = getUsageMeta(usage, modelName);
-    return { data: output, model: modelName, provider: modelConfig.provider, multiYear: true, usage: { inputTokens: meta.totals.promptTokens, outputTokens: meta.totals.responseTokens, thinkingTokens: meta.totals.thinkingTokens || undefined, cost: meta.cost.total } };
+    return {
+      data: output,
+      model: modelName,
+      provider: modelConfig.provider,
+      multiYear: true,
+      reviewSelection,
+      usage: {
+        inputTokens: meta.totals.promptTokens,
+        outputTokens: meta.totals.responseTokens,
+        thinkingTokens: meta.totals.thinkingTokens || undefined,
+        cost: meta.cost.total,
+      },
+    };
   } else {
     // --- Single-request mode: year headers + recency weighting ---
     let reviewResult: FormatResult;
@@ -1241,7 +1293,19 @@ Include a "priorityAnalysis" section in your response analyzing each priority wi
 
     console.error(`\n${formatUsageSummary(usage, modelName)}`);
     const meta = getUsageMeta(usage, modelName);
-    return { data: outputData, model: modelName, provider: modelConfig.provider, multiYear: false, usage: { inputTokens: meta.totals.promptTokens, outputTokens: meta.totals.responseTokens, thinkingTokens: meta.totals.thinkingTokens || undefined, cost: meta.cost.total } };
+    return {
+      data: outputData,
+      model: modelName,
+      provider: modelConfig.provider,
+      multiYear: false,
+      reviewSelection,
+      usage: {
+        inputTokens: meta.totals.promptTokens,
+        outputTokens: meta.totals.responseTokens,
+        thinkingTokens: meta.totals.thinkingTokens || undefined,
+        cost: meta.cost.total,
+      },
+    };
   }
 }
 

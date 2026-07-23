@@ -28,6 +28,7 @@ import {
   parseStoredBoundingBox,
 } from './searchJobs.js';
 import { buildAiCostBreakdown } from './aiCosts.js';
+import { resolveAiJobBudgetUsd } from './aiBudget.js';
 
 const EARTH_RADIUS_METERS = 6371000;
 
@@ -73,6 +74,37 @@ function asJsonObject(value: Prisma.JsonValue | null): Record<string, unknown> |
   }
 
   return value as Record<string, unknown>;
+}
+
+function getPersistedReviewJobAiBudgetUsd(
+  events: ReviewJobEventModel[],
+): number | null | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const payload = asJsonObject(events[index].payload);
+    if (!payload) {
+      continue;
+    }
+
+    if (payload.reason === 'ai-cost-budget') {
+      const exceededBudget = asNumber(payload.budgetUsd);
+      if (exceededBudget != null) {
+        return exceededBudget;
+      }
+    }
+
+    if (Object.hasOwn(payload, 'aiBudgetUsd')) {
+      if (payload.aiBudgetUsd === null) {
+        return null;
+      }
+
+      const startedBudget = asNumber(payload.aiBudgetUsd);
+      if (startedBudget != null) {
+        return startedBudget;
+      }
+    }
+  }
+
+  return undefined;
 }
 
 function asSearchPricing(value: unknown): SearchPricing | null {
@@ -324,6 +356,7 @@ export function toReviewJobState(
     resultsReady?: boolean;
     legacyReportAvailable?: boolean;
     viewerCanEdit?: boolean;
+    aiCostBudgetUsd?: number | null;
   } = {},
 ): ReviewJobState {
   return {
@@ -364,6 +397,11 @@ export function toReviewJobState(
       triageCostUsd: job.triageCostUsd,
       totalAiCostUsd: job.totalAiCostUsd,
     }),
+    aiCostBudgetUsd:
+      options.aiCostBudgetUsd !== undefined
+        ? options.aiCostBudgetUsd
+        : resolveAiJobBudgetUsd(),
+    aiCostBudgetExceeded: job.analysisCurrentPhase === 'budget-exceeded',
     durationMs: job.durationMs ?? null,
     startedAt: job.startedAt?.toISOString() ?? null,
     completedAt: job.completedAt?.toISOString() ?? null,
@@ -393,12 +431,14 @@ export function toReviewJobResponse(input: {
   viewerCanEdit?: boolean;
 }): ReviewJobResponse {
   const resultsReady = hasPersistedReviewJobResults(input.job);
+  const persistedAiBudgetUsd = getPersistedReviewJobAiBudgetUsd(input.events);
 
   return {
     job: toReviewJobState(input.job, {
       resultsReady,
       legacyReportAvailable: !!input.job.reportPath,
       viewerCanEdit: input.viewerCanEdit,
+      aiCostBudgetUsd: persistedAiBudgetUsd,
     }),
     listings: input.listings.map(toWebReviewJobListing),
     events: input.events.map(toReviewJobEvent),

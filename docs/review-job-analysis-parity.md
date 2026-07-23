@@ -106,6 +106,19 @@ the same temporary file inputs that `runAnalyze`, `runAnalyzePhotos`, and
 - optional: `priorities`
 - currently Gemini-only
 
+## Cost Guardrails
+
+- `runAnalyze` applies `AI_REVIEW_MAX_REVIEWS` after room, date, and empty-review filters,
+  selecting the most recent eligible reviews. The default is 250, and CLI callers can override
+  it with `--max-ai-reviews`.
+- The web worker persists per-listing AI costs after every paid review, photo, or triage
+  operation and checks the total before starting the next AI call. When
+  `STAYREVIEWR_AI_JOB_BUDGET_USD` is reached with work remaining, it marks the run partial
+  with `analysisCurrentPhase = budget-exceeded` and preserves completed artifacts. The
+  default is USD 5; `0` disables the per-run ceiling.
+- Photo count remains governed by the existing photo pipeline. There is no separate
+  per-listing photo cap.
+
 ## Persistence Goals For The Web Job
 
 The web job should persist:

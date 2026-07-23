@@ -247,6 +247,8 @@ export interface ReviewJobState {
   analysisStartedAt: string | null;
   analysisCompletedAt: string | null;
   costs: AiCostBreakdown;
+  aiCostBudgetUsd: number | null;
+  aiCostBudgetExceeded: boolean;
   durationMs: number | null;
   startedAt: string | null;
   completedAt: string | null;

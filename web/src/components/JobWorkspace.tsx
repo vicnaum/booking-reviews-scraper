@@ -14,6 +14,7 @@ import {
   getStoredReviewJobPriceDisplay,
 } from '@/lib/reviewJobClient';
 import { useReviewJobPolling } from '@/hooks/useReviewJobPolling';
+import AiBudgetNotice from './AiBudgetNotice';
 import ResultCard from './ResultCard';
 
 const JobMap = dynamic(() => import('./JobMap'), {
@@ -505,6 +506,17 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                     AI cost: {formatUsdCost(data.job.costs.totalUsd)}
                   </span>
                 )}
+                {data.job.aiCostBudgetUsd != null && (
+                  <span
+                    className={`rounded-full border px-3 py-1.5 ${
+                      data.job.aiCostBudgetExceeded
+                        ? 'border-amber-300/25 bg-amber-300/10 text-amber-100'
+                        : 'border-white/10 bg-white/[0.03]'
+                    }`}
+                  >
+                    AI budget: {formatUsdCost(data.job.aiCostBudgetUsd)}
+                  </span>
+                )}
               </div>
               {(data.job.status === 'pending' || data.job.status === 'running') && (
                 <div className="mt-4">
@@ -617,6 +629,8 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
               )}
             </div>
           </div>
+
+          <AiBudgetNotice job={data.job} />
 
           <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">

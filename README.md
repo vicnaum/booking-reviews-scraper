@@ -73,7 +73,8 @@ npm run up
 ```
 
 Open <http://localhost:3000>. Press Ctrl-C to stop the app and worker, then run
-`npm run down` when you also want to stop Postgres and Redis.
+`npm run down` when you also want to stop Postgres and Redis. `pnpm run up` and
+`pnpm run down` are equivalent.
 
 ## CLI Reference
 
@@ -168,6 +169,21 @@ PROXY_PASSWORD=your_password
 ```
 
 Set `USE_PROXY=false` to disable proxy usage.
+
+AI analysis has two configurable cost guardrails:
+
+```env
+# Maximum most-recent, post-filter reviews sent to AI per listing.
+AI_REVIEW_MAX_REVIEWS=250
+
+# Maximum persisted AI spend per StayReviewr analysis run, in USD. Set 0 to disable.
+STAYREVIEWR_AI_JOB_BUDGET_USD=5
+```
+
+The CLI `batch` and `analyze` commands also accept `--max-ai-reviews <n>`, which takes
+precedence over `AI_REVIEW_MAX_REVIEWS`. StayReviewr checks its accumulated persisted cost
+after each paid per-listing AI operation; when the budget is reached, it preserves partial
+results and stops before starting the next AI call.
 
 ## Project Structure
 
