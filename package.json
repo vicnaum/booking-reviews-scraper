@@ -24,6 +24,7 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "packageManager": "pnpm@10.30.3",
   "devDependencies": {
     "@types/node": "^24.0.13",
     "@types/papaparse": "^5.5.2",
