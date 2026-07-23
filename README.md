@@ -62,6 +62,19 @@ reviewr auth http://user:pass@host:port   # Save proxy config
 reviewr auth                               # Check status
 ```
 
+### Run StayReviewr locally
+
+The web app, queue worker, Postgres, and Redis start together from the repository root:
+
+```bash
+cp .env.example .env
+# Add GEMINI_API_KEY and optional proxy credentials to .env.
+npm run up
+```
+
+Open <http://localhost:3000>. Press Ctrl-C to stop the app and worker, then run
+`npm run down` when you also want to stop Postgres and Redis.
+
 ## CLI Reference
 
 The `reviewr` CLI can also be used standalone, outside of the AI skill. It auto-detects the platform from the URL.
