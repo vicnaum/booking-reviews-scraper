@@ -76,6 +76,11 @@ Open <http://localhost:3000>. Press Ctrl-C to stop the app and worker, then run
 `npm run down` when you also want to stop Postgres and Redis. `pnpm run up` and
 `pnpm run down` are equivalent.
 
+The worker in `npm run up` is deliberately non-watching so artifact writes and Git operations
+cannot restart it during paid jobs. After changing worker code, wait for active jobs to finish
+and restart the stack manually. The separate `npm --prefix web run worker:dev` command retains
+watch mode for interactive development.
+
 ## CLI Reference
 
 The `reviewr` CLI can also be used standalone, outside of the AI skill. It auto-detects the platform from the URL.

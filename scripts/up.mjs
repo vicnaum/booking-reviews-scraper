@@ -137,7 +137,9 @@ const stack = spawn(
     'web,worker',
     '--no-color',
     'npm --prefix web run dev',
-    'npm --prefix web run worker:dev',
+    // Paid queue jobs must not be interrupted by filesystem watcher events.
+    // Restart npm run up deliberately after jobs finish to load worker changes.
+    'npm --prefix web run worker',
   ],
   {
     cwd: repoRoot,
