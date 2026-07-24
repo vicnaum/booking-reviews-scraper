@@ -411,6 +411,7 @@ program
   .option('--force', 'Re-fetch even if output exists')
   .option('--retry', 'Retry failed/partial listings from manifest')
   .option('--download-photos-all', 'Download ALL room photos (Booking.com)')
+  .option('--output <dir>', 'Write batch artifacts to this directory')
   .action(async (files: string[], cmdOpts: any, command: Command) => {
     const opts = command.optsWithGlobals();
     setupProxy(opts);
@@ -446,7 +447,8 @@ program
       force: !!cmdOpts.force,
       retryFailed: !!cmdOpts.retry,
       downloadPhotosAll: !!(cmdOpts.downloadPhotosAll || opts.downloadPhotosAll),
-      outputDir: opts.outputDir || undefined,
+      outputDir: cmdOpts.output || opts.outputDir || undefined,
+      scopeManifestToInput: true,
       print: !!opts.print,
     });
   });

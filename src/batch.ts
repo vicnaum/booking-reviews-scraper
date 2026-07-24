@@ -51,6 +51,8 @@ export interface BatchOptions {
   retryFailed: boolean;
   downloadPhotosAll: boolean;
   outputDir?: string;
+  /** Keep a normal file-backed run's manifest limited to its current input. */
+  scopeManifestToInput?: boolean;
   print: boolean;
   programmatic?: boolean;
   hooks?: BatchHooks;
@@ -164,6 +166,9 @@ export interface BatchResult {
 
 export interface BatchDependencies {
   scrapeBookingHotelReviews?: typeof bookingScraper.scrapeHotelReviews;
+  runAnalyze?: typeof runAnalyze;
+  runAnalyzePhotos?: typeof runAnalyzePhotos;
+  runTriage?: typeof runTriage;
 }
 
 // --- Helpers ---
@@ -363,6 +368,13 @@ function getManifestPath(options: BatchOptions): string {
   return path.join(baseDir, 'batch_manifest.json');
 }
 
+export function resolveBatchOutputDir(
+  options: Pick<BatchOptions, 'outputDir'>,
+  platform: ManifestEntry['platform'],
+): string {
+  return options.outputDir || path.join('data', platform, 'output');
+}
+
 function loadManifest(manifestPath: string): BatchManifest | null {
   try {
     if (fs.existsSync(manifestPath)) {
@@ -389,6 +401,15 @@ function getPhotosDir(outputDir: string): string { return path.join(outputDir, '
 function getAiReviewsDir(outputDir: string): string { return path.join(outputDir, 'ai-reviews'); }
 function getAiPhotosDir(outputDir: string): string { return path.join(outputDir, 'ai-photos'); }
 function getTriageDir(outputDir: string): string { return path.join(outputDir, 'triage'); }
+
+function hasUsableArtifact(
+  phase: ManifestPhase,
+  location: 'file' | 'dir',
+): boolean {
+  if (!phase[location]) return false;
+  if (phase.status === 'fetched' || phase.status === 'partial') return true;
+  return phase.status === 'skipped' && phase.source === 'local';
+}
 
 /**
  * Migrate v1 manifest to v2:
@@ -433,13 +454,18 @@ function migrateManifestV2(manifest: BatchManifest): BatchManifest {
  * Move files from flat layout to subdirectory layout during v1->v2 migration.
  * Silently skips if source doesn't exist or destination already exists.
  */
-function migrateFilesToSubdirs(outputDir: string, manifest: BatchManifest): void {
+function migrateFilesToSubdirs(
+  options: Pick<BatchOptions, 'outputDir'>,
+  manifest: BatchManifest,
+): void {
   for (const entry of Object.values(manifest.listings)) {
+    const entryOutputDir = resolveBatchOutputDir(options, entry.platform);
+
     // Move listing files
     if (entry.details.file) {
       const basename = path.basename(entry.details.file);
-      const oldPath = path.join(outputDir, basename);
-      const newPath = path.join(outputDir, entry.details.file);
+      const oldPath = path.join(entryOutputDir, basename);
+      const newPath = path.join(entryOutputDir, entry.details.file);
       if (fs.existsSync(oldPath) && !fs.existsSync(newPath)) {
         const dir = path.dirname(newPath);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -450,8 +476,8 @@ function migrateFilesToSubdirs(outputDir: string, manifest: BatchManifest): void
     // Move review files
     if (entry.reviews.file) {
       const basename = path.basename(entry.reviews.file);
-      const oldPath = path.join(outputDir, basename);
-      const newPath = path.join(outputDir, entry.reviews.file);
+      const oldPath = path.join(entryOutputDir, basename);
+      const newPath = path.join(entryOutputDir, entry.reviews.file);
       if (fs.existsSync(oldPath) && !fs.existsSync(newPath)) {
         const dir = path.dirname(newPath);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -462,8 +488,8 @@ function migrateFilesToSubdirs(outputDir: string, manifest: BatchManifest): void
     // Move photo directories: photos_ID -> photos/ID
     if (entry.photos.dir) {
       const cleanId = path.basename(entry.photos.dir);
-      const oldDir = path.join(outputDir, `photos_${cleanId}`);
-      const newDir = path.join(outputDir, entry.photos.dir);
+      const oldDir = path.join(entryOutputDir, `photos_${cleanId}`);
+      const newDir = path.join(entryOutputDir, entry.photos.dir);
       if (fs.existsSync(oldDir) && !fs.existsSync(newDir)) {
         const parent = path.dirname(newDir);
         if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true });
@@ -536,7 +562,7 @@ async function persistPhaseUpdate(
   }
 
   await emitPhaseUpdate(options, {
-    outputDir: options.outputDir || 'data',
+    outputDir: resolveBatchOutputDir(options, entry.platform),
     manifestKey,
     phase,
     entry,
@@ -615,6 +641,9 @@ export async function runBatch(
   const startTime = Date.now();
   const scrapeBookingHotelReviews =
     dependencies.scrapeBookingHotelReviews || bookingScraper.scrapeHotelReviews;
+  const analyzeReviews = dependencies.runAnalyze || runAnalyze;
+  const analyzePhotos = dependencies.runAnalyzePhotos || runAnalyzePhotos;
+  const triageListing = dependencies.runTriage || runTriage;
   const manifestPath = getManifestPath(options);
   let artifactCache: ArtifactCache | null = options.artifactCache ?? null;
   if (options.artifactCache === undefined) {
@@ -639,9 +668,8 @@ export async function runBatch(
 
   // Migrate v1 manifest to v2 (add aiReviews/aiPhotos, prefix paths with subdirs)
   if (manifest.version < 2) {
-    const outputDir = options.outputDir || 'data';
     manifest = migrateManifestV2(manifest);
-    migrateFilesToSubdirs(outputDir, manifest);
+    migrateFilesToSubdirs(options, manifest);
     saveManifest(manifest, manifestPath);
     console.log('Manifest migrated to v2 (subdirectory layout)');
   }
@@ -650,6 +678,37 @@ export async function runBatch(
   const preprocessed = filePaths.length > 0
     ? preprocessFiles(filePaths)
     : { airbnb: { urls: [] as string[], count: 0, duplicatesRemoved: 0 }, booking: { urls: [] as string[], count: 0, duplicatesRemoved: 0 }, dates: { source: 'none' as const, checkIn: undefined, checkOut: undefined, adults: undefined } };
+
+  if (options.scopeManifestToInput && !options.retryFailed && filePaths.length > 0) {
+    const currentManifestKeys = new Set<string>();
+
+    for (const url of preprocessed.airbnb.urls) {
+      currentManifestKeys.add(`airbnb/${airbnbListing.parseAirbnbUrl(url).roomId}`);
+    }
+    for (const url of preprocessed.booking.urls) {
+      const hotelInfo = bookingScraper.extractHotelInfo(url);
+      if (hotelInfo) currentManifestKeys.add(`booking/${hotelInfo.hotel_name}`);
+    }
+
+    if (currentManifestKeys.size === 0) {
+      throw new Error('No valid Airbnb or Booking URLs found in the input files.');
+    }
+
+    const scopedListings = Object.fromEntries(
+      Object.entries(manifest.listings)
+        .filter(([key]) => currentManifestKeys.has(key)),
+    );
+    const removedListingCount =
+      Object.keys(manifest.listings).length - Object.keys(scopedListings).length;
+    manifest.listings = scopedListings;
+
+    if (removedListingCount > 0) {
+      console.log(
+        `Manifest: removed ${removedListingCount} listing`
+        + `${removedListingCount === 1 ? '' : 's'} outside the current input`,
+      );
+    }
+  }
 
   // 3. If --retry, merge retry URLs from manifest
   if (options.retryFailed) {
@@ -736,7 +795,7 @@ export async function runBatch(
 
   // 6. Process Airbnb listings
   if (preprocessed.airbnb.count > 0) {
-    const airbnbOutputDir = options.outputDir || 'data/airbnb/output';
+    const airbnbOutputDir = resolveBatchOutputDir(options, 'airbnb');
     let apiKey: string | null = null;
     let apiKeyAttempted = false;
     const ensureAirbnbApiKey = async (refresh = false): Promise<string | null> => {
@@ -1196,7 +1255,7 @@ export async function runBatch(
 
   // 7. Process Booking listings
   if (preprocessed.booking.count > 0) {
-    const bookingOutputDir = options.outputDir || 'data/booking/output';
+    const bookingOutputDir = resolveBatchOutputDir(options, 'booking');
     await emitBatchEvent(options, {
       phase: 'scrape',
       level: 'info',
@@ -1614,9 +1673,7 @@ export async function runBatch(
 
   // 8. AI review analysis phase (runs after all scraping)
   if (options.aiReviews) {
-    const aiOutputDir = options.outputDir || 'data';
     const aiModel = options.aiModel || process.env.LLM_MODEL || 'gemini-3-flash-preview:high';
-    const aiReviewsDir = getAiReviewsDir(aiOutputDir);
 
     // Early API key validation
     const modelConfig = parseModelConfig(aiModel);
@@ -1645,13 +1702,13 @@ export async function runBatch(
         level: 'info',
         message: `Starting AI review analysis (${modelConfig.model})`,
       });
-      if (!fs.existsSync(aiReviewsDir)) fs.mkdirSync(aiReviewsDir, { recursive: true });
-
       let aiIndex = 0;
       const aiEntries = Object.entries(manifest.listings);
       for (const [manifestKey, entry] of aiEntries) {
         aiIndex++;
         const prefix = `[${aiIndex}/${aiEntries.length}] ${manifestKey}`;
+        const aiOutputDir = resolveBatchOutputDir(options, entry.platform);
+        const aiReviewsDir = getAiReviewsDir(aiOutputDir);
 
         // Determine platform-specific result tracker
         const platformResult = entry.platform === 'airbnb' ? airbnbResult : bookingResult;
@@ -1693,7 +1750,7 @@ export async function runBatch(
         }
 
         // Skip if no reviews available or review count is 0
-        if (!entry.reviews.file || (entry.reviews.status !== 'fetched' && entry.reviews.status !== 'partial') || entry.reviews.count === 0) {
+        if (!hasUsableArtifact(entry.reviews, 'file') || entry.reviews.count === 0) {
           console.log(`${prefix} \u2014 ai-reviews \u2298 skip (no reviews)`);
           platformResult.aiReviews.skipped++;
           entry.aiReviews = { status: 'skipped', reason: 'no reviews' };
@@ -1730,6 +1787,7 @@ export async function runBatch(
         }
 
         const t = Date.now();
+        if (!fs.existsSync(aiReviewsDir)) fs.mkdirSync(aiReviewsDir, { recursive: true });
         await emitBeforeAiCall(options, {
           outputDir: aiOutputDir,
           manifestKey,
@@ -1737,7 +1795,7 @@ export async function runBatch(
           entry,
         });
         try {
-          const result: AnalysisResult = await runAnalyze({
+          const result: AnalysisResult = await analyzeReviews({
             reviewsFile: reviewsPath,
             listingFile: listingPath && fs.existsSync(listingPath) ? listingPath : undefined,
             model: aiModel,
@@ -1798,9 +1856,7 @@ export async function runBatch(
 
   // 9. AI photo analysis phase (runs after all scraping)
   if (options.aiPhotos) {
-    const aiOutputDir = options.outputDir || 'data';
     const aiModel = options.aiModel || process.env.LLM_MODEL || 'gemini-3-flash-preview:high';
-    const aiPhotosOutputDir = getAiPhotosDir(aiOutputDir);
 
     // Early API key validation
     const modelConfig = parseModelConfig(aiModel);
@@ -1829,13 +1885,13 @@ export async function runBatch(
         level: 'info',
         message: `Starting AI photo analysis (${modelConfig.model})`,
       });
-      if (!fs.existsSync(aiPhotosOutputDir)) fs.mkdirSync(aiPhotosOutputDir, { recursive: true });
-
       let aiIndex = 0;
       const aiEntries = Object.entries(manifest.listings);
       for (const [manifestKey, entry] of aiEntries) {
         aiIndex++;
         const prefix = `[${aiIndex}/${aiEntries.length}] ${manifestKey}`;
+        const aiOutputDir = resolveBatchOutputDir(options, entry.platform);
+        const aiPhotosOutputDir = getAiPhotosDir(aiOutputDir);
 
         const platformResult = entry.platform === 'airbnb' ? airbnbResult : bookingResult;
 
@@ -1875,7 +1931,7 @@ export async function runBatch(
         }
 
         // Skip if no photos available
-        if (!entry.photos.dir || (entry.photos.status !== 'fetched' && entry.photos.status !== 'partial' && entry.photos.status !== 'skipped')) {
+        if (!hasUsableArtifact(entry.photos, 'dir')) {
           console.log(`${prefix} — ai-photos ⊘ skip (no photos)`);
           platformResult.aiPhotos.skipped++;
           entry.aiPhotos = { status: 'skipped', reason: 'no photos' };
@@ -1912,6 +1968,7 @@ export async function runBatch(
         const listingPath = entry.details.file ? path.join(aiOutputDir, entry.details.file) : undefined;
 
         const t = Date.now();
+        if (!fs.existsSync(aiPhotosOutputDir)) fs.mkdirSync(aiPhotosOutputDir, { recursive: true });
         await emitBeforeAiCall(options, {
           outputDir: aiOutputDir,
           manifestKey,
@@ -1919,7 +1976,7 @@ export async function runBatch(
           entry,
         });
         try {
-          const result: PhotoAnalysisResult = await runAnalyzePhotos({
+          const result: PhotoAnalysisResult = await analyzePhotos({
             photosDir: photosPath,
             listingFile: listingPath && fs.existsSync(listingPath) ? listingPath : undefined,
             model: aiModel,
@@ -1969,9 +2026,7 @@ export async function runBatch(
 
   // 10. AI triage phase (runs after all AI analysis)
   if (options.triage) {
-    const aiOutputDir = options.outputDir || 'data';
     const aiModel = options.aiModel || process.env.LLM_MODEL || 'gemini-3-flash-preview:high';
-    const triageOutputDir = getTriageDir(aiOutputDir);
 
     // Early API key validation
     const modelConfig = parseModelConfig(aiModel);
@@ -2000,13 +2055,13 @@ export async function runBatch(
         level: 'info',
         message: `Starting AI triage (${modelConfig.model})`,
       });
-      if (!fs.existsSync(triageOutputDir)) fs.mkdirSync(triageOutputDir, { recursive: true });
-
       let triageIndex = 0;
       const triageEntries = Object.entries(manifest.listings);
       for (const [manifestKey, entry] of triageEntries) {
         triageIndex++;
         const prefix = `[${triageIndex}/${triageEntries.length}] ${manifestKey}`;
+        const aiOutputDir = resolveBatchOutputDir(options, entry.platform);
+        const triageOutputDir = getTriageDir(aiOutputDir);
 
         const platformResult = entry.platform === 'airbnb' ? airbnbResult : bookingResult;
 
@@ -2046,7 +2101,7 @@ export async function runBatch(
         }
 
         // Skip if no listing details available (required for triage)
-        if (!entry.details.file || (entry.details.status !== 'fetched' && entry.details.status !== 'skipped')) {
+        if (!hasUsableArtifact(entry.details, 'file')) {
           console.log(`${prefix} — triage ⊘ skip (no listing details)`);
           platformResult.triage.skipped++;
           entry.triage = { status: 'skipped', reason: 'no listing details' };
@@ -2084,6 +2139,7 @@ export async function runBatch(
         const aiPhotosPath = entry.aiPhotos?.file ? path.join(aiOutputDir, entry.aiPhotos.file) : undefined;
 
         const t = Date.now();
+        if (!fs.existsSync(triageOutputDir)) fs.mkdirSync(triageOutputDir, { recursive: true });
         await emitBeforeAiCall(options, {
           outputDir: aiOutputDir,
           manifestKey,
@@ -2091,7 +2147,7 @@ export async function runBatch(
           entry,
         });
         try {
-          const result: TriageResult = await runTriage({
+          const result: TriageResult = await triageListing({
             listingFile: listingPath,
             aiReviewsFile: aiReviewsPath && fs.existsSync(aiReviewsPath) ? aiReviewsPath : undefined,
             aiPhotosFile: aiPhotosPath && fs.existsSync(aiPhotosPath) ? aiPhotosPath : undefined,
