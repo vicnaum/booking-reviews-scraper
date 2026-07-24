@@ -202,6 +202,7 @@ test('default-dir resumed Booking artifacts remain eligible for every AI phase',
             data: { tier: 'shortlist', fitScore: 75 },
             model: 'fixture-model',
             provider: 'gemini',
+            evidenceGaps: [],
           };
         },
       },
@@ -226,6 +227,7 @@ test('default-dir resumed Booking artifacts remain eligible for every AI phase',
     assert.equal(entry.aiReviews.status, 'fetched');
     assert.equal(entry.aiPhotos.status, 'fetched');
     assert.equal(entry.triage.status, 'fetched');
+    assert.deepEqual(entry.triage.evidenceGaps, []);
 
     assert.deepEqual(analyzerInputs, [
       canonicalPath(fixture.reviewsFile),
@@ -266,6 +268,243 @@ test('default-dir resumed Booking artifacts remain eligible for every AI phase',
     );
   } finally {
     process.chdir(originalCwd);
+    if (originalGeminiApiKey === undefined) {
+      delete process.env.GEMINI_API_KEY;
+    } else {
+      process.env.GEMINI_API_KEY = originalGeminiApiKey;
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('triage records missing review evidence in its artifact and manifest', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reviewr-triage-gaps-'));
+  const outputDir = path.join(tempDir, 'output');
+  const fixture = writeBookingFixture(outputDir);
+  const urlsFile = path.join(tempDir, 'urls.txt');
+  const manifestPath = path.join(outputDir, 'batch_manifest.json');
+  const aiPhotosFile = path.join(
+    outputDir,
+    'ai-photos',
+    'example-hotel.json',
+  );
+  const originalGeminiApiKey = process.env.GEMINI_API_KEY;
+  fs.rmSync(fixture.reviewsFile);
+  fs.mkdirSync(path.dirname(aiPhotosFile), { recursive: true });
+  fs.writeFileSync(aiPhotosFile, JSON.stringify({ highlights: ['fixture'] }));
+  fs.writeFileSync(urlsFile, `${bookingUrl}\n`);
+  fs.writeFileSync(
+    manifestPath,
+    JSON.stringify({
+      version: 2,
+      createdAt: '2026-07-24T00:00:00.000Z',
+      updatedAt: '2026-07-24T00:00:00.000Z',
+      dates: {},
+      listings: {
+        'booking/example-hotel': {
+          platform: 'booking',
+          id: 'example-hotel',
+          url: bookingUrl,
+          details: {
+            status: 'fetched',
+            file: 'listings/listing_example-hotel.json',
+          },
+          reviews: { status: 'skipped', reason: 'no reviews' },
+          photos: {
+            status: 'fetched',
+            dir: 'photos/example-hotel',
+          },
+          aiReviews: {
+            status: 'skipped',
+            reason: 'no reviews',
+          },
+          aiPhotos: {
+            status: 'fetched',
+            file: 'ai-photos/example-hotel.json',
+          },
+          triage: { status: 'not_requested' },
+        },
+      },
+    }),
+  );
+
+  const triageEvents: Array<{ level: string; message: string; payload?: Record<string, unknown> }> = [];
+
+  try {
+    process.env.GEMINI_API_KEY = 'fixture-key';
+    const result = await runBatch(
+      [urlsFile],
+      {
+        fetchDetails: false,
+        fetchReviews: false,
+        fetchPhotos: false,
+        aiReviews: false,
+        aiPhotos: false,
+        triage: true,
+        aiReviewsExplicit: false,
+        aiPhotosExplicit: false,
+        triageExplicit: true,
+        force: false,
+        retryFailed: false,
+        downloadPhotosAll: false,
+        outputDir,
+        scopeManifestToInput: true,
+        print: false,
+        artifactCache: null,
+        hooks: {
+          onEvent: (event) => {
+            if (event.phase === 'triage') triageEvents.push(event);
+          },
+        },
+      },
+      {
+        runTriage: async (options) => {
+          assert.equal(options.aiReviewsFile, undefined);
+          assert.equal(
+            canonicalPath(options.aiPhotosFile!),
+            canonicalPath(aiPhotosFile),
+          );
+          return {
+            data: { tier: 'consider', fitScore: 55 },
+            model: 'fixture-model',
+            provider: 'gemini',
+            evidenceGaps: [],
+          };
+        },
+      },
+    );
+
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    assert.deepEqual(
+      manifest.listings['booking/example-hotel'].triage.evidenceGaps,
+      ['reviews'],
+    );
+
+    const triageJson = JSON.parse(
+      fs.readFileSync(
+        path.join(outputDir, 'triage', 'example-hotel.json'),
+        'utf-8',
+      ),
+    );
+    assert.deepEqual(triageJson.evidenceGaps, ['reviews']);
+    assert.equal(result.booking.triage.fetched, 1);
+
+    const completedEvent = triageEvents.find((event) =>
+      event.message.startsWith('triage ✓'));
+    assert.ok(completedEvent);
+    assert.equal(completedEvent.level, 'warning');
+    assert.deepEqual(completedEvent.payload?.evidenceGaps, ['reviews']);
+    assert.match(completedEvent.message, /graded without reviews/);
+  } finally {
+    if (originalGeminiApiKey === undefined) {
+      delete process.env.GEMINI_API_KEY;
+    } else {
+      process.env.GEMINI_API_KEY = originalGeminiApiKey;
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('triage records missing photo evidence in its artifact and manifest', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reviewr-triage-photo-gap-'));
+  const outputDir = path.join(tempDir, 'output');
+  const fixture = writeBookingFixture(outputDir);
+  const urlsFile = path.join(tempDir, 'urls.txt');
+  const manifestPath = path.join(outputDir, 'batch_manifest.json');
+  const aiReviewsFile = path.join(
+    outputDir,
+    'ai-reviews',
+    'example-hotel.json',
+  );
+  const originalGeminiApiKey = process.env.GEMINI_API_KEY;
+  fs.mkdirSync(path.dirname(aiReviewsFile), { recursive: true });
+  fs.writeFileSync(aiReviewsFile, JSON.stringify({ summary: 'fixture' }));
+  fs.writeFileSync(urlsFile, `${bookingUrl}\n`);
+  fs.writeFileSync(
+    manifestPath,
+    JSON.stringify({
+      version: 2,
+      createdAt: '2026-07-24T00:00:00.000Z',
+      updatedAt: '2026-07-24T00:00:00.000Z',
+      dates: {},
+      listings: {
+        'booking/example-hotel': {
+          platform: 'booking',
+          id: 'example-hotel',
+          url: bookingUrl,
+          details: {
+            status: 'fetched',
+            file: 'listings/listing_example-hotel.json',
+          },
+          reviews: {
+            status: 'fetched',
+            file: 'reviews/example-hotel_reviews.json',
+          },
+          photos: { status: 'skipped', reason: 'no photos' },
+          aiReviews: {
+            status: 'fetched',
+            file: 'ai-reviews/example-hotel.json',
+          },
+          aiPhotos: { status: 'skipped', reason: 'no photos' },
+          triage: { status: 'not_requested' },
+        },
+      },
+    }),
+  );
+
+  try {
+    process.env.GEMINI_API_KEY = 'fixture-key';
+    await runBatch(
+      [urlsFile],
+      {
+        fetchDetails: false,
+        fetchReviews: false,
+        fetchPhotos: false,
+        aiReviews: false,
+        aiPhotos: false,
+        triage: true,
+        aiReviewsExplicit: false,
+        aiPhotosExplicit: false,
+        triageExplicit: true,
+        force: false,
+        retryFailed: false,
+        downloadPhotosAll: false,
+        outputDir,
+        scopeManifestToInput: true,
+        print: false,
+        artifactCache: null,
+      },
+      {
+        runTriage: async (options) => {
+          assert.equal(
+            canonicalPath(options.aiReviewsFile!),
+            canonicalPath(aiReviewsFile),
+          );
+          assert.equal(options.aiPhotosFile, undefined);
+          return {
+            data: { tier: 'consider', fitScore: 55 },
+            model: 'fixture-model',
+            provider: 'gemini',
+            evidenceGaps: [],
+          };
+        },
+      },
+    );
+
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    assert.deepEqual(
+      manifest.listings['booking/example-hotel'].triage.evidenceGaps,
+      ['photos'],
+    );
+    const triageJson = JSON.parse(
+      fs.readFileSync(
+        path.join(outputDir, 'triage', 'example-hotel.json'),
+        'utf-8',
+      ),
+    );
+    assert.deepEqual(triageJson.evidenceGaps, ['photos']);
+    assert.equal(fs.existsSync(fixture.listingFile), true);
+  } finally {
     if (originalGeminiApiKey === undefined) {
       delete process.env.GEMINI_API_KEY;
     } else {

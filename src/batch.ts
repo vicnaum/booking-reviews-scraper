@@ -14,7 +14,12 @@ import * as bookingListing from './booking/listing.js';
 import * as bookingScraper from './booking/scraper.js';
 import { runAnalyze, parseModelConfig, getProviderApiKey, PROVIDER_KEY_NAMES, type AnalysisResult } from './analyze.js';
 import { runAnalyzePhotos, type PhotoAnalysisResult } from './analyze-photos.js';
-import { runTriage, type TriageResult } from './triage.js';
+import {
+  normalizeTriageEvidenceGaps,
+  runTriage,
+  type TriageEvidenceGap,
+  type TriageResult,
+} from './triage.js';
 import {
   buildDetailsCacheVariant,
   buildPhotosCacheVariant,
@@ -74,6 +79,7 @@ export interface ManifestPhase {
   source?: 'network' | 'cache' | 'local';
   cachedAt?: string;
   cacheAgeMs?: number;
+  evidenceGaps?: TriageEvidenceGap[];
 }
 
 export interface ManifestEntry {
@@ -2104,7 +2110,11 @@ export async function runBatch(
         if (!hasUsableArtifact(entry.details, 'file')) {
           console.log(`${prefix} — triage ⊘ skip (no listing details)`);
           platformResult.triage.skipped++;
-          entry.triage = { status: 'skipped', reason: 'no listing details' };
+          entry.triage = {
+            status: 'skipped',
+            reason: 'no listing details',
+            evidenceGaps: ['details'],
+          };
           await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'triage');
           await emitBatchEvent(options, {
             phase: 'triage',
@@ -2121,7 +2131,11 @@ export async function runBatch(
         if (!fs.existsSync(listingPath)) {
           console.log(`${prefix} — triage ⊘ skip (listing file missing)`);
           platformResult.triage.skipped++;
-          entry.triage = { status: 'skipped', reason: 'listing file missing' };
+          entry.triage = {
+            status: 'skipped',
+            reason: 'listing file missing',
+            evidenceGaps: ['details'],
+          };
           await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'triage');
           await emitBatchEvent(options, {
             phase: 'triage',
@@ -2137,6 +2151,14 @@ export async function runBatch(
         // Resolve optional AI analysis files
         const aiReviewsPath = entry.aiReviews?.file ? path.join(aiOutputDir, entry.aiReviews.file) : undefined;
         const aiPhotosPath = entry.aiPhotos?.file ? path.join(aiOutputDir, entry.aiPhotos.file) : undefined;
+        const availableAiReviewsPath =
+          aiReviewsPath && fs.existsSync(aiReviewsPath) ? aiReviewsPath : undefined;
+        const availableAiPhotosPath =
+          aiPhotosPath && fs.existsSync(aiPhotosPath) ? aiPhotosPath : undefined;
+        const missingInputEvidence = normalizeTriageEvidenceGaps([
+          ...(availableAiReviewsPath ? [] : ['reviews']),
+          ...(availableAiPhotosPath ? [] : ['photos']),
+        ]);
 
         const t = Date.now();
         if (!fs.existsSync(triageOutputDir)) fs.mkdirSync(triageOutputDir, { recursive: true });
@@ -2149,28 +2171,54 @@ export async function runBatch(
         try {
           const result: TriageResult = await triageListing({
             listingFile: listingPath,
-            aiReviewsFile: aiReviewsPath && fs.existsSync(aiReviewsPath) ? aiReviewsPath : undefined,
-            aiPhotosFile: aiPhotosPath && fs.existsSync(aiPhotosPath) ? aiPhotosPath : undefined,
+            aiReviewsFile: availableAiReviewsPath,
+            aiPhotosFile: availableAiPhotosPath,
             model: aiModel,
             priorities: options.aiPriorities,
           });
 
-          // Write result to triage dir
-          fs.writeFileSync(triageFile, JSON.stringify(result.data, null, 2));
+          if (!result.data || typeof result.data !== 'object' || Array.isArray(result.data)) {
+            throw new Error('Triage result data must be a JSON object.');
+          }
+          const evidenceGaps = normalizeTriageEvidenceGaps([
+            ...missingInputEvidence,
+            ...result.evidenceGaps,
+          ]);
+          const triageData = {
+            ...result.data,
+            evidenceGaps,
+          };
 
-          const tier = result.data?.tier || '?';
-          const fitScore = result.data?.fitScore ?? '?';
-          console.log(`${prefix} — triage ✓ ${tier} (${fitScore}) (${formatDuration(Date.now() - t)})`);
+          // Write result to triage dir
+          fs.writeFileSync(triageFile, JSON.stringify(triageData, null, 2));
+
+          const tier = triageData.tier || '?';
+          const fitScore = triageData.fitScore ?? '?';
+          const evidenceLabel =
+            evidenceGaps.length > 0
+              ? `; graded without ${evidenceGaps.join(' + ')}`
+              : '';
+          const triageMessage =
+            `triage ✓ ${tier} (${fitScore})`
+            + ` (${formatDuration(Date.now() - t)})${evidenceLabel}`;
+          console.log(`${prefix} — ${triageMessage}`);
           platformResult.triage.fetched++;
-          entry.triage = { status: 'fetched', file: `triage/${entry.id}.json`, model: result.model, cost: result.usage?.cost };
+          entry.triage = {
+            status: 'fetched',
+            file: `triage/${entry.id}.json`,
+            model: result.model,
+            cost: result.usage?.cost,
+            evidenceGaps,
+          };
           await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'triage');
           await emitBatchEvent(options, {
             phase: 'triage',
-            level: 'info',
-            message: `triage ✓ ${tier} (${fitScore}) (${formatDuration(Date.now() - t)})`,
+            level: evidenceGaps.length > 0 ? 'warning' : 'info',
+            message: triageMessage,
             manifestKey,
             platform: entry.platform,
             listingId: entry.id,
+            payload: { evidenceGaps },
           });
         } catch (err: any) {
           console.log(`${prefix} — triage ✗ ${err.message}`);

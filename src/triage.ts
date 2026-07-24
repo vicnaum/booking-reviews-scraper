@@ -18,10 +18,26 @@ export interface TriageOptions {
   priorities?: string;       // Guest requirements (free text)
 }
 
+export const TRIAGE_EVIDENCE_GAP_ORDER = [
+  'details',
+  'reviews',
+  'photos',
+] as const;
+
+export type TriageEvidenceGap = typeof TRIAGE_EVIDENCE_GAP_ORDER[number];
+
+export function normalizeTriageEvidenceGaps(
+  values: Iterable<unknown>,
+): TriageEvidenceGap[] {
+  const provided = new Set(values);
+  return TRIAGE_EVIDENCE_GAP_ORDER.filter((gap) => provided.has(gap));
+}
+
 export interface TriageResult {
   data: any;                 // Parsed triage JSON
   model: string;
   provider: LLMProvider;
+  evidenceGaps: TriageEvidenceGap[];
   tokensUsed?: number;
   usage?: UsageSummary;
 }
@@ -52,6 +68,8 @@ const TRIAGE_SYSTEM_PROMPT = `You are a property evaluator helping a specific gu
 - Photo analysis is supplementary. Photos can be outdated, selectively chosen, or misleading.
 - **Absence in photos does NOT mean absence in reality.** Only flag what's clearly visible as a concern.
 - Never assign no_go tier based on photo evidence alone — only from listing details or reviews.
+- The user message names any missing evidence layers. Never infer facts from a missing layer.
+- Mark requirements that depend only on missing evidence as unknown, and state the limitation in the tier reason and summary.
 
 ## Requirement Evaluation Rules
 1. Parse the guest's requirements from their free text.
@@ -302,6 +320,7 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
   }
   const listingData = JSON.parse(fs.readFileSync(listingPath, 'utf-8'));
   const trimmedListing = trimListingData(listingData);
+  const evidenceGaps: TriageEvidenceGap[] = [];
 
   // 3. Read AI reviews (optional)
   let aiReviewsData: any = null;
@@ -314,6 +333,9 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
         console.warn(`  Warning: could not parse AI reviews file: ${err.message}`);
       }
     }
+  }
+  if (!aiReviewsData) {
+    evidenceGaps.push('reviews');
   }
 
   // 4. Read AI photos (optional)
@@ -328,12 +350,25 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
       }
     }
   }
+  if (!aiPhotosData) {
+    evidenceGaps.push('photos');
+  }
+
+  const normalizedEvidenceGaps = normalizeTriageEvidenceGaps(evidenceGaps);
 
   // 5. Build user message
   const sections: string[] = [];
 
   sections.push('## Guest Requirements');
   sections.push(priorities || 'No specific requirements provided. Evaluate for a general traveler.');
+  sections.push('');
+
+  sections.push('## Evidence Availability');
+  sections.push(
+    normalizedEvidenceGaps.length > 0
+      ? `Missing evidence layers: ${normalizedEvidenceGaps.join(', ')}. Do not infer facts from these layers.`
+      : 'All evidence layers are available.',
+  );
   sections.push('');
 
   sections.push('## Listing Details');
@@ -377,6 +412,10 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
   } catch {
     throw new Error(`Failed to parse Gemini response as JSON:\n${result.text.slice(0, 500)}`);
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Gemini triage response must be a JSON object.');
+  }
+  parsed.evidenceGaps = normalizedEvidenceGaps;
 
   // 8. Log usage
   console.error(`\nUsage:`);
@@ -392,6 +431,7 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
     data: parsed,
     model: modelConfig.model,
     provider: modelConfig.provider,
+    evidenceGaps: normalizedEvidenceGaps,
     tokensUsed: prompt,
     usage: { inputTokens: prompt, outputTokens: response, thinkingTokens: thinking || undefined, cost },
   };

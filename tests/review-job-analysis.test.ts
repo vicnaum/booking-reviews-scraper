@@ -13,6 +13,7 @@ import {
   pruneAnalysisManifestToListings,
   readJsonFile,
   summarizeAnalysisStatus,
+  summarizeManifestEntryStatus,
   type AnalysisManifest,
 } from '../web/src/lib/review-job-analysis.js';
 import { REVIEW_JOB_ARTIFACT_DIR_ENV } from '../web/src/lib/reviewJobArtifacts.js';
@@ -161,6 +162,28 @@ test('summarizeAnalysisStatus treats pending listings as partial results', () =>
     summarizeAnalysisStatus([{ status: 'running' }] as any),
     'partial',
   );
+});
+
+test('triage evidence gaps make an otherwise completed listing partial', () => {
+  const entry: AnalysisManifest['listings'][string] = {
+    platform: 'booking',
+    id: 'example',
+    url: 'https://www.booking.com/hotel/us/example.en-gb.html',
+    details: { status: 'fetched', file: 'listings/listing_example.json' },
+    reviews: { status: 'fetched', file: 'reviews/example_reviews.json' },
+    photos: { status: 'fetched', dir: 'photos/example' },
+    aiReviews: { status: 'fetched', file: 'ai-reviews/example.json' },
+    aiPhotos: { status: 'fetched', file: 'ai-photos/example.json' },
+    triage: {
+      status: 'fetched',
+      file: 'triage/example.json',
+      evidenceGaps: ['reviews'],
+    },
+  };
+
+  assert.equal(summarizeManifestEntryStatus(entry), 'partial');
+  entry.triage.evidenceGaps = [];
+  assert.equal(summarizeManifestEntryStatus(entry), 'completed');
 });
 
 test('prepareReviewJobRunWorkspace stages a fresh rerun with AI outputs invalidated', () => {

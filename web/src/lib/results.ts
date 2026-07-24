@@ -1,4 +1,13 @@
-import type { ReviewJobListing } from '@/types';
+import type {
+  ReviewJobListing,
+  TriageEvidenceGap,
+} from '../types.js';
+
+const TRIAGE_EVIDENCE_GAP_ORDER: TriageEvidenceGap[] = [
+  'details',
+  'reviews',
+  'photos',
+];
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -20,6 +29,25 @@ function asStringArray(value: unknown): string[] {
     return [];
   }
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+}
+
+function normalizeEvidenceGaps(value: unknown[]): TriageEvidenceGap[] {
+  const provided = new Set(value);
+  return TRIAGE_EVIDENCE_GAP_ORDER.filter((gap) => provided.has(gap));
+}
+
+function getTriageEvidenceGaps(
+  listing: ReviewJobListing,
+  triage: Record<string, unknown>,
+): TriageEvidenceGap[] {
+  if (Array.isArray(triage.evidenceGaps)) {
+    return normalizeEvidenceGaps(triage.evidenceGaps);
+  }
+
+  return normalizeEvidenceGaps([
+    ...(asRecord(listing.analysis?.aiReviews) ? [] : ['reviews']),
+    ...(asRecord(listing.analysis?.aiPhotos) ? [] : ['photos']),
+  ]);
 }
 
 function getPhotoUrl(photo: unknown): string | null {
@@ -69,6 +97,7 @@ export interface ParsedTriage {
   highlights: string[];
   concerns: string[];
   dealBreakers: string[];
+  evidenceGaps: TriageEvidenceGap[];
   requirements: ParsedRequirement[];
   scores: Array<{ key: string; value: number }>;
 }
@@ -196,6 +225,7 @@ function parseTriage(listing: ReviewJobListing): ParsedTriage | null {
     highlights: asStringArray(triage.highlights),
     concerns: asStringArray(triage.concerns),
     dealBreakers: asStringArray(triage.dealBreakers),
+    evidenceGaps: getTriageEvidenceGaps(listing, triage),
     requirements,
     scores,
   };
