@@ -1236,6 +1236,16 @@ async function runReviewJobAnalysis(reviewJobId: string) {
       triage: true,
       aiModel: analysisModel,
       aiPriorities: jobRecord.prompt?.trim() || undefined,
+      analysisBudget:
+        jobRecord.analysisBudgetAmount != null
+        && jobRecord.analysisBudgetCurrency
+          ? {
+              amount: jobRecord.analysisBudgetAmount,
+              currency: jobRecord.analysisBudgetCurrency,
+              basis: 'stay',
+              source: 'explicit',
+            }
+          : undefined,
       aiReviewsExplicit: true,
       aiPhotosExplicit: true,
       triageExplicit: true,

@@ -45,6 +45,30 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Missing boundingBox' }, { status: 400 });
   }
 
+  const analysisBudgetAmount =
+    body.analysisBudgetAmount == null
+      ? null
+      : Number(body.analysisBudgetAmount);
+  const requestedBudgetCurrency =
+    body.analysisBudgetCurrency ?? body.currency ?? 'USD';
+  const analysisBudgetCurrency =
+    typeof requestedBudgetCurrency === 'string'
+      ? requestedBudgetCurrency.trim().toUpperCase()
+      : '';
+  if (
+    analysisBudgetAmount != null
+    && (
+      !Number.isFinite(analysisBudgetAmount)
+      || analysisBudgetAmount <= 0
+      || !/^[A-Z]{3}$/.test(analysisBudgetCurrency)
+    )
+  ) {
+    return NextResponse.json(
+      { error: 'Analysis budget requires a positive amount and three-letter currency code' },
+      { status: 400 },
+    );
+  }
+
   const cookieStore = await cookies();
   const existingOwnerKey = cookieStore.get(OWNER_KEY_COOKIE)?.value ?? null;
   const ownerKey = existingOwnerKey ?? randomUUID();
@@ -58,6 +82,9 @@ export async function POST(request: NextRequest) {
       searchAreaMode: body.searchAreaMode,
       poi: body.poi,
       prompt: body.prompt,
+      analysisBudgetAmount,
+      analysisBudgetCurrency:
+        analysisBudgetAmount == null ? null : analysisBudgetCurrency,
     }),
   });
 

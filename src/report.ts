@@ -23,9 +23,17 @@ interface ManifestEntry {
 }
 
 interface TriageData {
+  scoreSource?: string;
+  rubricVersion?: string;
+  requirementSetId?: string;
+  rawFitScore?: number;
   fitScore: number;
   tier: string;
   tierReason: string;
+  capReasons?: string[];
+  coverage?: number;
+  rankingStatus?: string;
+  rankingReason?: string;
   requirements: Array<{
     requirement: string;
     type: string;
@@ -40,6 +48,12 @@ interface TriageData {
   concerns: string[];
   dealBreakers: string[];
   summary: string;
+  affordability?: {
+    status?: string;
+    reasonCode?: string | null;
+    reason?: string | null;
+    overByPercent?: number | null;
+  };
 }
 
 interface ListingRow {
@@ -47,6 +61,20 @@ interface ListingRow {
   platform: string;
   url: string;
   title: string;
+  sourceOrder: number;
+  scoreSource: 'deterministic_rubric' | 'model_legacy';
+  rubricVersion: string | null;
+  requirementSetId: string | null;
+  rankingStatus: 'ranked' | 'insufficient_evidence' | 'legacy_unranked';
+  coverage: number | null;
+  rawFitScore: number | null;
+  capReasons: string[];
+  affordability: {
+    status: string;
+    reasonCode: string | null;
+    reason: string | null;
+    overByPercent: number | null;
+  } | null;
   tier: string;
   fitScore: number;
   tierReason: string;
@@ -202,11 +230,57 @@ export async function generateReport(options: ReportOptions): Promise<string> {
       }
     }
 
+    const deterministic =
+      triage.scoreSource === 'deterministic_rubric'
+      && typeof triage.rubricVersion === 'string'
+      && typeof triage.requirementSetId === 'string';
+    const coverage =
+      typeof triage.coverage === 'number' && Number.isFinite(triage.coverage)
+        ? triage.coverage
+        : null;
+    const rankingStatus =
+      deterministic
+        ? triage.rankingStatus === 'insufficient_evidence'
+          || (coverage != null && coverage < 0.5)
+          ? 'insufficient_evidence'
+          : 'ranked'
+        : 'legacy_unranked';
+    const affordability =
+      triage.affordability
+      && typeof triage.affordability === 'object'
+      && typeof triage.affordability.status === 'string'
+        ? {
+            status: triage.affordability.status,
+            reasonCode: triage.affordability.reasonCode ?? null,
+            reason: triage.affordability.reason ?? null,
+            overByPercent:
+              typeof triage.affordability.overByPercent === 'number'
+                ? triage.affordability.overByPercent
+                : null,
+          }
+        : null;
+
     rows.push({
       id: entry.id,
       platform: entry.platform,
       url: entry.url,
       title,
+      sourceOrder: rows.length,
+      scoreSource: deterministic
+        ? 'deterministic_rubric'
+        : 'model_legacy',
+      rubricVersion: deterministic ? triage.rubricVersion! : null,
+      requirementSetId: deterministic ? triage.requirementSetId! : null,
+      rankingStatus,
+      coverage,
+      rawFitScore:
+        typeof triage.rawFitScore === 'number'
+          ? triage.rawFitScore
+          : null,
+      capReasons: Array.isArray(triage.capReasons)
+        ? triage.capReasons
+        : [],
+      affordability,
       tier: triage.tier,
       fitScore: triage.fitScore,
       tierReason: triage.tierReason,
@@ -251,7 +325,22 @@ export async function generateReport(options: ReportOptions): Promise<string> {
     });
   }
 
-  rows.sort((a, b) => b.fitScore - a.fitScore);
+  const activeRequirementSetId = getActiveRequirementSetId(rows);
+  rows.sort((a, b) => {
+    if (activeRequirementSetId) {
+      const groupA = getReportComparisonGroup(
+        a,
+        activeRequirementSetId,
+      );
+      const groupB = getReportComparisonGroup(
+        b,
+        activeRequirementSetId,
+      );
+      if (groupA !== groupB) return groupA - groupB;
+      if (groupA !== 0) return a.sourceOrder - b.sourceOrder;
+    }
+    return b.fitScore - a.fitScore;
+  });
 
   // Load or create picks.json
   const picksPath = join(outputDir, 'picks.json');
@@ -307,6 +396,45 @@ function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+function getActiveRequirementSetId(rows: ListingRow[]): string | null {
+  const counts = new Map<string, { count: number; first: number }>();
+  for (const row of rows) {
+    if (
+      row.scoreSource !== 'deterministic_rubric'
+      || !row.requirementSetId
+    ) {
+      continue;
+    }
+    const current = counts.get(row.requirementSetId);
+    counts.set(row.requirementSetId, {
+      count: (current?.count ?? 0) + 1,
+      first: current?.first ?? row.sourceOrder,
+    });
+  }
+  return (
+    [...counts.entries()]
+      .sort(
+        (a, b) =>
+          b[1].count - a[1].count || a[1].first - b[1].first,
+      )[0]?.[0]
+    ?? null
+  );
+}
+
+function getReportComparisonGroup(
+  row: ListingRow,
+  activeRequirementSetId: string | null,
+): number {
+  if (!activeRequirementSetId) return 0;
+  if (
+    row.scoreSource === 'deterministic_rubric'
+    && row.requirementSetId === activeRequirementSetId
+  ) {
+    return row.rankingStatus === 'insufficient_evidence' ? 1 : 0;
+  }
+  return 2;
+}
+
 function buildHTML(rows: ListingRow[], dates?: { checkIn: string; checkOut: string; adults: number }, picks?: { liked: string[]; hidden: string[] }): string {
   const dataJSON = JSON.stringify(rows);
   const picksJSON = JSON.stringify(picks || { liked: [], hidden: [] });
@@ -316,11 +444,34 @@ function buildHTML(rows: ListingRow[], dates?: { checkIn: string; checkOut: stri
   );
   const tierOrder = ['top_pick', 'shortlist', 'consider', 'unlikely', 'no_go'];
   const tierCounts: Record<string, number> = {};
+  const activeRequirementSetId = getActiveRequirementSetId(rows);
+  const comparableRows = activeRequirementSetId
+    ? rows.filter(
+        (row) =>
+          getReportComparisonGroup(row, activeRequirementSetId) === 0,
+      )
+    : rows;
+  const insufficientCount = activeRequirementSetId
+    ? rows.filter(
+        (row) =>
+          getReportComparisonGroup(row, activeRequirementSetId) === 1,
+      ).length
+    : 0;
+  const legacyOrStaleCount = activeRequirementSetId
+    ? rows.filter(
+        (row) =>
+          getReportComparisonGroup(row, activeRequirementSetId) === 2,
+      ).length
+    : 0;
   for (const t of tierOrder) tierCounts[t] = 0;
-  for (const r of rows) tierCounts[r.tier] = (tierCounts[r.tier] || 0) + 1;
+  for (const r of comparableRows) {
+    tierCounts[r.tier] = (tierCounts[r.tier] || 0) + 1;
+  }
 
-  const topPicks = rows.filter(r => r.tier === 'top_pick');
-  const heroRows = topPicks.length >= 3 ? topPicks : rows.slice(0, 5);
+  const topPicks = comparableRows.filter(r => r.tier === 'top_pick');
+  const heroRows = topPicks.length >= 3
+    ? topPicks
+    : comparableRows.slice(0, 5);
 
   const dateLabel = dates ? `${dates.checkIn} → ${dates.checkOut} · ${dates.adults} guests` : '';
 
@@ -341,13 +492,16 @@ ${getCSS()}
 <header>
   <h1>Listing Report</h1>
   <p class="subtitle">${rows.length} listings triaged${dateLabel ? ` · ${esc(dateLabel)}` : ''}</p>
+  ${activeRequirementSetId && (insufficientCount > 0 || legacyOrStaleCount > 0)
+    ? `<p class="subtitle">${insufficientCount} insufficient-evidence and ${legacyOrStaleCount} legacy/stale verdicts are shown outside the peer ranking.</p>`
+    : ''}
 </header>
 
 <!-- TOP PICKS -->
 <section id="top-picks">
   <h2>Top Picks</h2>
   <div class="hero-grid">
-${heroRows.map(r => heroCard(r)).join('\n')}
+${heroRows.map(r => heroCard(r, activeRequirementSetId)).join('\n')}
   </div>
 </section>
 
@@ -437,7 +591,45 @@ ${getJS()}
 </html>`;
 }
 
-function heroCard(r: ListingRow): string {
+function reportVerdictBadges(
+  row: ListingRow,
+  activeRequirementSetId: string | null,
+): string {
+  const group = getReportComparisonGroup(row, activeRequirementSetId);
+  if (row.scoreSource === 'model_legacy') {
+    return '<span class="source-badge source-legacy">Legacy AI score</span>';
+  }
+  if (group === 2) {
+    return '<span class="source-badge source-unranked">Stale requirement set</span>';
+  }
+  if (group === 1) {
+    return `<span class="source-badge source-insufficient">Insufficient evidence · ${Math.round((row.coverage ?? 0) * 100)}% coverage</span>`;
+  }
+  return `<span class="source-badge source-rubric">Rubric v${esc(row.rubricVersion ?? '?')} · ${Math.round((row.coverage ?? 0) * 100)}% coverage</span>`;
+}
+
+function reportAffordabilityBadge(row: ListingRow): string {
+  const affordability = row.affordability;
+  if (!affordability) return '';
+  if (affordability.status === 'within') {
+    return '<span class="source-badge affordability-within">Within budget</span>';
+  }
+  if (affordability.status === 'over') {
+    const percentage =
+      affordability.overByPercent == null
+        ? 'Unknown'
+        : new Intl.NumberFormat('en-US', {
+            maximumFractionDigits: 2,
+          }).format(affordability.overByPercent);
+    return `<span class="source-badge affordability-over">${percentage}% over budget</span>`;
+  }
+  return `<span class="source-badge affordability-unknown" title="${esc(affordability.reason ?? 'Reason unavailable.')}">Budget unknown · ${esc(affordability.reason ?? 'Reason unavailable.')}</span>`;
+}
+
+function heroCard(
+  r: ListingRow,
+  activeRequirementSetId: string | null,
+): string {
   const photo = r.photos[0] || '';
   const metaParts = [
     esc(r.priceTotal),
@@ -448,11 +640,23 @@ function heroCard(r: ListingRow): string {
   const reqDots = r.requirements.map(req =>
     `<span class="req-dot status-${req.status}" title="${esc(req.requirement)}: ${req.status}"></span>`
   ).join('');
+  const comparisonGroup = getReportComparisonGroup(
+    r,
+    activeRequirementSetId,
+  );
+  const displayedTier =
+    comparisonGroup === 1
+      ? 'insufficient evidence'
+      : comparisonGroup === 2
+        ? 'unranked'
+        : r.tier.replace('_', ' ');
+  const displayedTierClass =
+    comparisonGroup === 0 ? ` tier-${r.tier}` : '';
 
   return `    <div class="hero-card" data-id="${esc(r.id)}" onclick="scrollToRow('${esc(r.id)}')">
       ${photo ? `<img class="hero-photo" src="${esc(photo)}" alt="${esc(r.title)}" loading="lazy">` : '<div class="hero-photo no-photo"></div>'}
       <div class="hero-body">
-        <div class="hero-badges"><span class="score-badge">${r.fitScore}</span><span class="tier-badge tier-${r.tier}">${r.tier.replace('_', ' ')}</span></div>
+        <div class="hero-badges"><span class="score-badge">${r.fitScore}</span><span class="tier-badge${displayedTierClass}">${displayedTier}</span>${reportVerdictBadges(r, activeRequirementSetId)}${reportAffordabilityBadge(r)}</div>
         <h3><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.title)}</a></h3>
         <div class="hero-meta">${metaParts.join(' · ')}</div>
         <p class="hero-summary">${esc(r.summary.substring(0, 160))}${r.summary.length > 160 ? '…' : ''}</p>
@@ -484,9 +688,17 @@ header h1 { font-size: 24px; font-weight: 700; }
 .hero-photo { width: 100%; height: 180px; object-fit: cover; display: block; background: #e2e8f0; }
 .no-photo { height: 180px; background: #cbd5e1; }
 .hero-body { padding: 12px 16px; }
-.hero-badges { display: flex; gap: 6px; margin-bottom: 6px; }
+.hero-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .score-badge { background: var(--text); color: #fff; font-weight: 700; font-size: 13px; padding: 2px 8px; border-radius: 6px; }
-.tier-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 6px; color: #fff; text-transform: capitalize; }
+.tier-badge { background: #64748b; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 6px; color: #fff; text-transform: capitalize; }
+.source-badge { display: inline-block; max-width: 420px; font-size: 10px; font-weight: 600; line-height: 1.35; padding: 3px 7px; border: 1px solid var(--border); border-radius: 999px; }
+.source-legacy { color: #6d28d9; background: #f5f3ff; border-color: #ddd6fe; }
+.source-unranked { color: #475569; background: #f1f5f9; }
+.source-insufficient { color: #92400e; background: #fffbeb; border-color: #fde68a; }
+.source-rubric { color: #075985; background: #f0f9ff; border-color: #bae6fd; }
+.affordability-within { color: #166534; background: #f0fdf4; border-color: #bbf7d0; }
+.affordability-over { color: #9a3412; background: #fff7ed; border-color: #fed7aa; }
+.affordability-unknown { color: #475569; background: #f8fafc; }
 .tier-top_pick { background: var(--top_pick); } .tier-shortlist { background: var(--shortlist); }
 .tier-consider { background: var(--consider); } .tier-unlikely { background: var(--unlikely); }
 .tier-no_go { background: var(--no_go); }
@@ -689,6 +901,44 @@ function getJS(): string {
   const STATUS_COLORS = {met:'#22c55e',partial:'#f59e0b',unmet:'#ef4444',unknown:'#9ca3af'};
   const SCORE_KEYS = ['fit','location','sleepQuality','cleanliness','modernity','valueForMoney'];
   const SCORE_LABELS = {fit:'Fit',location:'Location',sleepQuality:'Sleep',cleanliness:'Clean',modernity:'Modern',valueForMoney:'Value'};
+  const requirementSetCounts = new Map();
+  DATA.forEach((r, index) => {
+    if (r.scoreSource !== 'deterministic_rubric' || !r.requirementSetId) return;
+    const current = requirementSetCounts.get(r.requirementSetId);
+    requirementSetCounts.set(r.requirementSetId, {
+      count: (current?.count || 0) + 1,
+      first: current?.first ?? index,
+    });
+  });
+  const ACTIVE_REQUIREMENT_SET_ID = [...requirementSetCounts.entries()]
+    .sort((a,b) => b[1].count - a[1].count || a[1].first - b[1].first)[0]?.[0] || null;
+  function comparisonGroup(r) {
+    if (!ACTIVE_REQUIREMENT_SET_ID) return 0;
+    if (r.scoreSource === 'deterministic_rubric' && r.requirementSetId === ACTIVE_REQUIREMENT_SET_ID) {
+      return r.rankingStatus === 'insufficient_evidence' ? 1 : 0;
+    }
+    return 2;
+  }
+  function verdictSourceBadge(r) {
+    const group = comparisonGroup(r);
+    if (r.scoreSource === 'model_legacy') return '<span class="source-badge source-legacy">Legacy AI score</span>';
+    if (group === 2) return '<span class="source-badge source-unranked">Stale requirement set</span>';
+    if (group === 1) return '<span class="source-badge source-insufficient">Insufficient evidence · ' + Math.round((r.coverage || 0) * 100) + '% coverage</span>';
+    return '<span class="source-badge source-rubric">Rubric v' + esc(r.rubricVersion || '?') + ' · ' + Math.round((r.coverage || 0) * 100) + '% coverage</span>';
+  }
+  function affordabilityBadge(r) {
+    const a = r.affordability;
+    if (!a) return '';
+    if (a.status === 'within') return '<span class="source-badge affordability-within">Within budget</span>';
+    if (a.status === 'over') {
+      const percentage = a.overByPercent == null
+        ? 'Unknown'
+        : new Intl.NumberFormat('en-US', {maximumFractionDigits:2}).format(a.overByPercent);
+      return '<span class="source-badge affordability-over">' + percentage + '% over budget</span>';
+    }
+    const reason = a.reason || 'Reason unavailable.';
+    return '<span class="source-badge affordability-unknown" title="' + esc(reason) + '">Budget unknown · ' + esc(reason) + '</span>';
+  }
   const IC = {
     bedroom: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 20H2"/><path d="M11 4.562v16.157a1 1 0 0 0 1.242.97L19 20V5.562a2 2 0 0 0-1.515-1.94l-4-1A2 2 0 0 0 11 4.561z"/><path d="M11 4H8a2 2 0 0 0-2 2v14"/><path d="M14 12h.01"/><path d="M22 20h-3"/></svg>',
     bed: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20v-8a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v8"/><path d="M4 10V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4"/><path d="M12 4v6"/><path d="M2 18h20"/></svg>',
@@ -730,10 +980,13 @@ function getJS(): string {
     if (hc) hc.textContent = String(hiddenIds.size);
   }
 
-  function buildRow(r, i) {
+  function buildRow(r, i, showGroupHeader) {
     const photo = r.photos[0] || '';
     const thumbHtml = photo ? '<img class="thumb" src="' + esc(photo) + '" loading="lazy" alt="">' : '<div class="thumb"></div>';
-    const tierBadge = '<span class="tier-badge tier-' + r.tier + '">' + r.tier.replace('_',' ') + '</span>';
+    const group = comparisonGroup(r);
+    const tierLabel = group === 1 ? 'insufficient evidence' : group === 2 ? 'unranked' : r.tier.replace('_',' ');
+    const tierClass = group === 0 ? ' tier-' + r.tier : '';
+    const tierBadge = '<span class="tier-badge' + tierClass + '">' + tierLabel + '</span>';
     const platBadge = '<span class="platform-badge platform-' + r.platform + '">' + r.platform + '</span>';
 
     // Mini score bars
@@ -756,14 +1009,21 @@ function getJS(): string {
 
     const isLiked = likedIds.has(r.id);
     const isHidden = hiddenIds.has(r.id);
-    let html = '<tr class="listing-row' + (expandedId === r.id ? ' expanded' : '') + (isLiked ? ' is-liked' : '') + '" data-id="' + esc(r.id) + '"' + (isHidden ? ' style="opacity:.4"' : '') + '>';
+    let html = '';
+    if (showGroupHeader && group > 0) {
+      const label = group === 1
+        ? 'Insufficient evidence — shown for audit, not ranked with comparable results'
+        : 'Legacy or stale verdicts — regrade the whole job before comparing';
+      html += '<tr><td colspan="12" style="background:#f8fafc;color:#475569;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">' + label + '</td></tr>';
+    }
+    html += '<tr class="listing-row' + (expandedId === r.id ? ' expanded' : '') + (isLiked ? ' is-liked' : '') + '" data-id="' + esc(r.id) + '"' + (isHidden ? ' style="opacity:.4"' : '') + '>';
     html += '<td><button class="act-btn like-btn' + (isLiked ? ' liked' : '') + '" onclick="toggleLike(event,\\''+esc(r.id)+'\\')">&#9829;</button></td>';
-    html += '<td>' + (i+1) + '</td>';
+    html += '<td>' + (group === 0 ? i+1 : '—') + '</td>';
     html += '<td>' + thumbHtml + '</td>';
     html += '<td>' + platBadge + ' <a href="' + esc(r.url) + '" target="_blank" rel="noopener" onclick="event.stopPropagation()">' + esc(r.title) + '</a></td>';
-    html += '<td>' + tierBadge + '</td>';
+    html += '<td><div class="hero-badges">' + tierBadge + verdictSourceBadge(r) + '</div></td>';
     html += '<td><strong>' + r.fitScore + '</strong></td>';
-    html += '<td>' + esc(r.priceTotal) + '</td>';
+    html += '<td>' + esc(r.priceTotal) + '<div style="margin-top:5px">' + affordabilityBadge(r) + '</div></td>';
 
     // Info icons: bedrooms, beds, bathrooms + amenity flags
     let info = '<div class="info-icons">';
@@ -796,8 +1056,13 @@ function getJS(): string {
     const tbody = document.getElementById('table-body');
     const likedBody = document.getElementById('liked-body');
     const likedSection = document.getElementById('liked-section');
-    const filtered = [...DATA].filter(r => activeTiers.has(r.tier) && (showHidden || !hiddenIds.has(r.id)));
+    const filtered = [...DATA].filter(r =>
+      (comparisonGroup(r) !== 0 || activeTiers.has(r.tier))
+      && (showHidden || !hiddenIds.has(r.id)));
     filtered.sort((a,b) => {
+      const groupA = comparisonGroup(a), groupB = comparisonGroup(b);
+      if (groupA !== groupB) return groupA - groupB;
+      if (groupA !== 0) return a.sourceOrder - b.sourceOrder;
       let va = a[sortKey], vb = b[sortKey];
       if (sortKey === 'price') { va = parsePrice(a.priceTotal); vb = parsePrice(b.priceTotal); }
       if (sortKey === 'tier') { va = tierRank(a.tier); vb = tierRank(b.tier); }
@@ -812,13 +1077,17 @@ function getJS(): string {
 
     // Render liked table
     let likedHtml = '';
-    liked.forEach((r, i) => { likedHtml += buildRow(r, i); });
+    liked.forEach((r, i) => {
+      likedHtml += buildRow(r, i, i === 0 || comparisonGroup(r) !== comparisonGroup(liked[i - 1]));
+    });
     likedBody.innerHTML = likedHtml;
     likedSection.style.display = liked.length > 0 ? '' : 'none';
 
     // Render main table
     let html = '';
-    rest.forEach((r, i) => { html += buildRow(r, i); });
+    rest.forEach((r, i) => {
+      html += buildRow(r, i, i === 0 || comparisonGroup(r) !== comparisonGroup(rest[i - 1]));
+    });
     tbody.innerHTML = html;
 
     bindRowClicks();
@@ -872,7 +1141,8 @@ function getJS(): string {
     const concerns = r.concerns.map(c => '<span class="tag tag-orange">'+esc(c)+'</span>').join('');
     const dealBreakers = r.dealBreakers.map(d => '<span class="tag tag-red">'+esc(d)+'</span>').join('');
 
-    let tabTriage = '<div class="prop-info">'
+    let tabTriage = '<div class="hero-badges">' + verdictSourceBadge(r) + affordabilityBadge(r) + '</div>'
+      + '<div class="prop-info">'
       + '<div class="pi">Price: <b>' + esc(r.priceTotal) + '</b> (' + esc(r.pricePerNight) + '/n)</div>'
       + (r.poiDistanceMeters != null ? '<div class="pi">POI distance: <b>' + esc(formatPoiDistance(r.poiDistanceMeters) || '') + '</b></div>' : '')
       + (r.bedrooms != null ? '<div class="pi">Bedrooms: <b>' + r.bedrooms + '</b></div>' : '')

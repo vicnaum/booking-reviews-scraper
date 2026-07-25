@@ -386,6 +386,8 @@ export function toReviewJobState(
     checkout: job.checkout ?? null,
     adults: job.adults,
     currency: job.currency,
+    analysisBudgetAmount: job.analysisBudgetAmount ?? null,
+    analysisBudgetCurrency: job.analysisBudgetCurrency ?? null,
     filters: asJsonObject(job.filters),
     totalResults: job.totalResults,
     pagesScanned: job.pagesScanned,
@@ -486,6 +488,8 @@ export function buildReviewJobData(
     searchAreaMode?: 'window' | 'rectangle' | 'circle';
     poi?: MapPoint | null;
     prompt?: string | null;
+    analysisBudgetAmount?: number | null;
+    analysisBudgetCurrency?: string | null;
   } = { ownerKey: '' },
 ): Prisma.ReviewJobCreateInput {
   return {
@@ -505,6 +509,8 @@ export function buildReviewJobData(
     checkout: request.checkout ?? null,
     adults: request.adults ?? 2,
     currency: request.currency ?? 'USD',
+    analysisBudgetAmount: options.analysisBudgetAmount ?? null,
+    analysisBudgetCurrency: options.analysisBudgetCurrency ?? null,
     filters: buildSearchFilters(request),
     progress: 0,
   };

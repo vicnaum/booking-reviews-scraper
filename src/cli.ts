@@ -52,6 +52,30 @@ function setupProxy(opts: any): void {
   applyProxyToEnv(resolved);
 }
 
+function parseAnalysisBudget(options: {
+  budget?: unknown;
+  budgetCurrency?: unknown;
+}) {
+  if (options.budget == null) return undefined;
+  const amount = Number(options.budget);
+  const currency =
+    typeof options.budgetCurrency === 'string'
+      ? options.budgetCurrency.trim().toUpperCase()
+      : 'USD';
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error('--budget must be a positive full-stay amount.');
+  }
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    throw new Error('--budget-currency must be a three-letter currency code.');
+  }
+  return {
+    amount,
+    currency,
+    basis: 'stay' as const,
+    source: 'explicit' as const,
+  };
+}
+
 // --- Default command: single URL ---
 // Both platforms: fetches listing details by default
 program
@@ -404,6 +428,8 @@ program
   .option('--triage', 'Run AI triage (grade listings against priorities)')
   .option('--model <model>', 'LLM model for AI phases (default: gemini-3-flash-preview:high)')
   .option('--priorities <text>', 'Guest priorities for AI analysis (e.g. "quiet, fresh air")')
+  .option('--budget <amount>', 'Maximum analysis budget for the full stay')
+  .option('--budget-currency <code>', 'Analysis budget currency (default: USD)', 'USD')
   .option('--max-ai-reviews <n>', 'Maximum post-filter reviews sent to AI per listing (default: 250)')
   .option('--checkin <date>', 'Check-in date (YYYY-MM-DD)')
   .option('--checkout <date>', 'Check-out date (YYYY-MM-DD)')
@@ -437,6 +463,7 @@ program
       triage: hasPhaseFlag ? !!cmdOpts.triage : true,
       aiModel: cmdOpts.model || undefined,
       aiPriorities: cmdOpts.priorities || undefined,
+      analysisBudget: parseAnalysisBudget(cmdOpts),
       aiReviewLimit: cmdOpts.maxAiReviews == null ? undefined : Number(cmdOpts.maxAiReviews),
       aiReviewsExplicit: !!cmdOpts.aiReviews,
       aiPhotosExplicit: !!cmdOpts.aiPhotos,
@@ -532,6 +559,9 @@ program
   .option('--ai-photos <file>', 'AI photo analysis JSON')
   .option('--model <model>', 'LLM model (default: gemini-3-flash-preview:high)')
   .option('--priorities <text>', 'Guest requirements to evaluate against')
+  .option('--temperature <n>', 'Evidence-classification temperature (default: 0)', '0')
+  .option('--budget <amount>', 'Maximum analysis budget for the full stay')
+  .option('--budget-currency <code>', 'Analysis budget currency (default: USD)', 'USD')
   .action(async (listingFile: string, cmdOpts: any) => {
     // Load .env for GEMINI_API_KEY
     try { await import('dotenv/config'); } catch {}
@@ -543,6 +573,8 @@ program
       aiPhotosFile: cmdOpts.aiPhotos || undefined,
       model: cmdOpts.model || undefined,
       priorities: cmdOpts.priorities || undefined,
+      temperature: Number(cmdOpts.temperature),
+      budget: parseAnalysisBudget(cmdOpts),
     });
     console.log(JSON.stringify(result.data, null, 2));
   });

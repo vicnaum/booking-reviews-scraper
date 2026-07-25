@@ -109,3 +109,140 @@ test('generateReport surfaces POI distance in the report output', async () => {
 
   fs.rmSync(rootDir, { recursive: true, force: true });
 });
+
+test('generateReport ranks only the active deterministic set', async () => {
+  const rootDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'report-rubric-test-'),
+  );
+  const fixtures = [
+    {
+      id: 'ranked',
+      title: 'Comparable ranked',
+      triage: {
+        scoreSource: 'deterministic_rubric',
+        rubricVersion: '1',
+        requirementSetId: 'reqset_active',
+        rawFitScore: 60,
+        fitScore: 60,
+        tier: 'consider',
+        coverage: 1,
+        rankingStatus: 'ranked',
+      },
+    },
+    {
+      id: 'thin',
+      title: 'Thin evidence',
+      triage: {
+        scoreSource: 'deterministic_rubric',
+        rubricVersion: '1',
+        requirementSetId: 'reqset_active',
+        rawFitScore: 90,
+        fitScore: 90,
+        tier: 'top_pick',
+        coverage: 0.25,
+        rankingStatus: 'insufficient_evidence',
+      },
+    },
+    {
+      id: 'legacy',
+      title: 'Legacy high score',
+      triage: {
+        fitScore: 99,
+        tier: 'top_pick',
+      },
+    },
+  ];
+
+  try {
+    fs.mkdirSync(path.join(rootDir, 'listings'), { recursive: true });
+    fs.mkdirSync(path.join(rootDir, 'triage'), { recursive: true });
+    const listings: Record<string, unknown> = {};
+    for (const fixture of fixtures) {
+      listings[fixture.id] = {
+        platform: 'booking',
+        id: fixture.id,
+        url: `https://www.booking.com/hotel/us/${fixture.id}.html`,
+        details: {
+          status: 'fetched',
+          file: `listings/listing_${fixture.id}.json`,
+        },
+        reviews: { status: 'skipped' },
+        photos: { status: 'skipped' },
+        aiReviews: { status: 'skipped' },
+        aiPhotos: { status: 'skipped' },
+        triage: {
+          status: 'fetched',
+          file: `triage/${fixture.id}.json`,
+        },
+      };
+      fs.writeFileSync(
+        path.join(rootDir, 'listings', `listing_${fixture.id}.json`),
+        JSON.stringify({
+          title: fixture.title,
+          amenities: [],
+        }),
+      );
+      fs.writeFileSync(
+        path.join(rootDir, 'triage', `${fixture.id}.json`),
+        JSON.stringify({
+          ...fixture.triage,
+          tierReason: 'Fixture verdict',
+          requirements: [],
+          scores: {},
+          bedSetup: '',
+          price: {
+            total: '',
+            perNight: '',
+            valueAssessment: 'unknown',
+          },
+          highlights: [],
+          concerns: [],
+          dealBreakers: [],
+          summary: fixture.title,
+          affordability: {
+            status: 'unknown',
+            reasonCode: 'price_missing',
+            reason: 'Price is missing for the selected stay.',
+          },
+        }),
+      );
+    }
+    fs.writeFileSync(
+      path.join(rootDir, 'batch_manifest.json'),
+      JSON.stringify({
+        version: 2,
+        createdAt: '2026-07-25T00:00:00.000Z',
+        updatedAt: '2026-07-25T00:00:00.000Z',
+        dates: {},
+        listings,
+      }),
+    );
+
+    const outputFile = await generateReport({ outputDir: rootDir });
+    const html = fs.readFileSync(outputFile, 'utf-8');
+    const dataStart = html.indexOf('const DATA = ') + 'const DATA = '.length;
+    const dataEnd = html.indexOf(';\nconst INITIAL_PICKS', dataStart);
+    const reportRows = JSON.parse(html.slice(dataStart, dataEnd));
+    assert.deepEqual(
+      reportRows.map((row: { id: string }) => row.id),
+      ['ranked', 'thin', 'legacy'],
+    );
+
+    const heroStart = html.indexOf('<!-- TOP PICKS -->');
+    const heroEnd = html.indexOf('<!-- TIER FILTERS -->', heroStart);
+    const heroHtml = html.slice(heroStart, heroEnd);
+    assert.match(heroHtml, /Comparable ranked/);
+    assert.doesNotMatch(heroHtml, /Thin evidence/);
+    assert.doesNotMatch(heroHtml, /Legacy high score/);
+    assert.match(
+      html,
+      /1 insufficient-evidence and 1 legacy\/stale verdicts/,
+    );
+    assert.match(
+      html,
+      /Budget unknown · Price is missing for the selected stay\./,
+    );
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
