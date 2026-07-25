@@ -18,8 +18,20 @@ import {
   type ParsedAnalysisBudget,
   type RequirementAssessmentInput,
 } from './triage-rubric.js';
+import {
+  LEGACY_TRIAGE_CLASSIFIER_VERSION,
+  TRIAGE_CLASSIFIER_VERSION,
+  type TriageClassifierVersion,
+} from './triage-comparability.js';
 
 // --- Types ---
+
+export interface TriageStayContext {
+  checkIn?: string;
+  checkOut?: string;
+  adults?: number;
+  destination?: string;
+}
 
 export interface TriageOptions {
   listingFile: string;       // Path to listing JSON
@@ -32,6 +44,9 @@ export interface TriageOptions {
   budget?: AffordabilityBudget;
   price?: ComparableStayPrice;
   priceFreshness?: ComparableStayPrice['freshness'];
+  stayContext?: TriageStayContext;
+  /** Evaluation/backfill only. Product calls always use the current policy. */
+  classifierVersion?: TriageClassifierVersion;
 }
 
 export const TRIAGE_EVIDENCE_GAP_ORDER = [
@@ -53,6 +68,8 @@ export interface TriageResult {
   data: any;                 // Parsed triage JSON
   model: string;
   provider: LLMProvider;
+  classifierVersion: TriageClassifierVersion;
+  modelId: string;
   requirementSet: CanonicalRequirementSet;
   evidenceGaps: TriageEvidenceGap[];
   tokensUsed?: number;
@@ -102,7 +119,19 @@ const REQUIREMENT_PARSE_SYSTEM_PROMPT = `Convert one guest brief into a canonica
 - Normalize currency to an ISO 4217 code when the brief makes it clear.
 - Do not inflate the maximum for "slightly over is acceptable"; overage is shown separately.`;
 
-const TRIAGE_SYSTEM_PROMPT = `You are a property evidence classifier helping a specific guest compare rentals. The user message supplies a frozen canonical requirement set. Classify exactly those requirement IDs; never parse, merge, split, rename, reorder, reweight, or add requirements.
+const TRIAGE_REQUIREMENT_RULES_V1 = `## Requirement Evaluation Rules
+1. Return one outcome for every supplied requirement ID.
+2. For each requirement, determine status:
+   - **met**: Clear evidence it's satisfied
+   - **partial**: Partially satisfied or with caveats
+   - **unmet**: Clear evidence it's NOT satisfied
+   - **unknown**: Insufficient data to determine
+3. Be conservative: prefer "unknown" over "unmet" when data is insufficient. Never assume the worst.
+4. Confidence describes evidence strength, not how important the requirement is.
+5. Include the strongest supporting and contradicting evidence. Use exact, concise evidence text from the supplied artifacts when possible.
+6. Frequency and years are evidence metadata only; omit them when unavailable.`;
+
+export const TRIAGE_CLASSIFIER_PROMPT_V1 = `You are a property evidence classifier helping a specific guest compare rentals. The user message supplies a frozen canonical requirement set. Classify exactly those requirement IDs; never parse, merge, split, rename, reorder, reweight, or add requirements.
 
 You have three data sources for each listing:
 
@@ -118,17 +147,7 @@ You have three data sources for each listing:
 - The user message names any missing evidence layers. Never infer facts from a missing layer.
 - Mark requirements that depend only on missing evidence as unknown, and state the limitation in the tier reason and summary.
 
-## Requirement Evaluation Rules
-1. Return one outcome for every supplied requirement ID.
-2. For each requirement, determine status:
-   - **met**: Clear evidence it's satisfied
-   - **partial**: Partially satisfied or with caveats
-   - **unmet**: Clear evidence it's NOT satisfied
-   - **unknown**: Insufficient data to determine
-3. Be conservative: prefer "unknown" over "unmet" when data is insufficient. Never assume the worst.
-4. Confidence describes evidence strength, not how important the requirement is.
-5. Include the strongest supporting and contradicting evidence. Use exact, concise evidence text from the supplied artifacts when possible.
-6. Frequency and years are evidence metadata only; omit them when unavailable.
+${TRIAGE_REQUIREMENT_RULES_V1}
 
 ## Verdict boundary
 - Do not output fitScore, tier, weights, requirement types, caps, or requirement definitions.
@@ -142,6 +161,44 @@ You have three data sources for each listing:
 - **dealBreakers**: Confirmed evidence that makes a weight-3-or-higher requirement fail.
 - **summary**: 2-3 sentences — would you recommend this to this specific guest? Why or why not?
 - **price.valueAssessment**: Compare price to quality/location/amenities. "unknown" if no price data.`;
+
+const TRIAGE_REQUIREMENT_RULES_V2 = `## Requirement Evaluation Rules
+1. Return one outcome for every supplied requirement ID.
+2. Evaluate the factual fit of the supplied criteria. Requirement importance affects neither status nor confidence.
+3. Use these mutually exclusive status boundaries:
+   - **met**: Clear relevant evidence that the requirement is satisfied, with no material contradictory evidence.
+   - **partial**: Evidence is genuinely mixed, or a failure is bounded and conditional in a way this guest can avoid through a specific, verifiable choice that the supplied evidence says is available for this stay. A generic hope of getting a better room is not enough.
+   - **unmet**: Credible actual evidence shows the requirement fails. Use unmet for a recurring pattern affecting a meaningful share of guests, a severe confirmed failure directly matching the requirement, or a failure whose only mitigation defeats the requirement or is incompatible with the supplied stay context. A majority of reviews is not required.
+   - **unknown**: There is no relevant evidence, the relevant layer is missing, or the evidence is too vague to distinguish met from failure.
+4. Turning off a needed system, tolerating the problem, or asking staff without evidence of an available problem-free option is not guest-controlled avoidance.
+5. Apply stay context only to the relevance of evidence and mitigations. Use the supplied dates, destination, stay length, and guest count; do not invent live weather, inventory, room assignments, or provider policies.
+6. Be conservative about absence of evidence: prefer unknown over unmet when no failure is shown. Do not dilute credible recurring or severe failure evidence to partial merely because some positive evidence also exists.
+7. Confidence describes evidence strength, not how important the requirement is.
+8. Include the strongest supporting and contradicting evidence. Use exact, concise evidence text from the supplied artifacts when possible.
+9. Frequency and years are evidence metadata only; omit them when unavailable.
+
+## Boundary examples from the frozen NYC analyses
+- Candlewood Suites, Quiet Environment, 13 nights spanning July/August: 42 of 250 reviews report an excessively loud HVAC that prevents sleep, and guests avoid it only by turning it off. High-floor street-noise relief does not fix the HVAC failure. Classify **unmet/high**.
+- Club Quarters, Blackout Conditions: rooms have Roman shades that may leak at the edges, while many courtyard rooms are naturally dark. The same setup provides real darkness with a bounded caveat rather than a recurring confirmed sleep failure. Classify **partial/medium**.
+- The Michelangelo, Bed Comfort: the platform comfort sub-rating is 8.9, while 8 of 205 recent reviews report sagging or broken-coil mattresses. Strong positive aggregate evidence and a material but minority room-dependent failure are genuinely mixed. Classify **partial/high**.`;
+
+export const TRIAGE_CLASSIFIER_PROMPT_V2 =
+  TRIAGE_CLASSIFIER_PROMPT_V1.replace(
+    TRIAGE_REQUIREMENT_RULES_V1,
+    TRIAGE_REQUIREMENT_RULES_V2,
+  );
+
+export function getTriageClassifierPrompt(
+  version: TriageClassifierVersion,
+): string {
+  if (version === LEGACY_TRIAGE_CLASSIFIER_VERSION) {
+    return TRIAGE_CLASSIFIER_PROMPT_V1;
+  }
+  if (version === TRIAGE_CLASSIFIER_VERSION) {
+    return TRIAGE_CLASSIFIER_PROMPT_V2;
+  }
+  throw new Error(`Unsupported triage classifier version: ${String(version)}`);
+}
 
 // --- JSON response schema for Gemini structured output ---
 
@@ -309,6 +366,66 @@ function trimListingData(listing: any): any {
   }
 
   return trimmed;
+}
+
+export interface NormalizedTriageStayContext {
+  checkIn: string | null;
+  checkOut: string | null;
+  nights: number | null;
+  adults: number | null;
+  destination: string | null;
+}
+
+function optionalText(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0
+    ? value.trim()
+    : null;
+}
+
+function listingDestination(listing: any): string | null {
+  const address = listing?.address;
+  if (typeof address === 'string') return optionalText(address);
+  if (!address || typeof address !== 'object' || Array.isArray(address)) {
+    return null;
+  }
+  return (
+    optionalText(address.full)
+    ?? optionalText(address.city)
+    ?? optionalText(address.region)
+    ?? optionalText(address.country)
+  );
+}
+
+export function normalizeTriageStayContext(
+  input: TriageStayContext | undefined,
+  listing: any,
+): NormalizedTriageStayContext {
+  const checkIn = optionalText(input?.checkIn);
+  const checkOut = optionalText(input?.checkOut);
+  const checkInMs = checkIn ? Date.parse(`${checkIn}T00:00:00Z`) : Number.NaN;
+  const checkOutMs = checkOut ? Date.parse(`${checkOut}T00:00:00Z`) : Number.NaN;
+  const nights =
+    Number.isFinite(checkInMs)
+    && Number.isFinite(checkOutMs)
+    && checkOutMs > checkInMs
+      ? Math.round((checkOutMs - checkInMs) / (24 * 60 * 60 * 1000))
+      : null;
+  const adults =
+    typeof input?.adults === 'number'
+    && Number.isFinite(input.adults)
+    && input.adults > 0
+      ? Math.floor(input.adults)
+      : null;
+
+  return {
+    checkIn,
+    checkOut,
+    nights,
+    adults,
+    destination:
+      optionalText(input?.destination)
+      ?? listingDestination(listing),
+  };
 }
 
 // --- Gemini text call ---
@@ -705,6 +822,9 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
   const { listingFile, aiReviewsFile, aiPhotosFile, priorities } = options;
   const modelStr = options.model || process.env.LLM_MODEL || 'gemini-3-flash-preview:high';
   const temperature = options.temperature ?? 0;
+  const classifierVersion =
+    options.classifierVersion ?? TRIAGE_CLASSIFIER_VERSION;
+  const classifierPrompt = getTriageClassifierPrompt(classifierVersion);
   if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
     throw new Error('Triage temperature must be between 0 and 2.');
   }
@@ -714,6 +834,11 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
   if (modelConfig.provider !== 'gemini') {
     throw new Error(`Triage currently only supports Gemini models (got: ${modelConfig.provider}/${modelConfig.model}).`);
   }
+  const modelId = [
+    modelConfig.provider,
+    modelConfig.model,
+    modelConfig.thinkingLevel || 'default',
+  ].join(':');
 
   const apiKey = getProviderApiKey(modelConfig.provider);
   if (!apiKey) {
@@ -728,6 +853,10 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
   }
   const listingData = JSON.parse(fs.readFileSync(listingPath, 'utf-8'));
   const trimmedListing = trimListingData(listingData);
+  const stayContext = normalizeTriageStayContext(
+    options.stayContext,
+    listingData,
+  );
   const evidenceGaps: TriageEvidenceGap[] = [];
 
   // 3. Read AI reviews (optional)
@@ -792,6 +921,10 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
   );
   sections.push('');
 
+  sections.push('## Stay Context');
+  sections.push(JSON.stringify(stayContext, null, 2));
+  sections.push('');
+
   sections.push('## Listing Details');
   sections.push(JSON.stringify(trimmedListing, null, 2));
   sections.push('');
@@ -813,13 +946,14 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
   console.error(`Triage: ${listingData.title || listingData.id || listingFile}`);
   console.error(`Model: ${modelConfig.model}${modelConfig.thinkingLevel ? `:${modelConfig.thinkingLevel}` : ''}`);
   console.error(`Requirement set: ${requirementSet.id}`);
+  console.error(`Classifier policy: ${classifierVersion}`);
   console.error(`Classification temperature: ${temperature}`);
 
   const result = await callGeminiTriage(
     ai,
     modelConfig.model,
     modelConfig.thinkingLevel,
-    TRIAGE_SYSTEM_PROMPT,
+    classifierPrompt,
     userMessage,
     TRIAGE_JSON_SCHEMA,
     'triage',
@@ -865,8 +999,11 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
   const triageData = {
     ...parsed,
     ...score,
+    classifierVersion,
+    modelId,
     tierReason: deterministicTierReason(score),
     requirementSet,
+    stayContext,
     affordability,
     evidenceGaps: normalizedEvidenceGaps,
   };
@@ -894,6 +1031,8 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
     data: triageData,
     model: modelConfig.model,
     provider: modelConfig.provider,
+    classifierVersion,
+    modelId,
     requirementSet,
     evidenceGaps: normalizedEvidenceGaps,
     tokensUsed: usage.inputTokens,
@@ -906,7 +1045,7 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
 async function main() {
   const args = process.argv.slice(2);
   if (args.length === 0) {
-    console.error('Usage: triage <listing-file> [--ai-reviews <file>] [--ai-photos <file>] [--model <model>] [--priorities <text>] [--temperature <n>] [--budget <amount>] [--budget-currency <code>]');
+    console.error('Usage: triage <listing-file> [--ai-reviews <file>] [--ai-photos <file>] [--model <model>] [--priorities <text>] [--temperature <n>] [--budget <amount>] [--budget-currency <code>] [--checkin <date>] [--checkout <date>] [--adults <n>] [--destination <text>]');
     process.exit(1);
   }
 
@@ -921,6 +1060,10 @@ async function main() {
   let temperature = 0;
   let budgetAmount: number | undefined;
   let budgetCurrency = 'USD';
+  let checkIn: string | undefined;
+  let checkOut: string | undefined;
+  let adults: number | undefined;
+  let destination: string | undefined;
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === '--ai-reviews' && args[i + 1]) { aiReviewsFile = args[++i]; }
@@ -930,6 +1073,10 @@ async function main() {
     else if (args[i] === '--temperature' && args[i + 1]) { temperature = Number(args[++i]); }
     else if (args[i] === '--budget' && args[i + 1]) { budgetAmount = Number(args[++i]); }
     else if (args[i] === '--budget-currency' && args[i + 1]) { budgetCurrency = args[++i].toUpperCase(); }
+    else if (args[i] === '--checkin' && args[i + 1]) { checkIn = args[++i]; }
+    else if (args[i] === '--checkout' && args[i + 1]) { checkOut = args[++i]; }
+    else if (args[i] === '--adults' && args[i + 1]) { adults = Number(args[++i]); }
+    else if (args[i] === '--destination' && args[i + 1]) { destination = args[++i]; }
   }
 
   const budget =
@@ -949,6 +1096,12 @@ async function main() {
     priorities,
     temperature,
     budget,
+    stayContext: {
+      checkIn,
+      checkOut,
+      adults,
+      destination,
+    },
   });
   console.log(JSON.stringify(result.data, null, 2));
 }

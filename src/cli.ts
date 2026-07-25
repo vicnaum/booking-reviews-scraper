@@ -562,6 +562,10 @@ program
   .option('--temperature <n>', 'Evidence-classification temperature (default: 0)', '0')
   .option('--budget <amount>', 'Maximum analysis budget for the full stay')
   .option('--budget-currency <code>', 'Analysis budget currency (default: USD)', 'USD')
+  .option('--checkin <date>', 'Stay check-in date (YYYY-MM-DD)')
+  .option('--checkout <date>', 'Stay check-out date (YYYY-MM-DD)')
+  .option('--adults <n>', 'Number of adults')
+  .option('--destination <text>', 'Stay destination when listing address is unavailable')
   .action(async (listingFile: string, cmdOpts: any) => {
     // Load .env for GEMINI_API_KEY
     try { await import('dotenv/config'); } catch {}
@@ -575,6 +579,13 @@ program
       priorities: cmdOpts.priorities || undefined,
       temperature: Number(cmdOpts.temperature),
       budget: parseAnalysisBudget(cmdOpts),
+      stayContext: {
+        checkIn: cmdOpts.checkin || undefined,
+        checkOut: cmdOpts.checkout || undefined,
+        adults:
+          cmdOpts.adults == null ? undefined : Number(cmdOpts.adults),
+        destination: cmdOpts.destination || undefined,
+      },
     });
     console.log(JSON.stringify(result.data, null, 2));
   });

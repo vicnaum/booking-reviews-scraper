@@ -1,0 +1,190 @@
+{
+  "issue": 69,
+  "sourceIssue": 62,
+  "description": "Hand-adjudicated requirement outcomes from the three frozen NYC analyses used for the issue 62 stability measurement.",
+  "stayContext": {
+    "checkIn": "2026-07-29",
+    "checkOut": "2026-08-11",
+    "adults": 2,
+    "destination": "New York City, USA"
+  },
+  "requirementSet": {
+    "id": "reqset_6b9344b3d4089e4bcad6",
+    "sha256": "cdd51f10fc77835a1496f55fbcc5d84375e1e474a144ebe2ee947bbb2c64cca5"
+  },
+  "listings": [
+    {
+      "slug": "candlewood-suites-new-york-city",
+      "label": "Candlewood Suites",
+      "inputSha256": {
+        "listing": "9a42c0a2fc34309e9b153163f37eacaa29cd651dc8ff748027e440f5814f21b1",
+        "reviews": "d59049edc43c1e2da8b786b868504ef6f2990c125d8e1eb533b8a6628cb1b0dd",
+        "photos": "0b4572f4718fab6897bad4ac44770d803a02e65b3d9a371cc575693417cab296"
+      },
+      "labels": [
+        {
+          "requirementId": "req-01-quiet-environment",
+          "expectedStatus": "unmet",
+          "boundaryCase": true,
+          "rationale": "Recurring HVAC noise prevents sleep for 42 of 250 reviewers. Turning climate control off is not a usable mitigation for this 13-night July/August stay.",
+          "evidence": [
+            "The heater/AC combo was VERY noisy and I couldn't sleep with the heater on.",
+            "AC unit makes a lot of noise when turning on, so we kept it off all stay."
+          ]
+        },
+        {
+          "requirementId": "req-02-bed-comfort",
+          "expectedStatus": "met",
+          "boundaryCase": false,
+          "rationale": "Beds receive strong, repeated praise without material contradictory evidence.",
+          "evidence": [
+            "Beds are widely praised as very comfortable and '1000/10'."
+          ]
+        },
+        {
+          "requirementId": "req-03-blackout-conditions",
+          "expectedStatus": "met",
+          "boundaryCase": false,
+          "rationale": "The photo analysis directly identifies blackout curtains.",
+          "evidence": [
+            "blackout curtains are present"
+          ]
+        },
+        {
+          "requirementId": "req-04-walkable-location",
+          "expectedStatus": "met",
+          "boundaryCase": false,
+          "rationale": "The listing and 210 of 250 review summary both establish walkability.",
+          "evidence": [
+            "Excellent location for visiting tourist attractions. Everything is walkable."
+          ]
+        },
+        {
+          "requirementId": "req-05-in-room-workspace",
+          "expectedStatus": "met",
+          "boundaryCase": false,
+          "rationale": "Details and photos show a large dedicated desk with an ergonomic chair.",
+          "evidence": [
+            "Excellent in-room workspace with ergonomic chairs."
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "club-quarters-midtown-nyc",
+      "label": "Club Quarters Midtown",
+      "inputSha256": {
+        "listing": "11b8291a020f52b4a1ad1f5cfcd9f341432d2c040e6407cd3cb7de3c2a68ab5e",
+        "reviews": "cb2cd46f41cc0f4e6cd509ee32e7c7f167bc7b328398b096a1cc1af99eecb3f3",
+        "photos": "dd084eec987e32c088c142a21af9e484a27c228c93c02fd65b6d0a8b90e1d9b9"
+      },
+      "labels": [
+        {
+          "requirementId": "req-01-quiet-environment",
+          "expectedStatus": "unmet",
+          "boundaryCase": true,
+          "rationale": "Persistent mechanical and street noise affects 68 of 250 reviews and can continue with the AC switched off.",
+          "evidence": [
+            "Constant noise from either some machinery or generator even if the AC was switched off.",
+            "It felt like trucks were passing right through the room."
+          ]
+        },
+        {
+          "requirementId": "req-02-bed-comfort",
+          "expectedStatus": "met",
+          "boundaryCase": false,
+          "rationale": "Renovated premium bedding is consistently praised.",
+          "evidence": [
+            "Mattresses are praised as 'the best'."
+          ]
+        },
+        {
+          "requirementId": "req-03-blackout-conditions",
+          "expectedStatus": "partial",
+          "boundaryCase": true,
+          "rationale": "Courtyard rooms are naturally dark, but Roman shades can leak at the edges. This is a bounded caveat rather than a recurring confirmed failure.",
+          "evidence": [
+            "Roman shades are used rather than full floor-to-ceiling blackout curtains, which may allow light leakage at the edges.",
+            "Windows were facing the building's inner courtyard... spent the entire stay without natural daylight."
+          ]
+        },
+        {
+          "requirementId": "req-04-walkable-location",
+          "expectedStatus": "met",
+          "boundaryCase": false,
+          "rationale": "The location is repeatedly described as walkable to Midtown attractions.",
+          "evidence": [
+            "Location is amazing. We almost walked everywhere."
+          ]
+        },
+        {
+          "requirementId": "req-05-in-room-workspace",
+          "expectedStatus": "met",
+          "boundaryCase": false,
+          "rationale": "Every shown room has a dedicated desk and ergonomic task chair.",
+          "evidence": [
+            "True ergonomic workspaces with leather rolling chairs in every room."
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "the-michelangelo",
+      "label": "The Michelangelo",
+      "inputSha256": {
+        "listing": "0d13115670d8e770368b5dd7fe3b513ebd483bbc4ad3750284a7a68c2254af25",
+        "reviews": "92e25997b04277044d8271d158c41c4cbc0a67db76f63e6eee9407c4bef1d16a",
+        "photos": "a362c9c1fbbfcbdd2de458590b008d3384803e7ac492a6575306ab0448d3573e"
+      },
+      "labels": [
+        {
+          "requirementId": "req-01-quiet-environment",
+          "expectedStatus": "unmet",
+          "boundaryCase": true,
+          "rationale": "Current reviews contain recurring tractor-like HVAC and mechanical noise that can continue while heating is off. Older quiet-room praise does not make that failure avoidable for this stay.",
+          "evidence": [
+            "When you turn it on, it sounds like a tractor.",
+            "Heating made exceptionally loud noise in the evening whilst even when it was off, it was still whistling."
+          ]
+        },
+        {
+          "requirementId": "req-02-bed-comfort",
+          "expectedStatus": "partial",
+          "boundaryCase": true,
+          "rationale": "The 8.9 comfort rating is positive, while 8 of 205 recent reviews identify sagging or broken-coil mattresses. The evidence is genuinely mixed rather than a dominant recurring failure.",
+          "evidence": [
+            "Mattresses had indentations (they were sagging and had dips), which caused me back pain.",
+            "Comfort sub-rating: 8.9."
+          ]
+        },
+        {
+          "requirementId": "req-03-blackout-conditions",
+          "expectedStatus": "met",
+          "boundaryCase": false,
+          "rationale": "Heavy floor-to-ceiling blackout drapes and naturally dark interior rooms directly support the requirement.",
+          "evidence": [
+            "High-quality blackout curtains for sleep quality."
+          ]
+        },
+        {
+          "requirementId": "req-04-walkable-location",
+          "expectedStatus": "met",
+          "boundaryCase": false,
+          "rationale": "The 9.5 location sub-rating and repeated five-minute-walk evidence are clear.",
+          "evidence": [
+            "5-minute walk to Hamilton and Wicked's theaters."
+          ]
+        },
+        {
+          "requirementId": "req-05-in-room-workspace",
+          "expectedStatus": "met",
+          "boundaryCase": false,
+          "rationale": "Details and every bedroom photo show a dedicated desk with seating.",
+          "evidence": [
+            "Every bedroom photo includes a dedicated desk with lighting and an upholstered chair."
+          ]
+        }
+      ]
+    }
+  ]
+}

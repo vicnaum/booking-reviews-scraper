@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
+import { TRIAGE_RUBRIC_VERSION } from './triage-comparability.js';
 
-export const TRIAGE_RUBRIC_VERSION = '1';
+export { TRIAGE_RUBRIC_VERSION } from './triage-comparability.js';
 export const REQUIREMENT_SCHEMA_VERSION = '1';
 export const MIN_RANKED_COVERAGE = 0.5;
 

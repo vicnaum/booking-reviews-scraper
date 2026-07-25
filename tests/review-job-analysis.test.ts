@@ -284,6 +284,43 @@ test('prepareReviewJobRunWorkspace stages a fresh rerun with AI outputs invalida
       fs.existsSync(path.join(staged.rootDir, 'reviews', 'room_12345_reviews.json')),
       true,
     );
+
+    const regrade = prepareReviewJobRunWorkspace({
+      jobId,
+      runId: 'run_2',
+      previousArtifactRoot: sourceRoot,
+      listings: [
+        {
+          platform: 'airbnb',
+          url: 'https://www.airbnb.com/rooms/12345',
+        },
+      ],
+      dates: {
+        checkIn: '2026-03-20',
+        checkOut: '2026-03-29',
+        adults: 4,
+      },
+      mode: 'triage',
+    });
+    const regradeManifest = readJsonFile<AnalysisManifest>(
+      getManifestPathFromRoot(regrade.rootDir),
+    );
+    assert.ok(regradeManifest);
+    assert.equal(regradeManifest.listings.keep.aiReviews.status, 'fetched');
+    assert.equal(regradeManifest.listings.keep.aiPhotos.status, 'fetched');
+    assert.equal(regradeManifest.listings.keep.triage.status, 'not_requested');
+    assert.equal(
+      fs.existsSync(path.join(regrade.rootDir, 'ai-reviews', '12345.json')),
+      true,
+    );
+    assert.equal(
+      fs.existsSync(path.join(regrade.rootDir, 'ai-photos', '12345.json')),
+      true,
+    );
+    assert.equal(
+      fs.existsSync(path.join(regrade.rootDir, 'triage', '12345.json')),
+      false,
+    );
   } finally {
     if (previousArtifactDir == null) {
       delete process.env[REVIEW_JOB_ARTIFACT_DIR_ENV];

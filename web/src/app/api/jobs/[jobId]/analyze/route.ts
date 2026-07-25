@@ -9,9 +9,11 @@ interface Params {
   params: Promise<{ jobId: string }>;
 }
 
-export async function POST(_request: Request, { params }: Params) {
+export async function POST(request: Request, { params }: Params) {
   const { jobId } = await params;
   const ownerKey = await getReviewJobOwnerKey();
+  const body = await request.json().catch(() => ({}));
+  const mode = body?.mode === 'triage' ? 'triage' : 'full';
 
   if (!ownerKey) {
     return NextResponse.json({ error: 'Review job not found' }, { status: 404 });
@@ -55,7 +57,14 @@ export async function POST(_request: Request, { params }: Params) {
     );
   }
 
-  const queueJob = await enqueueReviewJobAnalysis(jobId);
+  if (mode === 'triage' && !job.artifactRoot) {
+    return NextResponse.json(
+      { error: 'Saved analysis artifacts are required for a triage-only regrade' },
+      { status: 409 },
+    );
+  }
+
+  const queueJob = await enqueueReviewJobAnalysis(jobId, mode);
 
   await prisma.reviewJob.update({
     where: { id: jobId },
@@ -72,5 +81,6 @@ export async function POST(_request: Request, { params }: Params) {
     jobId,
     status: 'queued',
     analysisStatus: 'pending',
+    mode,
   });
 }

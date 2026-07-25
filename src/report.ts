@@ -5,6 +5,11 @@
 
 import { readFileSync, writeFileSync, readdirSync, existsSync } from 'fs';
 import { join, resolve } from 'path';
+import {
+  getCurrentTriageComparability,
+  getTriageComparabilityKey,
+  type TriageComparabilityDescriptor,
+} from './triage-comparability.js';
 
 export interface ReportOptions {
   outputDir: string;
@@ -26,6 +31,8 @@ interface TriageData {
   scoreSource?: string;
   rubricVersion?: string;
   requirementSetId?: string;
+  classifierVersion?: string;
+  modelId?: string;
   rawFitScore?: number;
   fitScore: number;
   tier: string;
@@ -65,6 +72,9 @@ interface ListingRow {
   scoreSource: 'deterministic_rubric' | 'model_legacy';
   rubricVersion: string | null;
   requirementSetId: string | null;
+  classifierVersion: string | null;
+  modelId: string | null;
+  comparabilityKey: string | null;
   rankingStatus: 'ranked' | 'insufficient_evidence' | 'legacy_unranked';
   coverage: number | null;
   rawFitScore: number | null;
@@ -271,6 +281,20 @@ export async function generateReport(options: ReportOptions): Promise<string> {
         : 'model_legacy',
       rubricVersion: deterministic ? triage.rubricVersion! : null,
       requirementSetId: deterministic ? triage.requirementSetId! : null,
+      classifierVersion:
+        deterministic && typeof triage.classifierVersion === 'string'
+          ? triage.classifierVersion
+          : null,
+      modelId:
+        typeof triage.modelId === 'string' ? triage.modelId : null,
+      comparabilityKey:
+        deterministic
+          ? getTriageComparabilityKey({
+              rubricVersion: triage.rubricVersion,
+              requirementSetId: triage.requirementSetId,
+              classifierVersion: triage.classifierVersion,
+            })
+          : null,
       rankingStatus,
       coverage,
       rawFitScore:
@@ -325,16 +349,16 @@ export async function generateReport(options: ReportOptions): Promise<string> {
     });
   }
 
-  const activeRequirementSetId = getActiveRequirementSetId(rows);
+  const activeTriageComparison = getActiveTriageComparison(rows);
   rows.sort((a, b) => {
-    if (activeRequirementSetId) {
+    if (activeTriageComparison) {
       const groupA = getReportComparisonGroup(
         a,
-        activeRequirementSetId,
+        activeTriageComparison,
       );
       const groupB = getReportComparisonGroup(
         b,
-        activeRequirementSetId,
+        activeTriageComparison,
       );
       if (groupA !== groupB) return groupA - groupB;
       if (groupA !== 0) return a.sourceOrder - b.sourceOrder;
@@ -396,7 +420,9 @@ function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function getActiveRequirementSetId(rows: ListingRow[]): string | null {
+function getActiveTriageComparison(
+  rows: ListingRow[],
+): TriageComparabilityDescriptor | null {
   const counts = new Map<string, { count: number; first: number }>();
   for (const row of rows) {
     if (
@@ -411,7 +437,7 @@ function getActiveRequirementSetId(rows: ListingRow[]): string | null {
       first: current?.first ?? row.sourceOrder,
     });
   }
-  return (
+  const requirementSetId = (
     [...counts.entries()]
       .sort(
         (a, b) =>
@@ -419,24 +445,29 @@ function getActiveRequirementSetId(rows: ListingRow[]): string | null {
       )[0]?.[0]
     ?? null
   );
+  return requirementSetId
+    ? getCurrentTriageComparability(requirementSetId)
+    : null;
 }
 
 function getReportComparisonGroup(
   row: ListingRow,
-  activeRequirementSetId: string | null,
+  activeComparison: TriageComparabilityDescriptor | null,
 ): number {
-  if (!activeRequirementSetId) return 0;
+  if (!activeComparison) return 0;
+  if (row.scoreSource === 'model_legacy') return 3;
+  if (row.requirementSetId !== activeComparison.requirementSetId) return 3;
+  if (row.comparabilityKey !== activeComparison.key) return 2;
   if (
     row.scoreSource === 'deterministic_rubric'
-    && row.requirementSetId === activeRequirementSetId
+    && row.comparabilityKey === activeComparison.key
   ) {
     return row.rankingStatus === 'insufficient_evidence' ? 1 : 0;
   }
-  return 2;
+  return 3;
 }
 
 function buildHTML(rows: ListingRow[], dates?: { checkIn: string; checkOut: string; adults: number }, picks?: { liked: string[]; hidden: string[] }): string {
-  const dataJSON = JSON.stringify(rows);
   const picksJSON = JSON.stringify(picks || { liked: [], hidden: [] });
   const poiRow = rows.find((row) => row.poiLat != null && row.poiLng != null);
   const poiJSON = JSON.stringify(
@@ -444,23 +475,37 @@ function buildHTML(rows: ListingRow[], dates?: { checkIn: string; checkOut: stri
   );
   const tierOrder = ['top_pick', 'shortlist', 'consider', 'unlikely', 'no_go'];
   const tierCounts: Record<string, number> = {};
-  const activeRequirementSetId = getActiveRequirementSetId(rows);
-  const comparableRows = activeRequirementSetId
+  const activeTriageComparison = getActiveTriageComparison(rows);
+  const reportRows = rows.map((row) => ({
+    ...row,
+    comparisonGroup: getReportComparisonGroup(
+      row,
+      activeTriageComparison,
+    ),
+  }));
+  const dataJSON = JSON.stringify(reportRows);
+  const comparableRows = activeTriageComparison
     ? rows.filter(
         (row) =>
-          getReportComparisonGroup(row, activeRequirementSetId) === 0,
+          getReportComparisonGroup(row, activeTriageComparison) === 0,
       )
     : rows;
-  const insufficientCount = activeRequirementSetId
+  const insufficientCount = activeTriageComparison
     ? rows.filter(
         (row) =>
-          getReportComparisonGroup(row, activeRequirementSetId) === 1,
+          getReportComparisonGroup(row, activeTriageComparison) === 1,
       ).length
     : 0;
-  const legacyOrStaleCount = activeRequirementSetId
+  const olderPolicyCount = activeTriageComparison
     ? rows.filter(
         (row) =>
-          getReportComparisonGroup(row, activeRequirementSetId) === 2,
+          getReportComparisonGroup(row, activeTriageComparison) === 2,
+      ).length
+    : 0;
+  const legacyOrStaleCount = activeTriageComparison
+    ? rows.filter(
+        (row) =>
+          getReportComparisonGroup(row, activeTriageComparison) === 3,
       ).length
     : 0;
   for (const t of tierOrder) tierCounts[t] = 0;
@@ -492,8 +537,8 @@ ${getCSS()}
 <header>
   <h1>Listing Report</h1>
   <p class="subtitle">${rows.length} listings triaged${dateLabel ? ` · ${esc(dateLabel)}` : ''}</p>
-  ${activeRequirementSetId && (insufficientCount > 0 || legacyOrStaleCount > 0)
-    ? `<p class="subtitle">${insufficientCount} insufficient-evidence and ${legacyOrStaleCount} legacy/stale verdicts are shown outside the peer ranking.</p>`
+  ${activeTriageComparison && (insufficientCount > 0 || olderPolicyCount > 0 || legacyOrStaleCount > 0)
+    ? `<p class="subtitle">${insufficientCount} insufficient-evidence, ${olderPolicyCount} older-policy, and ${legacyOrStaleCount} legacy/stale-set verdicts are shown outside the peer ranking.</p>`
     : ''}
 </header>
 
@@ -501,7 +546,7 @@ ${getCSS()}
 <section id="top-picks">
   <h2>Top Picks</h2>
   <div class="hero-grid">
-${heroRows.map(r => heroCard(r, activeRequirementSetId)).join('\n')}
+${heroRows.map(r => heroCard(r, activeTriageComparison)).join('\n')}
   </div>
 </section>
 
@@ -593,13 +638,16 @@ ${getJS()}
 
 function reportVerdictBadges(
   row: ListingRow,
-  activeRequirementSetId: string | null,
+  activeComparison: TriageComparabilityDescriptor | null,
 ): string {
-  const group = getReportComparisonGroup(row, activeRequirementSetId);
+  const group = getReportComparisonGroup(row, activeComparison);
   if (row.scoreSource === 'model_legacy') {
     return '<span class="source-badge source-legacy">Legacy AI score</span>';
   }
   if (group === 2) {
+    return '<span class="source-badge source-unranked">Older classifier policy</span>';
+  }
+  if (group === 3) {
     return '<span class="source-badge source-unranked">Stale requirement set</span>';
   }
   if (group === 1) {
@@ -628,7 +676,7 @@ function reportAffordabilityBadge(row: ListingRow): string {
 
 function heroCard(
   r: ListingRow,
-  activeRequirementSetId: string | null,
+  activeComparison: TriageComparabilityDescriptor | null,
 ): string {
   const photo = r.photos[0] || '';
   const metaParts = [
@@ -642,12 +690,12 @@ function heroCard(
   ).join('');
   const comparisonGroup = getReportComparisonGroup(
     r,
-    activeRequirementSetId,
+    activeComparison,
   );
   const displayedTier =
     comparisonGroup === 1
       ? 'insufficient evidence'
-      : comparisonGroup === 2
+      : comparisonGroup >= 2
         ? 'unranked'
         : r.tier.replace('_', ' ');
   const displayedTierClass =
@@ -656,7 +704,7 @@ function heroCard(
   return `    <div class="hero-card" data-id="${esc(r.id)}" onclick="scrollToRow('${esc(r.id)}')">
       ${photo ? `<img class="hero-photo" src="${esc(photo)}" alt="${esc(r.title)}" loading="lazy">` : '<div class="hero-photo no-photo"></div>'}
       <div class="hero-body">
-        <div class="hero-badges"><span class="score-badge">${r.fitScore}</span><span class="tier-badge${displayedTierClass}">${displayedTier}</span>${reportVerdictBadges(r, activeRequirementSetId)}${reportAffordabilityBadge(r)}</div>
+        <div class="hero-badges"><span class="score-badge">${r.fitScore}</span><span class="tier-badge${displayedTierClass}">${displayedTier}</span>${reportVerdictBadges(r, activeComparison)}${reportAffordabilityBadge(r)}</div>
         <h3><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.title)}</a></h3>
         <div class="hero-meta">${metaParts.join(' · ')}</div>
         <p class="hero-summary">${esc(r.summary.substring(0, 160))}${r.summary.length > 160 ? '…' : ''}</p>
@@ -901,28 +949,14 @@ function getJS(): string {
   const STATUS_COLORS = {met:'#22c55e',partial:'#f59e0b',unmet:'#ef4444',unknown:'#9ca3af'};
   const SCORE_KEYS = ['fit','location','sleepQuality','cleanliness','modernity','valueForMoney'];
   const SCORE_LABELS = {fit:'Fit',location:'Location',sleepQuality:'Sleep',cleanliness:'Clean',modernity:'Modern',valueForMoney:'Value'};
-  const requirementSetCounts = new Map();
-  DATA.forEach((r, index) => {
-    if (r.scoreSource !== 'deterministic_rubric' || !r.requirementSetId) return;
-    const current = requirementSetCounts.get(r.requirementSetId);
-    requirementSetCounts.set(r.requirementSetId, {
-      count: (current?.count || 0) + 1,
-      first: current?.first ?? index,
-    });
-  });
-  const ACTIVE_REQUIREMENT_SET_ID = [...requirementSetCounts.entries()]
-    .sort((a,b) => b[1].count - a[1].count || a[1].first - b[1].first)[0]?.[0] || null;
   function comparisonGroup(r) {
-    if (!ACTIVE_REQUIREMENT_SET_ID) return 0;
-    if (r.scoreSource === 'deterministic_rubric' && r.requirementSetId === ACTIVE_REQUIREMENT_SET_ID) {
-      return r.rankingStatus === 'insufficient_evidence' ? 1 : 0;
-    }
-    return 2;
+    return typeof r.comparisonGroup === 'number' ? r.comparisonGroup : 0;
   }
   function verdictSourceBadge(r) {
     const group = comparisonGroup(r);
     if (r.scoreSource === 'model_legacy') return '<span class="source-badge source-legacy">Legacy AI score</span>';
-    if (group === 2) return '<span class="source-badge source-unranked">Stale requirement set</span>';
+    if (group === 2) return '<span class="source-badge source-unranked">Older classifier policy</span>';
+    if (group === 3) return '<span class="source-badge source-unranked">Stale requirement set</span>';
     if (group === 1) return '<span class="source-badge source-insufficient">Insufficient evidence · ' + Math.round((r.coverage || 0) * 100) + '% coverage</span>';
     return '<span class="source-badge source-rubric">Rubric v' + esc(r.rubricVersion || '?') + ' · ' + Math.round((r.coverage || 0) * 100) + '% coverage</span>';
   }
@@ -984,7 +1018,7 @@ function getJS(): string {
     const photo = r.photos[0] || '';
     const thumbHtml = photo ? '<img class="thumb" src="' + esc(photo) + '" loading="lazy" alt="">' : '<div class="thumb"></div>';
     const group = comparisonGroup(r);
-    const tierLabel = group === 1 ? 'insufficient evidence' : group === 2 ? 'unranked' : r.tier.replace('_',' ');
+    const tierLabel = group === 1 ? 'insufficient evidence' : group >= 2 ? 'unranked' : r.tier.replace('_',' ');
     const tierClass = group === 0 ? ' tier-' + r.tier : '';
     const tierBadge = '<span class="tier-badge' + tierClass + '">' + tierLabel + '</span>';
     const platBadge = '<span class="platform-badge platform-' + r.platform + '">' + r.platform + '</span>';
@@ -1013,7 +1047,9 @@ function getJS(): string {
     if (showGroupHeader && group > 0) {
       const label = group === 1
         ? 'Insufficient evidence — shown for audit, not ranked with comparable results'
-        : 'Legacy or stale verdicts — regrade the whole job before comparing';
+        : group === 2
+          ? 'Classified under an older policy — regrade the whole job before comparing'
+          : 'Legacy or stale requirement-set verdicts — regrade before comparing';
       html += '<tr><td colspan="12" style="background:#f8fafc;color:#475569;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">' + label + '</td></tr>';
     }
     html += '<tr class="listing-row' + (expandedId === r.id ? ' expanded' : '') + (isLiked ? ' is-liked' : '') + '" data-id="' + esc(r.id) + '"' + (isHidden ? ' style="opacity:.4"' : '') + '>';

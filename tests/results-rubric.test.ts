@@ -2,11 +2,17 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  getActiveTriageComparison,
   getActiveRequirementSetId,
   getListingResultsSnapshot,
   getTriageComparisonStatus,
+  getTriageRegradeListingCount,
 } from '../web/src/lib/results.js';
 import type { ReviewJobListing } from '../web/src/types.js';
+import {
+  getCurrentTriageComparability,
+  TRIAGE_CLASSIFIER_VERSION,
+} from '../src/triage-comparability.js';
 
 function listing(
   id: string,
@@ -67,6 +73,8 @@ test('deterministic metadata and affordability reason survive parsing', () => {
       scoreSource: 'deterministic_rubric',
       rubricVersion: '1',
       requirementSetId: 'reqset_a',
+      classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+      modelId: 'gemini:gemini-3-flash-preview:high',
       rawFitScore: 70,
       fitScore: 44,
       tier: 'unlikely',
@@ -116,6 +124,14 @@ test('deterministic metadata and affordability reason survive parsing', () => {
   );
 
   assert.equal(snapshot.triage?.scoreSource, 'deterministic_rubric');
+  assert.equal(
+    snapshot.triage?.classifierVersion,
+    TRIAGE_CLASSIFIER_VERSION,
+  );
+  assert.equal(
+    snapshot.triage?.modelId,
+    'gemini:gemini-3-flash-preview:high',
+  );
   assert.equal(snapshot.triage?.rawFitScore, 70);
   assert.equal(snapshot.triage?.fitScore, 44);
   assert.deepEqual(snapshot.triage?.capReasons, [
@@ -143,6 +159,7 @@ test('coverage below one half is treated as insufficient even for older rubric J
       scoreSource: 'deterministic_rubric',
       rubricVersion: '1',
       requirementSetId: 'reqset_a',
+      classifierVersion: TRIAGE_CLASSIFIER_VERSION,
       fitScore: 50,
       tier: 'consider',
       coverage: 0.49,
@@ -156,6 +173,7 @@ test('active requirement set is the modal set with stable first-seen ties', () =
     scoreSource: 'deterministic_rubric',
     rubricVersion: '1',
     requirementSetId: 'reqset_a',
+    classifierVersion: TRIAGE_CLASSIFIER_VERSION,
     fitScore: 80,
     tier: 'top_pick',
     rankingStatus: 'ranked',
@@ -168,6 +186,10 @@ test('active requirement set is the modal set with stable first-seen ties', () =
     listing('legacy', { fitScore: 99, tier: 'top_pick' }),
   ];
   assert.equal(getActiveRequirementSetId(listings), 'reqset_b');
+  assert.equal(
+    getActiveTriageComparison(listings)?.requirementSetId,
+    'reqset_b',
+  );
 });
 
 test('comparison status separates ranked, insufficient, legacy, and stale sets', () => {
@@ -176,6 +198,7 @@ test('comparison status separates ranked, insufficient, legacy, and stale sets',
       scoreSource: 'deterministic_rubric',
       rubricVersion: '1',
       requirementSetId: 'reqset_active',
+      classifierVersion: TRIAGE_CLASSIFIER_VERSION,
       fitScore: 90,
       tier: 'top_pick',
       rankingStatus: 'ranked',
@@ -186,6 +209,7 @@ test('comparison status separates ranked, insufficient, legacy, and stale sets',
       scoreSource: 'deterministic_rubric',
       rubricVersion: '1',
       requirementSetId: 'reqset_active',
+      classifierVersion: TRIAGE_CLASSIFIER_VERSION,
       fitScore: 50,
       tier: 'consider',
       rankingStatus: 'insufficient_evidence',
@@ -196,6 +220,7 @@ test('comparison status separates ranked, insufficient, legacy, and stale sets',
       scoreSource: 'deterministic_rubric',
       rubricVersion: '1',
       requirementSetId: 'reqset_old',
+      classifierVersion: TRIAGE_CLASSIFIER_VERSION,
       fitScore: 100,
       tier: 'top_pick',
       rankingStatus: 'ranked',
@@ -205,21 +230,101 @@ test('comparison status separates ranked, insufficient, legacy, and stale sets',
     listing('legacy', { fitScore: 100, tier: 'top_pick' }),
   ).triage;
 
+  const activeComparison =
+    getCurrentTriageComparability('reqset_active');
+  assert.equal(getTriageComparisonStatus(ranked, activeComparison), 'ranked');
   assert.equal(
-    getTriageComparisonStatus(ranked, 'reqset_active'),
-    'ranked',
-  );
-  assert.equal(
-    getTriageComparisonStatus(thin, 'reqset_active'),
+    getTriageComparisonStatus(thin, activeComparison),
     'insufficient_evidence',
   );
   assert.equal(
-    getTriageComparisonStatus(stale, 'reqset_active'),
+    getTriageComparisonStatus(stale, activeComparison),
     'stale_requirement_set',
   );
   assert.equal(
-    getTriageComparisonStatus(legacy, 'reqset_active'),
+    getTriageComparisonStatus(legacy, activeComparison),
     'legacy',
   );
-  assert.equal(getTriageComparisonStatus(null, 'reqset_active'), 'unscored');
+  assert.equal(getTriageComparisonStatus(null, activeComparison), 'unscored');
+});
+
+test('older classifier policy is preserved but excluded from comparison', () => {
+  const oldPolicy = getListingResultsSnapshot(
+    listing('old-policy', {
+      scoreSource: 'deterministic_rubric',
+      rubricVersion: '1',
+      requirementSetId: 'reqset_active',
+      fitScore: 79,
+      tier: 'shortlist',
+      rankingStatus: 'ranked',
+      modelId: 'gemini:gemini-3-flash-preview:high',
+    }),
+  ).triage;
+
+  assert.equal(oldPolicy?.scoreSource, 'deterministic_rubric');
+  assert.equal(oldPolicy?.classifierVersion, null);
+  assert.equal(oldPolicy?.comparabilityKey, null);
+  assert.equal(
+    getTriageComparisonStatus(
+      oldPolicy,
+      getCurrentTriageComparability('reqset_active'),
+    ),
+    'stale_classifier_policy',
+  );
+});
+
+test('model identity is audit metadata and does not gate comparison', () => {
+  const first = getListingResultsSnapshot(
+    listing('model-a', {
+      scoreSource: 'deterministic_rubric',
+      rubricVersion: '1',
+      requirementSetId: 'reqset_active',
+      classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+      modelId: 'gemini:model-a:high',
+      fitScore: 80,
+      tier: 'shortlist',
+    }),
+  ).triage;
+  const second = getListingResultsSnapshot(
+    listing('model-b', {
+      scoreSource: 'deterministic_rubric',
+      rubricVersion: '1',
+      requirementSetId: 'reqset_active',
+      classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+      modelId: 'gemini:model-b:high',
+      fitScore: 81,
+      tier: 'shortlist',
+    }),
+  ).triage;
+
+  assert.equal(first?.comparabilityKey, second?.comparabilityKey);
+});
+
+test('whole-job regrade scope counts every non-hidden listing', () => {
+  const stale = listing('stale', {
+    scoreSource: 'deterministic_rubric',
+    rubricVersion: '1',
+    requirementSetId: 'reqset_active',
+    fitScore: 79,
+    tier: 'shortlist',
+    rankingStatus: 'ranked',
+  });
+  const current = listing('current', {
+    scoreSource: 'deterministic_rubric',
+    rubricVersion: '1',
+    requirementSetId: 'reqset_active',
+    classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+    fitScore: 44,
+    tier: 'unlikely',
+    rankingStatus: 'ranked',
+  });
+  const hidden = {
+    ...listing('hidden', null),
+    hidden: true,
+  };
+
+  assert.equal(
+    getTriageRegradeListingCount([stale, current, hidden]),
+    2,
+  );
 });

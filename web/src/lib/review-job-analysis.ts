@@ -298,12 +298,44 @@ export function invalidateAnalysisOutputsForListings(input: {
   removeFileIfExists(getReportPathFromRoot(input.rootDir));
 }
 
+export function invalidateTriageOutputsForListings(input: {
+  rootDir: string;
+  listings: Array<Pick<ReviewJobListing, 'platform' | 'url'>>;
+}) {
+  const manifestPath = getManifestPathFromRoot(input.rootDir);
+  const manifest = readJsonFile<AnalysisManifest>(manifestPath);
+  if (!manifest) {
+    removeFileIfExists(getReportPathFromRoot(input.rootDir));
+    return;
+  }
+
+  const allowedKeys = new Set(
+    input.listings.map((listing) =>
+      getListingMatchKey(listing.platform, listing.url)),
+  );
+
+  for (const entry of Object.values(manifest.listings)) {
+    if (!allowedKeys.has(getListingMatchKey(entry.platform, entry.url))) {
+      continue;
+    }
+    if (entry.triage.file) {
+      removeFileIfExists(path.join(input.rootDir, entry.triage.file));
+    }
+    entry.triage = { status: 'not_requested' };
+  }
+
+  manifest.updatedAt = new Date().toISOString();
+  writeJsonFile(manifestPath, manifest);
+  removeFileIfExists(getReportPathFromRoot(input.rootDir));
+}
+
 export function prepareReviewJobRunWorkspace(input: {
   jobId: string;
   runId: string;
   previousArtifactRoot?: string | null;
   listings: Array<Pick<ReviewJobListing, 'platform' | 'url'>>;
   dates?: { checkIn?: string; checkOut?: string; adults?: number };
+  mode?: 'full' | 'triage';
 }) {
   const runRoot = getReviewJobRunDir(input.jobId, input.runId);
   removeDirIfExists(runRoot);
@@ -324,10 +356,17 @@ export function prepareReviewJobRunWorkspace(input: {
     listings: input.listings,
     dates: input.dates,
   });
-  invalidateAnalysisOutputsForListings({
-    rootDir: runRoot,
-    listings: input.listings,
-  });
+  if (input.mode === 'triage') {
+    invalidateTriageOutputsForListings({
+      rootDir: runRoot,
+      listings: input.listings,
+    });
+  } else {
+    invalidateAnalysisOutputsForListings({
+      rootDir: runRoot,
+      listings: input.listings,
+    });
+  }
 
   return {
     rootDir: runRoot,

@@ -13,6 +13,8 @@ New verdicts carry:
   "scoreSource": "deterministic_rubric",
   "rubricVersion": "1",
   "requirementSetId": "reqset_...",
+  "classifierVersion": "triage-classifier-v2",
+  "modelId": "gemini:gemini-3-flash-preview:high",
   "rawFitScore": 70,
   "fitScore": 44,
   "tier": "unlikely",
@@ -29,6 +31,18 @@ Affordability is a separate structured axis.
 `rawFitScore` is the weighted result. `fitScore` is the raw result after every deterministic cap.
 `tier` is derived from `fitScore`. `coverage` and `rankingStatus` decide whether the verdict may be
 ranked alongside its peers.
+
+Peer comparison uses one derived key:
+
+```text
+rubricVersion + requirementSetId + classifierVersion
+```
+
+Code builds this key in one shared helper used by the native results page and CLI report. A missing
+or different classifier version makes a verdict non-comparable even when its requirement
+definitions match. `modelId` is persisted for audit but is deliberately outside the key: provider
+model aliases can change on an external release schedule, and that churn must not silently
+invalidate every saved verdict.
 
 ## Canonical requirement set
 
@@ -105,9 +119,27 @@ The listing classifier receives frozen definitions and returns one outcome for e
 }
 ```
 
-Statuses are `met`, `partial`, `unmet`, and `unknown`. Confidence is `high`, `medium`, or `low`.
-Missing evidence must produce `unknown`; absence in photos is not evidence of absence. The model
-does not output the quality score, tier, definitions, weights, or caps.
+Statuses are `met`, `partial`, `unmet`, and `unknown`. Classifier policy v2 applies these boundaries:
+
+- `met`: clear relevant support with no material contradiction;
+- `partial`: evidence is genuinely mixed, or failure is bounded and avoidable through a specific,
+  verifiable choice that the evidence says is available for this stay;
+- `unmet`: credible actual failure, including a recurring meaningful pattern, a severe confirmed
+  failure directly matching the requirement, or a mitigation that defeats the requirement;
+- `unknown`: no relevant evidence, a missing evidence layer, or evidence too vague to distinguish
+  fit from failure.
+
+Turning off a needed system, tolerating a problem, or merely asking for a better room is not
+guest-controlled avoidance. A majority of reviews is not required for `unmet`, but absence of
+evidence still produces `unknown`; absence in photos is not evidence of absence.
+
+Every batch supplies the exact job check-in, check-out, stay length, guest count, and listing
+destination. Stay context may decide whether a mitigation is usable—for example, disabling a loud
+HVAC for a 13-night July/August stay—but the classifier may not invent weather, live inventory,
+room assignment, or provider policy. Direct CLI callers can provide the same context explicitly.
+
+Confidence is `high`, `medium`, or `low` and measures evidence strength, not requirement
+importance. The model does not output the quality score, tier, definitions, weights, or caps.
 
 ## Scoring math
 
@@ -278,11 +310,16 @@ Stored JSON without `scoreSource`, `rubricVersion`, and `requirementSetId` is
 - Preserve legacy JSON; do not silently mutate it or pay to recompute it.
 - Display `Legacy AI score`.
 - If every result is legacy, preserve the prior score-based display behavior.
-- In a mixed job, only deterministic verdicts for the active requirement set rank together.
-- Insufficient-evidence, legacy, and stale/mismatched-set verdicts appear in labeled unranked
-  groups.
-- Regrading is an explicit whole-job analysis rerun. Never interleave old model-authored scores with
-  rubric scores.
+- In a mixed job, only deterministic verdicts with the same derived comparability key rank
+  together.
+- A deterministic verdict without the current `classifierVersion` remains preserved but appears as
+  `Classified under an older policy`; it never ranks beside current-policy results.
+- Insufficient-evidence, older-policy, legacy, and stale/mismatched-set verdicts appear in labeled
+  unranked groups.
+- The native results page offers an explicit whole-job regrade with an estimated cost. Regrading
+  covers every non-hidden listing, reuses saved review and photo analysis, and runs triage only; at
+  the measured ~$0.006/listing, a 54-listing job is estimated at ~$0.32.
+- Never interleave old model-authored or old-classifier scores with current-policy scores.
 
 CLI/report output follows the same source/version and grouping rules.
 
