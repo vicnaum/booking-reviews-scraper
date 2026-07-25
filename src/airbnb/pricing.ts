@@ -7,20 +7,76 @@ import {
 } from '../search/pricing.js';
 import type { SearchPriceBasis, SearchPricing } from '../search/types.js';
 
-function getAirbnbDisplayBasis(qualifier: unknown): SearchPriceBasis {
-  if (typeof qualifier !== 'string') {
-    return 'unknown';
-  }
+function getAirbnbDisplayBasis(...labels: unknown[]): SearchPriceBasis {
+  const text = labels
+    .filter((label): label is string => typeof label === 'string')
+    .join(' ')
+    .toLowerCase();
 
-  if (qualifier.includes('total') || qualifier.includes('stay')) {
+  if (
+    /\b(?:total|stay)\b/.test(text)
+    || /\b(?:for\s+)?\d+\s+nights?\b/.test(text)
+  ) {
     return 'stay';
   }
 
-  if (qualifier.includes('night')) {
+  if (/\bnight\b/.test(text)) {
     return 'night';
   }
 
   return 'unknown';
+}
+
+function getPrimaryLineValue(
+  primaryLine: any,
+  camelCaseKey: string,
+  snakeCaseKey: string,
+): unknown {
+  const direct = primaryLine?.[camelCaseKey] ?? primaryLine?.[snakeCaseKey];
+  if (direct != null) {
+    return direct;
+  }
+
+  const orderedComponents =
+    primaryLine?.orderedComponents ?? primaryLine?.ordered_components;
+  if (!Array.isArray(orderedComponents)) {
+    return null;
+  }
+
+  for (const component of orderedComponents) {
+    const value = component?.[camelCaseKey] ?? component?.[snakeCaseKey];
+    if (value != null) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function parseAirbnbPrimaryLine(primaryLine: any): {
+  displayAmount: number | null;
+  displayBasis: SearchPriceBasis;
+} {
+  const displayText =
+    getPrimaryLineValue(primaryLine, 'discountedPrice', 'discounted_price')
+    ?? getPrimaryLineValue(primaryLine, 'price', 'price')
+    ?? getPrimaryLineValue(primaryLine, 'originalPrice', 'original_price')
+    ?? getPrimaryLineValue(primaryLine, 'accessibilityLabel', 'accessibility_label');
+  const qualifier = getPrimaryLineValue(
+    primaryLine,
+    'priceQualifier',
+    'price_qualifier',
+  ) ?? getPrimaryLineValue(primaryLine, 'qualifier', 'qualifier');
+  const accessibilityLabel = getPrimaryLineValue(
+    primaryLine,
+    'accessibilityLabel',
+    'accessibility_label',
+  );
+
+  return {
+    displayAmount: parsePriceAmount(displayText),
+    displayBasis: getAirbnbDisplayBasis(qualifier, accessibilityLabel),
+  };
 }
 
 function extractAirbnbBreakdownAmounts(
@@ -83,16 +139,7 @@ export function parseAirbnbPricingQuote(
   const priceDetails =
     structuredPrice?.explanation_data?.price_details
     ?? structuredPrice?.explanationData?.priceDetails;
-  const displayText =
-    primaryLine?.price
-    ?? primaryLine?.discountedPrice
-    ?? primaryLine?.originalPrice
-    ?? primaryLine?.accessibility_label
-    ?? primaryLine?.accessibilityLabel;
-  const displayAmount = parsePriceAmount(displayText);
-  const displayBasis = getAirbnbDisplayBasis(
-    primaryLine?.qualifier ?? primaryLine?.priceQualifier,
-  );
+  const { displayAmount, displayBasis } = parseAirbnbPrimaryLine(primaryLine);
 
   const { nightly, total } = extractAirbnbBreakdownAmounts(priceDetails, currency);
 
@@ -126,6 +173,7 @@ export function parseAirbnbPricingQuote(
 export function parseAirbnbStructuredDisplayPrice(
   structuredDisplayPrice: any,
   currency: string,
+  nights: number | null = null,
 ): SearchPricing | null {
   if (!structuredDisplayPrice) {
     return null;
@@ -133,30 +181,27 @@ export function parseAirbnbStructuredDisplayPrice(
 
   const primaryLine =
     structuredDisplayPrice?.primaryLine ?? structuredDisplayPrice?.primary_line;
-  const displayText =
-    primaryLine?.discountedPrice
-    ?? primaryLine?.originalPrice
-    ?? primaryLine?.price
-    ?? primaryLine?.accessibilityLabel
-    ?? primaryLine?.accessibility_label;
-  const displayAmount = parsePriceAmount(displayText);
-  const displayBasis = getAirbnbDisplayBasis(
-    primaryLine?.qualifier ?? primaryLine?.priceQualifier,
-  );
+  const { displayAmount, displayBasis } = parseAirbnbPrimaryLine(primaryLine);
   const priceDetails =
     structuredDisplayPrice?.explanationData?.priceDetails
     ?? structuredDisplayPrice?.explanation_data?.price_details;
   const { nightly, total } = extractAirbnbBreakdownAmounts(priceDetails, currency);
+  const displayedTotal = makePriceValue(
+    displayBasis === 'stay' ? displayAmount : null,
+    currency,
+    'displayed',
+  );
+  const derivedTotal = makePriceValue(
+    nightly && nights && nights > 0
+      ? nightly.amount * nights
+      : null,
+    currency,
+    'derived',
+  );
 
   return makeSearchPricing({
     nightly,
-    total:
-      total
-      ?? makePriceValue(
-        displayBasis === 'stay' ? displayAmount : null,
-        currency,
-        'displayed',
-      ),
+    total: total ?? displayedTotal ?? derivedTotal,
     display: makeDisplayPriceValue(displayAmount, currency, displayBasis),
   });
 }

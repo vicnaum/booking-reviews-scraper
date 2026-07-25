@@ -29,6 +29,25 @@ function makeSsrSearchHtml(): string {
                       title: 'Midtown test stay',
                       avgRatingLocalized: '4.91 (123)',
                       contextualPictures: [{ picture: 'https://example.com/listing.jpg' }],
+                      structuredDisplayPrice: {
+                        primaryLine: {
+                          accessibilityLabel: '$447 total',
+                          price: '$447',
+                          qualifier: 'total',
+                        },
+                        explanationData: {
+                          priceDetails: [
+                            {
+                              items: [
+                                {
+                                  description: '2 nights x $203.50',
+                                  priceString: '$407.00',
+                                },
+                              ],
+                            },
+                          ],
+                        },
+                      },
                       structuredContent: {
                         primaryLine: [{ body: '2 bedrooms' }, { body: '3 beds' }],
                       },
@@ -134,6 +153,9 @@ test('Airbnb quick search uses SSR staysSearch directly without API-key retries'
   assert.equal(output.results[0].bedrooms, 2);
   assert.equal(output.results[0].beds, 3);
   assert.equal(output.results[0].superhost, true);
+  assert.equal(output.results[0].pricing?.nightly?.amount, 203.5);
+  assert.equal(output.results[0].pricing?.total?.amount, 447);
+  assert.equal(output.results[0].pricing?.total?.source, 'displayed');
   assert.equal(pages.length, 1);
   assert.equal(pages[0].results.length, 1);
 });

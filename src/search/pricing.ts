@@ -6,6 +6,26 @@ import type {
   SearchPricing,
 } from './types.js';
 
+export function getStayNights(
+  checkin?: string | null,
+  checkout?: string | null,
+): number | null {
+  if (!checkin || !checkout) {
+    return null;
+  }
+
+  const start = new Date(`${checkin}T00:00:00Z`);
+  const end = new Date(`${checkout}T00:00:00Z`);
+  const diffMs = end.getTime() - start.getTime();
+
+  if (!Number.isFinite(diffMs) || diffMs <= 0) {
+    return null;
+  }
+
+  const nights = Math.round(diffMs / 86400000);
+  return nights > 0 ? nights : null;
+}
+
 function normalizeNumberString(value: string): string | null {
   const cleaned = value.replace(/[^\d,.-]/g, '');
   if (!cleaned) {

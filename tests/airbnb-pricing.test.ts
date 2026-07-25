@@ -99,3 +99,106 @@ test('Airbnb SSR structured display price keeps total and nightly semantics dist
   assert.equal(pricing.display?.amount, 1414);
   assert.equal(pricing.display?.basis, 'stay');
 });
+
+test('Airbnb SSR derives a stay total from nightly pricing when dates are known', () => {
+  const pricing = parseAirbnbStructuredDisplayPrice(
+    {
+      primaryLine: {
+        accessibilityLabel: '$156 per night',
+        price: '$156',
+        qualifier: 'night',
+      },
+      explanationData: {
+        priceDetails: [
+          {
+            items: [
+              {
+                description: '12 nights x $156.46',
+                priceString: '$1,877.52',
+              },
+            ],
+          },
+        ],
+      },
+    },
+    'USD',
+    12,
+  );
+
+  assert.ok(pricing);
+  assert.equal(pricing.nightly?.amount, 156.46);
+  assert.equal(pricing.total?.amount, 1877.52);
+  assert.equal(pricing.total?.source, 'derived');
+  assert.equal(pricing.display?.basis, 'night');
+});
+
+test('Airbnb SSR treats a multi-night display qualifier as a stay total', () => {
+  const pricing = parseAirbnbStructuredDisplayPrice(
+    {
+      primaryLine: {
+        accessibilityLabel: '$1,935 for 12 nights',
+        price: '$1,935',
+        qualifier: 'for 12 nights',
+      },
+      explanationData: {
+        priceDetails: [
+          {
+            items: [
+              {
+                description: '12 nights x $156.46',
+                priceString: '$1,877.52',
+              },
+            ],
+          },
+        ],
+      },
+    },
+    'USD',
+    12,
+  );
+
+  assert.ok(pricing);
+  assert.equal(pricing.nightly?.amount, 156.46);
+  assert.equal(pricing.total?.amount, 1935);
+  assert.equal(pricing.total?.source, 'displayed');
+  assert.equal(pricing.display?.basis, 'stay');
+});
+
+test('Airbnb SSR reads totals from ordered display price components', () => {
+  const pricing = parseAirbnbStructuredDisplayPrice(
+    {
+      primaryLine: {
+        accessibilityLabel: '$638 total',
+        orderedComponents: [
+          {
+            discountedPrice: '$638',
+          },
+          {
+            qualifier: 'total',
+          },
+        ],
+      },
+      explanationData: {
+        priceDetails: [
+          {
+            items: [
+              {
+                description: '2 nights x $253.00',
+                priceString: '$506.00',
+              },
+            ],
+          },
+        ],
+      },
+    },
+    'USD',
+    2,
+  );
+
+  assert.ok(pricing);
+  assert.equal(pricing.nightly?.amount, 253);
+  assert.equal(pricing.total?.amount, 638);
+  assert.equal(pricing.total?.source, 'displayed');
+  assert.equal(pricing.display?.amount, 638);
+  assert.equal(pricing.display?.basis, 'stay');
+});
