@@ -15,11 +15,17 @@ import * as bookingScraper from './booking/scraper.js';
 import { runAnalyze, parseModelConfig, getProviderApiKey, PROVIDER_KEY_NAMES, type AnalysisResult } from './analyze.js';
 import { runAnalyzePhotos, type PhotoAnalysisResult } from './analyze-photos.js';
 import {
+  getTriageRequirementParserVersion,
   normalizeTriageEvidenceGaps,
   runTriage,
   type TriageEvidenceGap,
   type TriageResult,
 } from './triage.js';
+import type {
+  AffordabilityBudget,
+  CanonicalRequirementSet,
+} from './triage-rubric.js';
+import { buildCanonicalRequirementSet } from './triage-rubric.js';
 import {
   buildDetailsCacheVariant,
   buildPhotosCacheVariant,
@@ -45,6 +51,7 @@ export interface BatchOptions {
   triage: boolean;
   aiModel?: string;
   aiPriorities?: string;
+  analysisBudget?: AffordabilityBudget;
   aiReviewLimit?: number;
   aiReviewsExplicit: boolean;  // true when --ai-reviews was explicitly passed
   aiPhotosExplicit: boolean;   // true when --ai-photos was explicitly passed
@@ -101,6 +108,11 @@ export interface BatchManifest {
   createdAt: string;
   updatedAt: string;
   dates: { checkIn?: string; checkOut?: string; adults?: number };
+  requirementSet?: {
+    id: string;
+    parserVersion: string;
+    file: string;
+  };
   listings: Record<string, ManifestEntry>;
 }
 
@@ -388,6 +400,43 @@ function loadManifest(manifestPath: string): BatchManifest | null {
     }
   } catch {}
   return null;
+}
+
+function normalizeRequirementBrief(value?: string | null): string | null {
+  const normalized = value?.trim().replace(/\s+/g, ' ') || '';
+  return normalized || null;
+}
+
+function loadPersistedRequirementSet(input: {
+  file: string;
+  expectedBrief?: string;
+  expectedParserVersion: string;
+}): CanonicalRequirementSet | null {
+  try {
+    if (!fs.existsSync(input.file)) return null;
+    const parsed = JSON.parse(
+      fs.readFileSync(input.file, 'utf-8'),
+    ) as CanonicalRequirementSet;
+    if (
+      !parsed
+      || typeof parsed !== 'object'
+      || !Array.isArray(parsed.definitions)
+      || parsed.parserVersion !== input.expectedParserVersion
+      || normalizeRequirementBrief(parsed.brief)
+        !== normalizeRequirementBrief(input.expectedBrief)
+    ) {
+      return null;
+    }
+    const rebuilt = buildCanonicalRequirementSet({
+      brief: parsed.brief,
+      parserVersion: parsed.parserVersion,
+      definitions: parsed.definitions,
+      parsedBudget: parsed.parsedBudget,
+    });
+    return rebuilt.id === parsed.id ? rebuilt : null;
+  } catch {
+    return null;
+  }
 }
 
 function saveManifest(manifest: BatchManifest, manifestPath: string): void {
@@ -2061,6 +2110,33 @@ export async function runBatch(
         level: 'info',
         message: `Starting AI triage (${modelConfig.model})`,
       });
+      const requirementSetPath = path.join(
+        path.dirname(manifestPath),
+        'triage-requirements.json',
+      );
+      const expectedParserVersion = getTriageRequirementParserVersion(
+        aiModel,
+        options.aiPriorities,
+      );
+      let activeRequirementSet = loadPersistedRequirementSet({
+        file: requirementSetPath,
+        expectedBrief: options.aiPriorities,
+        expectedParserVersion,
+      }) ?? undefined;
+      if (activeRequirementSet) {
+        manifest.requirementSet = {
+          id: activeRequirementSet.id,
+          parserVersion: activeRequirementSet.parserVersion,
+          file: path.relative(
+            path.dirname(manifestPath),
+            requirementSetPath,
+          ),
+        };
+        saveManifest(manifest, manifestPath);
+        console.log(
+          `Canonical requirements: ${activeRequirementSet.id} (persisted)`,
+        );
+      }
       let triageIndex = 0;
       const triageEntries = Object.entries(manifest.listings);
       for (const [manifestKey, entry] of triageEntries) {
@@ -2175,10 +2251,45 @@ export async function runBatch(
             aiPhotosFile: availableAiPhotosPath,
             model: aiModel,
             priorities: options.aiPriorities,
+            requirementSet: activeRequirementSet,
+            budget: options.analysisBudget,
+            priceFreshness:
+              entry.details.source === 'network' ? 'fresh' : 'unknown',
           });
 
           if (!result.data || typeof result.data !== 'object' || Array.isArray(result.data)) {
             throw new Error('Triage result data must be a JSON object.');
+          }
+          if (!activeRequirementSet) {
+            activeRequirementSet = result.requirementSet;
+            fs.mkdirSync(path.dirname(requirementSetPath), {
+              recursive: true,
+            });
+            fs.writeFileSync(
+              requirementSetPath,
+              JSON.stringify(activeRequirementSet, null, 2),
+            );
+            manifest.requirementSet = {
+              id: activeRequirementSet.id,
+              parserVersion: activeRequirementSet.parserVersion,
+              file: path.relative(
+                path.dirname(manifestPath),
+                requirementSetPath,
+              ),
+            };
+            saveManifest(manifest, manifestPath);
+            console.log(
+              `Canonical requirements: ${activeRequirementSet.id} (created)`,
+            );
+          } else {
+            manifest.requirementSet = {
+              id: activeRequirementSet.id,
+              parserVersion: activeRequirementSet.parserVersion,
+              file: path.relative(
+                path.dirname(manifestPath),
+                requirementSetPath,
+              ),
+            };
           }
           const evidenceGaps = normalizeTriageEvidenceGaps([
             ...missingInputEvidence,

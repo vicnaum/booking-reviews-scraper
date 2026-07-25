@@ -17,9 +17,13 @@ import { getPriceDisplayInfo, resolveComparablePrice } from '@/lib/pricing';
 import { buildListingUrl } from '@/lib/listingLinks';
 import {
   formatPoiDistance,
+  getActiveRequirementSetId,
   getListingResultsSnapshot,
+  getTriageComparisonStatus,
   getTierRank,
+  type ParsedTriage,
   type ParsedTheme,
+  type TriageComparisonStatus,
 } from '@/lib/results';
 import {
   fetchReviewJobResponse,
@@ -68,6 +72,115 @@ function tierClassName(tier: string | null): string {
     default:
       return 'border-white/10 bg-white/[0.05] text-stone-300';
   }
+}
+
+function formatPercent(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return 'Unknown';
+  return new Intl.NumberFormat('en-US', {
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
+function comparisonRank(status: TriageComparisonStatus): number {
+  switch (status) {
+    case 'ranked':
+      return 0;
+    case 'insufficient_evidence':
+      return 1;
+    case 'legacy':
+    case 'stale_requirement_set':
+      return 2;
+    case 'unscored':
+      return 3;
+  }
+}
+
+function displayedTier(
+  triage: ParsedTriage | null,
+  comparisonStatus?: TriageComparisonStatus,
+): { label: string; tier: string | null } {
+  const status =
+    comparisonStatus
+    ?? (triage?.rankingStatus === 'insufficient_evidence'
+      ? 'insufficient_evidence'
+      : triage?.scoreSource === 'model_legacy'
+        ? 'legacy'
+        : triage
+          ? 'ranked'
+          : 'unscored');
+  if (status === 'insufficient_evidence') {
+    return { label: 'Insufficient evidence', tier: null };
+  }
+  if (status === 'stale_requirement_set') {
+    return { label: 'Unranked', tier: null };
+  }
+  return { label: tierLabel(triage?.tier ?? null), tier: triage?.tier ?? null };
+}
+
+function VerdictSourceBadge({
+  triage,
+  comparisonStatus,
+}: {
+  triage: ParsedTriage | null;
+  comparisonStatus?: TriageComparisonStatus;
+}) {
+  if (!triage) return null;
+  const status =
+    comparisonStatus
+    ?? getTriageComparisonStatus(triage, triage.requirementSetId);
+  if (status === 'legacy') {
+    return (
+      <span className="rounded-full border border-violet-300/20 bg-violet-300/10 px-2 py-1 text-[10px] font-semibold text-violet-100">
+        Legacy AI score
+      </span>
+    );
+  }
+  if (status === 'stale_requirement_set') {
+    return (
+      <span className="rounded-full border border-stone-300/20 bg-stone-300/10 px-2 py-1 text-[10px] font-semibold text-stone-200">
+        Stale requirement set
+      </span>
+    );
+  }
+  if (status === 'insufficient_evidence') {
+    return (
+      <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-1 text-[10px] font-semibold text-amber-100">
+        Insufficient evidence · {Math.round((triage.coverage ?? 0) * 100)}% coverage
+      </span>
+    );
+  }
+  return (
+    <span className="rounded-full border border-sky-300/20 bg-sky-300/10 px-2 py-1 text-[10px] font-semibold text-sky-100">
+      Rubric v{triage.rubricVersion ?? '?'} · {Math.round((triage.coverage ?? 0) * 100)}% coverage
+    </span>
+  );
+}
+
+function AffordabilityBadge({ triage }: { triage: ParsedTriage | null }) {
+  const affordability = triage?.affordability;
+  if (!affordability) return null;
+  if (affordability.status === 'within') {
+    return (
+      <span className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 text-[10px] font-semibold text-emerald-100">
+        Within budget
+      </span>
+    );
+  }
+  if (affordability.status === 'over') {
+    return (
+      <span className="rounded-full border border-orange-300/20 bg-orange-300/10 px-2 py-1 text-[10px] font-semibold text-orange-100">
+        {formatPercent(affordability.overByPercent)}% over budget
+      </span>
+    );
+  }
+  return (
+    <span
+      className="max-w-sm rounded-full border border-stone-300/20 bg-stone-300/10 px-2 py-1 text-[10px] font-semibold text-stone-200"
+      title={affordability.reason ?? undefined}
+    >
+      Budget unknown · {affordability.reason ?? 'Reason unavailable.'}
+    </span>
+  );
 }
 
 function phaseBadgeClassName(status: string) {
@@ -414,6 +527,7 @@ function HeroCard({
   onJump: () => void;
 }) {
   const snapshot = getListingResultsSnapshot(listing);
+  const verdictTier = displayedTier(snapshot.triage);
   const priceInfo = getPriceDisplayInfo(listing, priceDisplay, {
     checkin: job.checkin,
     checkout: job.checkout,
@@ -453,11 +567,13 @@ function HeroCard({
           </span>
           <span
             className={`rounded-lg border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] ${tierClassName(
-              snapshot.triage?.tier ?? null,
+              verdictTier.tier,
             )}`}
           >
-            {tierLabel(snapshot.triage?.tier ?? null)}
+            {verdictTier.label}
           </span>
+          <VerdictSourceBadge triage={snapshot.triage} />
+          <AffordabilityBadge triage={snapshot.triage} />
           <EvidenceGapBadge gaps={snapshot.triage?.evidenceGaps} />
         </div>
 
@@ -489,11 +605,13 @@ function ListingDetailPanel({
   listing,
   job,
   priceDisplay,
+  comparisonStatus,
   onLocate,
 }: {
   listing: ReviewJobListing;
   job: ReviewJobResponse['job'];
   priceDisplay: PriceDisplayMode;
+  comparisonStatus: TriageComparisonStatus;
   onLocate: () => void;
 }) {
   const snapshot = useMemo(() => getListingResultsSnapshot(listing), [listing]);
@@ -520,6 +638,7 @@ function ListingDetailPanel({
   const amenities = snapshot.details?.amenities ?? [];
   const amenityFlags = getAmenityFlags(amenities);
   const triage = snapshot.triage;
+  const verdictTier = displayedTier(triage, comparisonStatus);
   const aiReviews = snapshot.aiReviews;
   const aiPhotos = snapshot.aiPhotos;
   const poiDistanceLabel = formatPoiDistance(listing.poiDistanceMeters);
@@ -602,11 +721,16 @@ function ListingDetailPanel({
                 </span>
                 <span
                   className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${tierClassName(
-                    triage?.tier ?? null,
+                    verdictTier.tier,
                   )}`}
                 >
-                  {tierLabel(triage?.tier ?? null)}
+                  {verdictTier.label}
                 </span>
+                <VerdictSourceBadge
+                  triage={triage}
+                  comparisonStatus={comparisonStatus}
+                />
+                <AffordabilityBadge triage={triage} />
                 <EvidenceGapBadge gaps={triage?.evidenceGaps} />
               </div>
 
@@ -687,6 +811,7 @@ function ListingDetailPanel({
                         <tr>
                           <th className="px-3 py-2 font-semibold">Need</th>
                           <th className="px-3 py-2 font-semibold">Type</th>
+                          <th className="px-3 py-2 font-semibold">Weight</th>
                           <th className="px-3 py-2 font-semibold">Status</th>
                           <th className="px-3 py-2 font-semibold">Confidence</th>
                           <th className="px-3 py-2 font-semibold">Note</th>
@@ -694,10 +819,16 @@ function ListingDetailPanel({
                       </thead>
                       <tbody>
                         {triage.requirements.map((requirement) => (
-                          <tr key={requirement.requirement} className="border-t border-white/5">
+                          <tr
+                            key={requirement.requirementId ?? requirement.requirement}
+                            className="border-t border-white/5"
+                          >
                             <td className="px-3 py-2 text-white">{requirement.requirement}</td>
                             <td className="px-3 py-2 text-stone-400">
                               {requirement.type?.replace(/_/g, ' ') ?? '—'}
+                            </td>
+                            <td className="px-3 py-2 text-stone-400">
+                              {requirement.weight ?? '—'}
                             </td>
                             <td className="px-3 py-2">
                               <span
@@ -1174,11 +1305,34 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     }
   }, [applyJobUpdate, data.job.id, data.listings]);
 
+  const activeRequirementSetId = useMemo(
+    () => getActiveRequirementSetId(data.listings),
+    [data.listings],
+  );
+
   const baseRankedResults = useMemo(() => {
     const next = [...data.listings];
+    const originalIndex = new Map(
+      next.map((listing, index) => [listingKey(listing), index]),
+    );
     next.sort((a, b) => {
       const triageA = getListingResultsSnapshot(a).triage;
       const triageB = getListingResultsSnapshot(b).triage;
+      if (activeRequirementSetId) {
+        const groupA = comparisonRank(
+          getTriageComparisonStatus(triageA, activeRequirementSetId),
+        );
+        const groupB = comparisonRank(
+          getTriageComparisonStatus(triageB, activeRequirementSetId),
+        );
+        if (groupA !== groupB) return groupA - groupB;
+        if (groupA !== 0) {
+          return (
+            (originalIndex.get(listingKey(a)) ?? 0)
+            - (originalIndex.get(listingKey(b)) ?? 0)
+          );
+        }
+      }
 
       const fitA = triageA?.fitScore ?? -1;
       const fitB = triageB?.fitScore ?? -1;
@@ -1213,16 +1367,59 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       return priceA - priceB;
     });
     return next;
-  }, [data.job.checkin, data.job.checkout, data.listings, priceDisplay]);
+  }, [
+    activeRequirementSetId,
+    data.job.checkin,
+    data.job.checkout,
+    data.listings,
+    priceDisplay,
+  ]);
 
   const sortableResults = useMemo(() => {
     const next = [...baseRankedResults];
+    const baseIndex = new Map(
+      next.map((listing, index) => [listingKey(listing), index]),
+    );
 
     if (sortKey === 'rank') {
-      return sortAsc ? [...next].reverse() : next;
+      if (!sortAsc) return next;
+      if (!activeRequirementSetId) return [...next].reverse();
+      const ranked = next.filter((listing) =>
+        getTriageComparisonStatus(
+          getListingResultsSnapshot(listing).triage,
+          activeRequirementSetId,
+        ) === 'ranked');
+      const unranked = next.filter((listing) =>
+        getTriageComparisonStatus(
+          getListingResultsSnapshot(listing).triage,
+          activeRequirementSetId,
+        ) !== 'ranked');
+      return [...ranked.reverse(), ...unranked];
     }
 
     next.sort((a, b) => {
+      if (activeRequirementSetId) {
+        const groupA = comparisonRank(
+          getTriageComparisonStatus(
+            getListingResultsSnapshot(a).triage,
+            activeRequirementSetId,
+          ),
+        );
+        const groupB = comparisonRank(
+          getTriageComparisonStatus(
+            getListingResultsSnapshot(b).triage,
+            activeRequirementSetId,
+          ),
+        );
+        if (groupA !== groupB) return groupA - groupB;
+        if (groupA !== 0) {
+          return (
+            (baseIndex.get(listingKey(a)) ?? 0)
+            - (baseIndex.get(listingKey(b)) ?? 0)
+          );
+        }
+      }
+
       if (sortKey === 'title') {
         return sortAsc
           ? a.name.localeCompare(b.name)
@@ -1263,6 +1460,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
 
     return next;
   }, [
+    activeRequirementSetId,
     baseRankedResults,
     data.job.checkin,
     data.job.checkout,
@@ -1282,8 +1480,16 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   const filteredResults = useMemo(
     () =>
       displayableResults.filter((listing) => {
-        const tier = getListingResultsSnapshot(listing).triage?.tier ?? 'unscored';
-        if (!activeTiers.has(tier)) {
+        const triage = getListingResultsSnapshot(listing).triage;
+        const comparisonStatus = getTriageComparisonStatus(
+          triage,
+          activeRequirementSetId,
+        );
+        const tier = triage?.tier ?? 'unscored';
+        if (
+          (!activeRequirementSetId || comparisonStatus === 'ranked')
+          && !activeTiers.has(tier)
+        ) {
           return false;
         }
 
@@ -1313,6 +1519,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       }),
     [
       activeTiers,
+      activeRequirementSetId,
       data.job.checkin,
       data.job.checkout,
       displayableResults,
@@ -1333,20 +1540,41 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   );
 
   const heroResults = useMemo(() => {
-    const topPicks = filteredResults.filter(
-      (listing) => getListingResultsSnapshot(listing).triage?.tier === 'top_pick',
+    const comparable = filteredResults.filter(
+      (listing) =>
+        !activeRequirementSetId
+        || getTriageComparisonStatus(
+          getListingResultsSnapshot(listing).triage,
+          activeRequirementSetId,
+        ) === 'ranked',
     );
-    return topPicks.length >= 3 ? topPicks.slice(0, 5) : filteredResults.slice(0, 5);
-  }, [filteredResults]);
+    const topPicks = comparable.filter(
+      (listing) =>
+        getListingResultsSnapshot(listing).triage?.tier === 'top_pick',
+    );
+    return topPicks.length >= 3
+      ? topPicks.slice(0, 5)
+      : comparable.slice(0, 5);
+  }, [activeRequirementSetId, filteredResults]);
 
   const tierCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const listing of displayableResults) {
-      const tier = getListingResultsSnapshot(listing).triage?.tier ?? 'unscored';
+      const triage = getListingResultsSnapshot(listing).triage;
+      if (
+        activeRequirementSetId
+        && getTriageComparisonStatus(
+          triage,
+          activeRequirementSetId,
+        ) !== 'ranked'
+      ) {
+        continue;
+      }
+      const tier = triage?.tier ?? 'unscored';
       counts.set(tier, (counts.get(tier) ?? 0) + 1);
     }
     return counts;
-  }, [displayableResults]);
+  }, [activeRequirementSetId, displayableResults]);
 
   useEffect(() => {
     if (filteredResults.length === 0) {
@@ -1509,6 +1737,36 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       rows.map((listing, index) => {
         const key = listingKey(listing);
         const snapshot = getListingResultsSnapshot(listing);
+        const comparisonStatus = getTriageComparisonStatus(
+          snapshot.triage,
+          activeRequirementSetId,
+        );
+        const verdictTier = displayedTier(
+          snapshot.triage,
+          comparisonStatus,
+        );
+        const comparisonGroup = comparisonRank(comparisonStatus);
+        const previousComparisonGroup =
+          index > 0
+            ? comparisonRank(
+                getTriageComparisonStatus(
+                  getListingResultsSnapshot(rows[index - 1]).triage,
+                  activeRequirementSetId,
+                ),
+              )
+            : null;
+        const groupHeader =
+          activeRequirementSetId
+          && comparisonGroup !== 0
+          && comparisonGroup !== previousComparisonGroup
+            ? comparisonGroup === 1
+              ? 'Insufficient evidence — shown for audit, not ranked with comparable results'
+              : comparisonGroup === 2
+                ? 'Legacy or stale verdicts — regrade the whole job before comparing'
+                : 'Unscored listings'
+            : null;
+        const showPeerRank =
+          !activeRequirementSetId || comparisonStatus === 'ranked';
         const priceInfo = getPriceDisplayInfo(listing, priceDisplay, {
           checkin: data.job.checkin,
           checkout: data.job.checkout,
@@ -1532,6 +1790,16 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
 
         return (
           <Fragment key={key}>
+            {groupHeader && (
+              <tr className="border-y border-white/10 bg-white/[0.035]">
+                <td
+                  colSpan={13}
+                  className="px-4 py-3 text-xs font-semibold uppercase tracking-[0.14em] text-stone-300"
+                >
+                  {groupHeader}
+                </td>
+              </tr>
+            )}
             <tr
               ref={(node) => {
                 rowRefs.current[key] = node;
@@ -1558,7 +1826,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 </ActionButton>
               </td>
               <td className="px-3 py-3 align-top text-sm font-semibold text-stone-400">
-                {index + 1}
+                {showPeerRank ? index + 1 : '—'}
               </td>
               <td className="px-3 py-3 align-top">
                 {listing.photoUrl ? (
@@ -1617,11 +1885,15 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 <div className="flex flex-col items-start gap-1.5">
                   <span
                     className={`inline-flex rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] ${tierClassName(
-                      snapshot.triage?.tier ?? null,
+                      verdictTier.tier,
                     )}`}
                   >
-                    {tierLabel(snapshot.triage?.tier ?? null)}
+                    {verdictTier.label}
                   </span>
+                  <VerdictSourceBadge
+                    triage={snapshot.triage}
+                    comparisonStatus={comparisonStatus}
+                  />
                   <EvidenceGapBadge gaps={snapshot.triage?.evidenceGaps} />
                 </div>
               </td>
@@ -1633,6 +1905,9 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 {priceInfo.secondary && (
                   <div className="mt-1 text-xs text-stone-500">{priceInfo.secondary}</div>
                 )}
+                <div className="mt-2">
+                  <AffordabilityBadge triage={snapshot.triage} />
+                </div>
               </td>
               <td className="px-3 py-3 align-top">
                 <div className="text-sm font-semibold text-white">
@@ -1704,11 +1979,12 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
 
             {isExpanded && (
               <tr className="border-b border-white/10">
-                <td colSpan={12} className="p-0">
+                <td colSpan={13} className="p-0">
                   <ListingDetailPanel
                     listing={listing}
                     job={data.job}
                     priceDisplay={priceDisplay}
+                    comparisonStatus={comparisonStatus}
                     onLocate={() => handleSelect(key, { scroll: false })}
                   />
                 </td>
@@ -1718,6 +1994,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         );
       }),
     [
+      activeRequirementSetId,
       data.job,
       expandedId,
       handleSelect,
@@ -1870,12 +2147,19 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
             </p>
           </div>
 
-          {data.job.prompt && (
+          {(data.job.prompt || data.job.analysisBudgetAmount != null) && (
             <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-4 text-sm leading-7 text-stone-300">
               <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
                 Brief
               </p>
-              {data.job.prompt}
+              {data.job.prompt || 'No quality brief supplied; the default requirement set was used.'}
+              {data.job.analysisBudgetAmount != null
+                && data.job.analysisBudgetCurrency && (
+                  <p className="mt-3 text-xs font-semibold text-stone-400">
+                    Full-stay analysis budget: {data.job.analysisBudgetCurrency}{' '}
+                    {data.job.analysisBudgetAmount.toLocaleString()}
+                  </p>
+                )}
             </div>
           )}
 

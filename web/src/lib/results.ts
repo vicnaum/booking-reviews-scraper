@@ -31,6 +31,16 @@ function asStringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
 }
 
+function asNumberArray(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter(
+    (item): item is number =>
+      typeof item === 'number' && Number.isFinite(item),
+  );
+}
+
 function normalizeEvidenceGaps(value: unknown[]): TriageEvidenceGap[] {
   const provided = new Set(value);
   return TRIAGE_EVIDENCE_GAP_ORDER.filter((gap) => provided.has(gap));
@@ -64,11 +74,23 @@ function getPhotoUrl(photo: unknown): string | null {
 }
 
 export interface ParsedRequirement {
+  requirementId: string | null;
   requirement: string;
+  label: string;
   type: string | null;
+  rank: number | null;
+  weight: number | null;
+  order: number | null;
   status: string | null;
   confidence: string | null;
   note: string | null;
+  evidence: Array<{
+    layer: string | null;
+    polarity: string | null;
+    text: string;
+    frequency: string | null;
+    years: number[];
+  }>;
 }
 
 export interface ParsedTheme {
@@ -86,9 +108,20 @@ export interface ParsedPrioritySignal {
 }
 
 export interface ParsedTriage {
+  scoreSource: 'deterministic_rubric' | 'model_legacy';
+  rubricVersion: string | null;
+  requirementSetId: string | null;
+  rawFitScore: number | null;
   fitScore: number | null;
   tier: string | null;
   tierReason: string | null;
+  capReasons: string[];
+  coverage: number | null;
+  rankingStatus:
+    | 'ranked'
+    | 'insufficient_evidence'
+    | 'legacy_unranked';
+  rankingReason: string | null;
   summary: string | null;
   bedSetup: string | null;
   priceTotal: string | null;
@@ -100,7 +133,30 @@ export interface ParsedTriage {
   evidenceGaps: TriageEvidenceGap[];
   requirements: ParsedRequirement[];
   scores: Array<{ key: string; value: number }>;
+  affordability: {
+    status: 'within' | 'over' | 'unknown';
+    reasonCode: string | null;
+    reason: string | null;
+    budgetAmount: number | null;
+    priceAmount: number | null;
+    currency: string | null;
+    budgetCurrency: string | null;
+    priceCurrency: string | null;
+    priceBasis: string | null;
+    overByAmount: number | null;
+    overByPercent: number | null;
+    priceSource: string | null;
+    freshness: string | null;
+    mandatoryChargesResolved: boolean | null;
+  } | null;
 }
+
+export type TriageComparisonStatus =
+  | 'ranked'
+  | 'insufficient_evidence'
+  | 'legacy'
+  | 'stale_requirement_set'
+  | 'unscored';
 
 export interface ParsedAiReviews {
   overallSentiment: string | null;
@@ -182,21 +238,115 @@ export function getListingResultsSnapshot(
   };
 }
 
+export function getActiveRequirementSetId(
+  listings: ReviewJobListing[],
+): string | null {
+  const counts = new Map<string, { count: number; firstIndex: number }>();
+  listings.forEach((listing, index) => {
+    const triage = parseTriage(listing);
+    if (
+      triage?.scoreSource !== 'deterministic_rubric'
+      || !triage.requirementSetId
+    ) {
+      return;
+    }
+    const current = counts.get(triage.requirementSetId);
+    counts.set(triage.requirementSetId, {
+      count: (current?.count ?? 0) + 1,
+      firstIndex: current?.firstIndex ?? index,
+    });
+  });
+  return (
+    [...counts.entries()]
+      .sort(
+        (a, b) =>
+          b[1].count - a[1].count
+          || a[1].firstIndex - b[1].firstIndex,
+      )[0]?.[0]
+    ?? null
+  );
+}
+
+export function getTriageComparisonStatus(
+  triage: ParsedTriage | null,
+  activeRequirementSetId: string | null,
+): TriageComparisonStatus {
+  if (!triage) return 'unscored';
+  if (triage.scoreSource === 'model_legacy') return 'legacy';
+  if (
+    activeRequirementSetId
+    && triage.requirementSetId !== activeRequirementSetId
+  ) {
+    return 'stale_requirement_set';
+  }
+  if (triage.rankingStatus === 'insufficient_evidence') {
+    return 'insufficient_evidence';
+  }
+  return 'ranked';
+}
+
 function parseTriage(listing: ReviewJobListing): ParsedTriage | null {
   const triage = asRecord(listing.analysis?.triage);
   if (!triage) {
     return null;
   }
 
+  const scoreSource =
+    triage.scoreSource === 'deterministic_rubric'
+    && asString(triage.rubricVersion)
+    && asString(triage.requirementSetId)
+      ? 'deterministic_rubric'
+      : 'model_legacy';
+  const coverage = asNumber(triage.coverage);
+  const storedRankingStatus = asString(triage.rankingStatus);
+  const rankingStatus: ParsedTriage['rankingStatus'] =
+    scoreSource === 'model_legacy'
+      ? 'legacy_unranked'
+      : storedRankingStatus === 'insufficient_evidence'
+        || (coverage != null && coverage < 0.5)
+        ? 'insufficient_evidence'
+        : 'ranked';
+
   const requirements = Array.isArray(triage.requirements)
     ? triage.requirements.map((item) => {
         const record = asRecord(item);
+        const label =
+          asString(record?.label)
+          ?? asString(record?.requirement)
+          ?? 'Requirement';
+        const evidence = Array.isArray(record?.evidence)
+          ? record.evidence
+              .map((evidenceItem) => {
+                const evidenceRecord = asRecord(evidenceItem);
+                const text = asString(evidenceRecord?.text);
+                if (!text) return null;
+                return {
+                  layer: asString(evidenceRecord?.layer),
+                  polarity: asString(evidenceRecord?.polarity),
+                  text,
+                  frequency: asString(evidenceRecord?.frequency),
+                  years: asNumberArray(evidenceRecord?.years),
+                };
+              })
+              .filter(
+                (
+                  evidenceItem,
+                ): evidenceItem is ParsedRequirement['evidence'][number] =>
+                  evidenceItem != null,
+              )
+          : [];
         return {
-          requirement: asString(record?.requirement) ?? 'Requirement',
+          requirementId: asString(record?.requirementId),
+          requirement: label,
+          label,
           type: asString(record?.type),
+          rank: asNumber(record?.rank),
+          weight: asNumber(record?.weight),
+          order: asNumber(record?.order),
           status: asString(record?.status),
           confidence: asString(record?.confidence),
           note: asString(record?.note),
+          evidence,
         };
       })
     : [];
@@ -212,11 +362,51 @@ function parseTriage(listing: ReviewJobListing): ParsedTriage | null {
     : [];
 
   const price = asRecord(triage.price);
+  const affordabilityRecord = asRecord(triage.affordability);
+  const affordabilityStatus = asString(affordabilityRecord?.status);
+  const affordability: ParsedTriage['affordability'] =
+    affordabilityStatus === 'within'
+    || affordabilityStatus === 'over'
+    || affordabilityStatus === 'unknown'
+      ? {
+          status: affordabilityStatus,
+          reasonCode: asString(affordabilityRecord?.reasonCode),
+          reason: asString(affordabilityRecord?.reason),
+          budgetAmount: asNumber(affordabilityRecord?.budgetAmount),
+          priceAmount: asNumber(affordabilityRecord?.priceAmount),
+          currency: asString(affordabilityRecord?.currency),
+          budgetCurrency: asString(affordabilityRecord?.budgetCurrency),
+          priceCurrency: asString(affordabilityRecord?.priceCurrency),
+          priceBasis: asString(affordabilityRecord?.priceBasis),
+          overByAmount: asNumber(affordabilityRecord?.overByAmount),
+          overByPercent: asNumber(affordabilityRecord?.overByPercent),
+          priceSource: asString(affordabilityRecord?.priceSource),
+          freshness: asString(affordabilityRecord?.freshness),
+          mandatoryChargesResolved:
+            typeof affordabilityRecord?.mandatoryChargesResolved === 'boolean'
+              ? affordabilityRecord.mandatoryChargesResolved
+              : null,
+        }
+      : null;
 
   return {
+    scoreSource,
+    rubricVersion:
+      scoreSource === 'deterministic_rubric'
+        ? asString(triage.rubricVersion)
+        : null,
+    requirementSetId:
+      scoreSource === 'deterministic_rubric'
+        ? asString(triage.requirementSetId)
+        : null,
+    rawFitScore: asNumber(triage.rawFitScore),
     fitScore: asNumber(triage.fitScore),
     tier: asString(triage.tier),
     tierReason: asString(triage.tierReason),
+    capReasons: asStringArray(triage.capReasons),
+    coverage,
+    rankingStatus,
+    rankingReason: asString(triage.rankingReason),
     summary: asString(triage.summary),
     bedSetup: asString(triage.bedSetup),
     priceTotal: asString(price?.total),
@@ -228,6 +418,7 @@ function parseTriage(listing: ReviewJobListing): ParsedTriage | null {
     evidenceGaps: getTriageEvidenceGaps(listing, triage),
     requirements,
     scores,
+    affordability,
   };
 }
 

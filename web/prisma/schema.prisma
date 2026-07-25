@@ -112,6 +112,8 @@ model ReviewJob {
   checkout       String?
   adults         Int             @default(2)
   currency       String          @default("USD")
+  analysisBudgetAmount   Float?
+  analysisBudgetCurrency String?
   filters        Json?
   totalResults   Int             @default(0)
   pagesScanned   Int             @default(0)

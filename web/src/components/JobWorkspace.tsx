@@ -108,6 +108,10 @@ function getSelectedAnalysisSummary(result: ReviewJobResponse['listings'][number
   return {
     tier: triage.tier,
     fitScore: triage.fitScore,
+    scoreSource: triage.scoreSource,
+    rankingStatus: triage.rankingStatus,
+    coverage: triage.coverage,
+    affordability: triage.affordability,
     summary: triage.summary,
     highlights: triage.highlights,
     concerns: triage.concerns,
@@ -124,8 +128,35 @@ interface JobWorkspaceProps {
   initialData: ReviewJobResponse;
 }
 
+function analysisBudgetPayload(amountText: string, currencyText: string) {
+  if (!amountText.trim()) {
+    return {
+      analysisBudgetAmount: null,
+      analysisBudgetCurrency: null,
+    };
+  }
+  const amount = Number(amountText);
+  const currency = currencyText.trim().toUpperCase();
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error('Analysis budget must be a positive full-stay amount.');
+  }
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    throw new Error('Budget currency must be a three-letter code.');
+  }
+  return {
+    analysisBudgetAmount: amount,
+    analysisBudgetCurrency: currency,
+  };
+}
+
 export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   const initialPrompt = initialData.job.prompt ?? '';
+  const initialBudgetAmount =
+    initialData.job.analysisBudgetAmount?.toString() ?? '';
+  const initialBudgetCurrency =
+    initialData.job.analysisBudgetCurrency
+    ?? initialData.job.currency
+    ?? 'USD';
   const [data, setData] = useState(initialData);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [priceDisplay, setPriceDisplay] = useState<PriceDisplayMode>(
@@ -133,6 +164,16 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   );
   const [prompt, setPrompt] = useState(initialPrompt);
   const [savedPrompt, setSavedPrompt] = useState(initialPrompt);
+  const [budgetAmount, setBudgetAmount] = useState(initialBudgetAmount);
+  const [savedBudgetAmount, setSavedBudgetAmount] = useState(
+    initialBudgetAmount,
+  );
+  const [budgetCurrency, setBudgetCurrency] = useState(
+    initialBudgetCurrency,
+  );
+  const [savedBudgetCurrency, setSavedBudgetCurrency] = useState(
+    initialBudgetCurrency,
+  );
   const [isSavingPrompt, setIsSavingPrompt] = useState(false);
   const [isSavingSelection, setIsSavingSelection] = useState(false);
   const [isStartingAnalysis, setIsStartingAnalysis] = useState(false);
@@ -141,10 +182,22 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
 
   const applyJobUpdate = useCallback((nextData: ReviewJobResponse) => {
     const nextPrompt = nextData.job.prompt ?? '';
+    const nextBudgetAmount =
+      nextData.job.analysisBudgetAmount?.toString() ?? '';
+    const nextBudgetCurrency =
+      nextData.job.analysisBudgetCurrency
+      ?? nextData.job.currency
+      ?? 'USD';
     setData(nextData);
     setSavedPrompt(nextPrompt);
     setPrompt((currentPrompt) => (currentPrompt === savedPrompt ? nextPrompt : currentPrompt));
-  }, [savedPrompt]);
+    setSavedBudgetAmount(nextBudgetAmount);
+    setBudgetAmount((current) =>
+      current === savedBudgetAmount ? nextBudgetAmount : current);
+    setSavedBudgetCurrency(nextBudgetCurrency);
+    setBudgetCurrency((current) =>
+      current === savedBudgetCurrency ? nextBudgetCurrency : current);
+  }, [savedBudgetAmount, savedBudgetCurrency, savedPrompt]);
 
   const refreshJob = useCallback(async () => {
     const nextData = await fetchReviewJobResponse(data.job.id);
@@ -195,7 +248,10 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     || isStartingAnalysis
     || data.job.analysisStatus === 'running'
     || analysisQueued;
-  const isPromptDirty = prompt !== savedPrompt;
+  const isPromptDirty =
+    prompt !== savedPrompt
+    || budgetAmount !== savedBudgetAmount
+    || budgetCurrency !== savedBudgetCurrency;
 
   const persistSelection = useCallback(
     async (
@@ -224,9 +280,19 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
 
         const nextData: ReviewJobResponse = await res.json();
         const nextPrompt = nextData.job.prompt ?? '';
+        const nextBudgetAmount =
+          nextData.job.analysisBudgetAmount?.toString() ?? '';
+        const nextBudgetCurrency =
+          nextData.job.analysisBudgetCurrency
+          ?? nextData.job.currency
+          ?? 'USD';
         setData(nextData);
         setSavedPrompt(nextPrompt);
         setPrompt(nextPrompt);
+        setSavedBudgetAmount(nextBudgetAmount);
+        setBudgetAmount(nextBudgetAmount);
+        setSavedBudgetCurrency(nextBudgetCurrency);
+        setBudgetCurrency(nextBudgetCurrency);
         setSaveMessage(successMessage);
       } catch (error) {
         setSaveMessage(error instanceof Error ? error.message : 'Failed to update selection');
@@ -246,10 +312,14 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     setSaveMessage(null);
 
     try {
+      const budget = analysisBudgetPayload(
+        budgetAmount,
+        budgetCurrency,
+      );
       const res = await fetch(`/api/jobs/${data.job.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ prompt, ...budget }),
       });
 
       if (!res.ok) {
@@ -259,16 +329,32 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
 
       const nextData: ReviewJobResponse = await res.json();
       const nextPrompt = nextData.job.prompt ?? '';
+      const nextBudgetAmount =
+        nextData.job.analysisBudgetAmount?.toString() ?? '';
+      const nextBudgetCurrency =
+        nextData.job.analysisBudgetCurrency
+        ?? nextData.job.currency
+        ?? 'USD';
       setData(nextData);
       setSavedPrompt(nextPrompt);
       setPrompt(nextPrompt);
+      setSavedBudgetAmount(nextBudgetAmount);
+      setBudgetAmount(nextBudgetAmount);
+      setSavedBudgetCurrency(nextBudgetCurrency);
+      setBudgetCurrency(nextBudgetCurrency);
       setSaveMessage('Saved');
     } catch (error) {
       setSaveMessage(error instanceof Error ? error.message : 'Failed to save prompt');
     } finally {
       setIsSavingPrompt(false);
     }
-  }, [data.job.id, prompt, viewerCanEdit]);
+  }, [
+    budgetAmount,
+    budgetCurrency,
+    data.job.id,
+    prompt,
+    viewerCanEdit,
+  ]);
 
   const startAnalysis = useCallback(async () => {
     if (!viewerCanEdit) {
@@ -279,10 +365,14 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     setSaveMessage(null);
 
     try {
+      const budget = analysisBudgetPayload(
+        budgetAmount,
+        budgetCurrency,
+      );
       const saveRes = await fetch(`/api/jobs/${data.job.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ prompt, ...budget }),
       });
 
       if (!saveRes.ok) {
@@ -306,7 +396,14 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     } finally {
       setIsStartingAnalysis(false);
     }
-  }, [data.job.id, prompt, refreshJob, viewerCanEdit]);
+  }, [
+    budgetAmount,
+    budgetCurrency,
+    data.job.id,
+    prompt,
+    refreshJob,
+    viewerCanEdit,
+  ]);
 
   const setPublicSharing = useCallback(async (nextValue: boolean) => {
     if (!viewerCanEdit) {
@@ -545,7 +642,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                 <div>
                   <p className="text-sm font-semibold text-white">Analysis Brief</p>
                   <p className="mt-1 text-xs text-stone-500">
-                    Saved preferences feed the full CLI-equivalent analysis run.
+                    Saved quality preferences and the separate full-stay budget feed analysis.
                   </p>
                 </div>
                 <button
@@ -555,7 +652,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                     disabled={isSavingPrompt || analysisLocked}
                     className="rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-2 text-xs font-semibold text-stone-200 transition hover:bg-white/[0.1] disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                  {isSavingPrompt ? 'Saving…' : 'Save brief'}
+                  {isSavingPrompt ? 'Saving…' : 'Save setup'}
                 </button>
               </div>
               <textarea
@@ -566,16 +663,47 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                 className="mt-3 w-full rounded-2xl border border-white/10 bg-black/[0.18] px-4 py-3 text-sm text-white outline-none transition placeholder:text-stone-500 focus:border-[#ff6b5f]/35 focus:bg-black/30"
                 disabled={analysisLocked || isSavingPrompt || isStartingAnalysis}
               />
+              <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_140px]">
+                <label className="text-xs text-stone-400">
+                  Full-stay analysis budget
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={budgetAmount}
+                    onChange={(event) => setBudgetAmount(event.target.value)}
+                    placeholder="Optional, e.g. 4500"
+                    className="mt-1.5 w-full rounded-xl border border-white/10 bg-black/[0.18] px-3 py-2.5 text-sm text-white outline-none transition placeholder:text-stone-600 focus:border-[#ff6b5f]/35"
+                    disabled={analysisLocked || isSavingPrompt || isStartingAnalysis}
+                  />
+                </label>
+                <label className="text-xs text-stone-400">
+                  Currency
+                  <input
+                    type="text"
+                    maxLength={3}
+                    value={budgetCurrency}
+                    onChange={(event) =>
+                      setBudgetCurrency(event.target.value.toUpperCase())}
+                    className="mt-1.5 w-full rounded-xl border border-white/10 bg-black/[0.18] px-3 py-2.5 text-sm uppercase text-white outline-none transition focus:border-[#ff6b5f]/35"
+                    disabled={analysisLocked || isSavingPrompt || isStartingAnalysis}
+                  />
+                </label>
+              </div>
+              <p className="mt-2 text-xs leading-5 text-stone-500">
+                Price never changes the quality tier. It appears separately as within budget,
+                over by a percentage, or unknown with a reason.
+              </p>
               <div className="mt-3 flex items-center justify-between gap-3">
                 <span className="text-xs text-stone-500">
                   {saveMessage
                     ?? (
                       analysisLocked
                         ? (viewerCanEdit
-                          ? 'Brief and selection are locked while analysis is queued or running.'
-                          : 'Shared view is read-only. Ask the owner to edit the brief or run analysis.')
+                          ? 'Brief, budget, and selection are locked while analysis is queued or running.'
+                          : 'Shared view is read-only. Ask the owner to edit the setup or run analysis.')
                         : isPromptDirty
-                        ? 'Unsaved brief changes'
+                        ? 'Unsaved analysis setup changes'
                         : selectedCount > 0
                         ? `Only the ${selectedCount} selected listing${selectedCount === 1 ? '' : 's'} will be analyzed.`
                         : `No shortlist yet, so analysis will run on all ${sortedResults.length} listings.`
@@ -796,15 +924,47 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                 {selectedAnalysisSummary ? (
                   <div className="mt-4 space-y-3">
                     <div className="flex flex-wrap items-center gap-2 text-xs">
-                      {selectedAnalysisSummary.tier && (
+                      {selectedAnalysisSummary.rankingStatus === 'insufficient_evidence' ? (
+                        <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-2.5 py-1 font-semibold uppercase tracking-[0.14em] text-amber-100">
+                          Insufficient evidence
+                        </span>
+                      ) : selectedAnalysisSummary.tier && (
                         <span className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2.5 py-1 font-semibold uppercase tracking-[0.14em] text-emerald-100">
                           {selectedAnalysisSummary.tier.replace(/_/g, ' ')}
+                        </span>
+                      )}
+                      {selectedAnalysisSummary.scoreSource === 'model_legacy' && (
+                        <span className="rounded-full border border-violet-300/20 bg-violet-300/10 px-2.5 py-1 font-semibold text-violet-100">
+                          Legacy AI score
+                        </span>
+                      )}
+                      {selectedAnalysisSummary.scoreSource === 'deterministic_rubric' && (
+                        <span className="rounded-full border border-sky-300/20 bg-sky-300/10 px-2.5 py-1 font-semibold text-sky-100">
+                          {Math.round((selectedAnalysisSummary.coverage ?? 0) * 100)}% coverage
                         </span>
                       )}
                       <EvidenceGapBadge gaps={selectedAnalysisSummary.evidenceGaps} />
                       {selectedAnalysisSummary.fitScore != null && (
                         <span className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 font-medium text-stone-300">
                           Fit {selectedAnalysisSummary.fitScore}
+                        </span>
+                      )}
+                      {selectedAnalysisSummary.affordability?.status === 'within' && (
+                        <span className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2.5 py-1 font-semibold text-emerald-100">
+                          Within budget
+                        </span>
+                      )}
+                      {selectedAnalysisSummary.affordability?.status === 'over' && (
+                        <span className="rounded-full border border-orange-300/20 bg-orange-300/10 px-2.5 py-1 font-semibold text-orange-100">
+                          {Math.round(selectedAnalysisSummary.affordability.overByPercent ?? 0)}% over budget
+                        </span>
+                      )}
+                      {selectedAnalysisSummary.affordability?.status === 'unknown' && (
+                        <span
+                          className="rounded-full border border-stone-300/20 bg-stone-300/10 px-2.5 py-1 font-semibold text-stone-200"
+                          title={selectedAnalysisSummary.affordability.reason ?? undefined}
+                        >
+                          Budget unknown · {selectedAnalysisSummary.affordability.reason ?? 'Reason unavailable.'}
                         </span>
                       )}
                     </div>

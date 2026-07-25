@@ -137,6 +137,8 @@ export interface CreateReviewJobRequest extends FullSearchRequest {
   searchAreaMode?: 'window' | 'rectangle' | 'circle';
   poi?: MapPoint;
   prompt?: string;
+  analysisBudgetAmount?: number;
+  analysisBudgetCurrency?: string;
 }
 
 export interface CreateReviewJobResponse {
@@ -238,6 +240,8 @@ export interface ReviewJobState {
   checkout: string | null;
   adults: number;
   currency: string;
+  analysisBudgetAmount: number | null;
+  analysisBudgetCurrency: string | null;
   filters: Record<string, unknown> | null;
   totalResults: number;
   pagesScanned: number;

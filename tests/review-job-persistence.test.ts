@@ -31,6 +31,8 @@ function makeJob(overrides: Record<string, unknown> = {}) {
     checkout: '2026-03-29',
     adults: 2,
     currency: 'USD',
+    analysisBudgetAmount: null,
+    analysisBudgetCurrency: null,
     filters: null,
     totalResults: 1,
     pagesScanned: 2,
@@ -185,6 +187,22 @@ test('native results readiness is derived from persisted analysis state, not rep
     triageUsd: 0.0027,
     totalUsd: 0.023,
   });
+});
+
+test('explicit full-stay analysis budget is exposed independently of search currency', () => {
+  const response = toReviewJobResponse({
+    job: makeJob({
+      currency: 'PLN',
+      analysisBudgetAmount: 4500,
+      analysisBudgetCurrency: 'USD',
+    }),
+    listings: [makeListing()],
+    events: [],
+  });
+
+  assert.equal(response.job.currency, 'PLN');
+  assert.equal(response.job.analysisBudgetAmount, 4500);
+  assert.equal(response.job.analysisBudgetCurrency, 'USD');
 });
 
 test('legacy html export availability remains separate from native results readiness', () => {

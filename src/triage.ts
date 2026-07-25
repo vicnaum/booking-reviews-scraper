@@ -7,6 +7,17 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { parseModelConfig, getProviderApiKey, PROVIDER_KEY_NAMES, type LLMProvider, type UsageSummary } from './analyze.js';
+import {
+  buildCanonicalRequirementSet,
+  computeAffordability,
+  scoreTriageAssessments,
+  type AffordabilityBudget,
+  type CanonicalRequirementInput,
+  type CanonicalRequirementSet,
+  type ComparableStayPrice,
+  type ParsedAnalysisBudget,
+  type RequirementAssessmentInput,
+} from './triage-rubric.js';
 
 // --- Types ---
 
@@ -16,6 +27,11 @@ export interface TriageOptions {
   aiPhotosFile?: string;     // Path to ai-photos JSON
   model?: string;            // Default: gemini-3-flash-preview:high
   priorities?: string;       // Guest requirements (free text)
+  requirementSet?: CanonicalRequirementSet;
+  temperature?: number;      // Classification temperature. Default: 0
+  budget?: AffordabilityBudget;
+  price?: ComparableStayPrice;
+  priceFreshness?: ComparableStayPrice['freshness'];
 }
 
 export const TRIAGE_EVIDENCE_GAP_ORDER = [
@@ -37,6 +53,7 @@ export interface TriageResult {
   data: any;                 // Parsed triage JSON
   model: string;
   provider: LLMProvider;
+  requirementSet: CanonicalRequirementSet;
   evidenceGaps: TriageEvidenceGap[];
   tokensUsed?: number;
   usage?: UsageSummary;
@@ -46,6 +63,7 @@ export interface TriageResult {
 
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 5000;
+export const TRIAGE_REQUIREMENT_PARSER_VERSION = 'triage-requirements-v1';
 
 // Pricing per 1M tokens (USD)
 const PRICING: Record<string, { input: number; output: number }> = {
@@ -57,7 +75,36 @@ const PRICING: Record<string, { input: number; output: number }> = {
 
 // --- System prompt ---
 
-const TRIAGE_SYSTEM_PROMPT = `You are a property evaluator helping a specific guest decide which rental to book. You have three data sources for each listing:
+const REQUIREMENT_PARSE_SYSTEM_PROMPT = `Convert one guest brief into a canonical, reusable set of quality requirements for comparing many properties.
+
+## Separation of concerns
+- Quality requirements describe evidence-backed property fit only.
+- Extract price/budget language into the separate budget object. Never emit budget, price, value for money, price freshness, or availability as a quality requirement.
+
+## Requirement types
+- deal_breaker: an explicit cannot-accept condition ("will not", "cannot", "must not") or an objective safety/accessibility constraint.
+- must_have: explicit "must", "need", "require", or an objective occupancy/accessibility need.
+- priority: a strong or ranked preference that is not stated as non-negotiable.
+- nice_to_have: a preference or bonus.
+
+## Canonicalization
+- Preserve explicit ranks. Use rank=1 for "#1", "first", or "by far" priority language.
+- Split compound text only when parts can be evaluated independently.
+- Keep synonyms and closely related evidence signals together as criteria.
+- If a ranked umbrella is split, copy its type and rank to every child.
+- Quiet environment, bed comfort, blackout conditions, workspace, and walkability are independently evaluable.
+- Keep sourceText grounded in the guest brief.
+- Do not create IDs or weights. Code owns them.
+- If the brief has only budget language, return an empty definitions array; code will apply the versioned default quality set.
+
+## Budget
+- Use the upper bound of a range as maximumAmount and retain minimumAmount when supplied.
+- Normalize currency to an ISO 4217 code when the brief makes it clear.
+- Do not inflate the maximum for "slightly over is acceptable"; overage is shown separately.`;
+
+const TRIAGE_SYSTEM_PROMPT = `You are a property evidence classifier helping a specific guest compare rentals. The user message supplies a frozen canonical requirement set. Classify exactly those requirement IDs; never parse, merge, split, rename, reorder, reweight, or add requirements.
+
+You have three data sources for each listing:
 
 1. **Listing Details** (most reliable) — factual data from the platform: beds, amenities, pricing, description, ratings
 2. **Review Analysis** (reliable) — AI-condensed summary of guest reviews with themes, quotes, scores
@@ -72,67 +119,126 @@ const TRIAGE_SYSTEM_PROMPT = `You are a property evaluator helping a specific gu
 - Mark requirements that depend only on missing evidence as unknown, and state the limitation in the tier reason and summary.
 
 ## Requirement Evaluation Rules
-1. Parse the guest's requirements from their free text.
-2. Classify each as **must_have** (strong language: "need", "must", "essential", "require", critical needs like beds/rooms) or **nice_to_have** (preferences: "prefer", "ideally", "would be nice", "bonus").
-3. For each requirement, determine status:
+1. Return one outcome for every supplied requirement ID.
+2. For each requirement, determine status:
    - **met**: Clear evidence it's satisfied
    - **partial**: Partially satisfied or with caveats
    - **unmet**: Clear evidence it's NOT satisfied
    - **unknown**: Insufficient data to determine
-4. Be **conservative**: prefer "unknown" over "unmet" when data is insufficient. Never assume the worst.
-5. **An unmet must_have with high confidence IS a deal-breaker.** These are the guest's non-negotiable requirements. If someone needs a separate bedroom for their daughter and the listing doesn't have one, that's a deal-breaker — period. It doesn't matter how clean or well-located the place is. Include it in the dealBreakers array.
+3. Be conservative: prefer "unknown" over "unmet" when data is insufficient. Never assume the worst.
+4. Confidence describes evidence strength, not how important the requirement is.
+5. Include the strongest supporting and contradicting evidence. Use exact, concise evidence text from the supplied artifacts when possible.
+6. Frequency and years are evidence metadata only; omit them when unavailable.
 
-## Scoring Rules
-- **scores.fit** (0-10): How well the listing matches the guest's specific requirements. This is the MOST important dimension.
-  - If ANY must_have is unmet with high confidence, fit score MUST be ≤ 3.
-  - If ANY must_have is unmet with medium confidence, fit score MUST be ≤ 5.
-- **fitScore** (0-100): Overall suitability score combining:
-  - ~50% from fit (requirement match)
-  - ~25% from quality (cleanliness, modernity, reviews)
-  - ~15% from value for money
-  - ~10% from bonuses (great location, exceptional host, standout features)
-- Same quality at a lower price should score higher on valueForMoney.
-- **Hard tier caps based on must_have status:**
-  - If ONE must_have is unmet with high confidence → tier MUST be "unlikely" or "no_go", fitScore ≤ 40
-  - If TWO+ must_haves are unmet with high confidence → tier MUST be "no_go", fitScore ≤ 24
-  - If ANY must_have is unmet with medium confidence → tier MUST be "unlikely" or below, fitScore ≤ 44
-  - top_pick requires ALL must_haves met
-  - shortlist requires ALL must_haves met or partial
-- **Tier must match fitScore range exactly:**
-  - top_pick: 80-100 — All must-haves met, strong on priorities
-  - shortlist: 65-79 — Most requirements met, minor compromises on nice-to-haves only
-  - consider: 45-64 — Notable gaps but could work (no unmet must-haves with high confidence)
-  - unlikely: 25-44 — Significant issues on key requirements, or a must-have unmet
-  - no_go: 0-24 — Multiple confirmed deal-breakers or a single critical one that makes the listing completely unsuitable
+## Verdict boundary
+- Do not output fitScore, tier, weights, requirement types, caps, or requirement definitions.
+- Code computes the quality score and tier deterministically after your classifications.
+- Price/value prose and diagnostic dimension scores never affect that verdict.
 
 ## Output Guidelines
 - **bedSetup**: Describe the actual sleeping arrangement concisely
 - **highlights**: Top 3-5 genuinely standout features relevant to this guest
 - **concerns**: Top 3-5 notable issues relevant to this guest
-- **dealBreakers**: Any must_have requirement that is unmet with high confidence.
+- **dealBreakers**: Confirmed evidence that makes a weight-3-or-higher requirement fail.
 - **summary**: 2-3 sentences — would you recommend this to this specific guest? Why or why not?
 - **price.valueAssessment**: Compare price to quality/location/amenities. "unknown" if no price data.`;
 
 // --- JSON response schema for Gemini structured output ---
 
+const REQUIREMENT_PARSE_JSON_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    definitions: {
+      type: 'array' as const,
+      items: {
+        type: 'object' as const,
+        properties: {
+          label: { type: 'string' as const },
+          type: {
+            type: 'string' as const,
+            enum: ['deal_breaker', 'must_have', 'priority', 'nice_to_have'],
+          },
+          rank: { type: 'number' as const, nullable: true },
+          sourceText: { type: 'string' as const },
+          criteria: {
+            type: 'array' as const,
+            items: { type: 'string' as const },
+          },
+          order: { type: 'number' as const },
+        },
+        required: [
+          'label',
+          'type',
+          'rank',
+          'sourceText',
+          'criteria',
+          'order',
+        ] as const,
+      },
+    },
+    budget: {
+      type: 'object' as const,
+      nullable: true,
+      properties: {
+        minimumAmount: { type: 'number' as const, nullable: true },
+        maximumAmount: { type: 'number' as const },
+        currency: { type: 'string' as const },
+      },
+      required: ['minimumAmount', 'maximumAmount', 'currency'] as const,
+    },
+  },
+  required: ['definitions', 'budget'] as const,
+};
+
 const TRIAGE_JSON_SCHEMA = {
   type: 'object' as const,
   properties: {
-    fitScore: { type: 'number' as const },
-    tier: { type: 'string' as const, enum: ['top_pick', 'shortlist', 'consider', 'unlikely', 'no_go'] },
-    tierReason: { type: 'string' as const },
     requirements: {
       type: 'array' as const,
       items: {
         type: 'object' as const,
         properties: {
-          requirement: { type: 'string' as const },
-          type: { type: 'string' as const, enum: ['must_have', 'nice_to_have'] },
+          requirementId: { type: 'string' as const },
           status: { type: 'string' as const, enum: ['met', 'partial', 'unmet', 'unknown'] },
           confidence: { type: 'string' as const, enum: ['high', 'medium', 'low'] },
           note: { type: 'string' as const },
+          evidence: {
+            type: 'array' as const,
+            items: {
+              type: 'object' as const,
+              properties: {
+                layer: {
+                  type: 'string' as const,
+                  enum: ['details', 'reviews', 'photos'],
+                },
+                polarity: {
+                  type: 'string' as const,
+                  enum: ['supports', 'contradicts'],
+                },
+                text: { type: 'string' as const },
+                frequency: { type: 'string' as const, nullable: true },
+                years: {
+                  type: 'array' as const,
+                  items: { type: 'number' as const },
+                },
+              },
+              required: [
+                'layer',
+                'polarity',
+                'text',
+                'frequency',
+                'years',
+              ] as const,
+            },
+          },
         },
-        required: ['requirement', 'type', 'status', 'confidence', 'note'] as const,
+        required: [
+          'requirementId',
+          'status',
+          'confidence',
+          'note',
+          'evidence',
+        ] as const,
       },
     },
     scores: {
@@ -162,7 +268,7 @@ const TRIAGE_JSON_SCHEMA = {
     dealBreakers: { type: 'array' as const, items: { type: 'string' as const } },
     summary: { type: 'string' as const },
   },
-  required: ['fitScore', 'tier', 'tierReason', 'requirements', 'scores', 'bedSetup', 'price', 'highlights', 'concerns', 'dealBreakers', 'summary'] as const,
+  required: ['requirements', 'scores', 'bedSetup', 'price', 'highlights', 'concerns', 'dealBreakers', 'summary'] as const,
 };
 
 // --- Helpers ---
@@ -221,6 +327,7 @@ async function callGeminiTriage(
   userMessage: string,
   jsonSchema: any,
   label?: string,
+  temperature = 0,
 ): Promise<CallResult> {
   const generateConfig: any = {
     model: modelName,
@@ -228,7 +335,7 @@ async function callGeminiTriage(
     config: {
       systemInstruction: systemPrompt,
       maxOutputTokens: 8192,
-      temperature: 1.0,
+      temperature,
       responseMimeType: 'application/json',
       responseSchema: jsonSchema,
     },
@@ -278,7 +385,10 @@ async function callGeminiTriage(
 
 // --- Usage tracking ---
 
-function formatUsageSummary(usageMetadata: any, modelName: string, durationMs: number): string {
+function usageSummary(
+  usageMetadata: any,
+  modelName: string,
+): UsageSummary {
   const prompt = usageMetadata?.promptTokenCount || 0;
   const response = usageMetadata?.candidatesTokenCount || 0;
   const thinking = usageMetadata?.thoughtsTokenCount || 0;
@@ -286,13 +396,307 @@ function formatUsageSummary(usageMetadata: any, modelName: string, durationMs: n
   const pricing = PRICING[modelName] || PRICING.default;
   const inputCost = (prompt / 1_000_000) * pricing.input;
   const outputCost = (response / 1_000_000) * pricing.output;
-  const totalCost = inputCost + outputCost;
+  return {
+    inputTokens: prompt,
+    outputTokens: response,
+    thinkingTokens: thinking || undefined,
+    cost: +(inputCost + outputCost).toFixed(4),
+  };
+}
 
-  let line = `  ${prompt.toLocaleString()} in / ${response.toLocaleString()} out`;
-  if (thinking) line += ` (${thinking.toLocaleString()} thinking)`;
+function mergeUsage(
+  values: Array<UsageSummary | undefined>,
+): UsageSummary {
+  const present = values.filter(
+    (value): value is UsageSummary => value != null,
+  );
+  const thinking = present.reduce(
+    (sum, value) => sum + (value.thinkingTokens ?? 0),
+    0,
+  );
+  return {
+    inputTokens: present.reduce(
+      (sum, value) => sum + value.inputTokens,
+      0,
+    ),
+    outputTokens: present.reduce(
+      (sum, value) => sum + value.outputTokens,
+      0,
+    ),
+    thinkingTokens: thinking || undefined,
+    cost: +present.reduce((sum, value) => sum + value.cost, 0).toFixed(4),
+  };
+}
+
+function formatUsageSummary(
+  usage: UsageSummary,
+  modelName: string,
+  durationMs: number,
+): string {
+  const pricing = PRICING[modelName] || PRICING.default;
+  const inputCost = (usage.inputTokens / 1_000_000) * pricing.input;
+  const outputCost = (usage.outputTokens / 1_000_000) * pricing.output;
+
+  let line = `  ${usage.inputTokens.toLocaleString()} in / ${usage.outputTokens.toLocaleString()} out`;
+  if (usage.thinkingTokens) {
+    line += ` (${usage.thinkingTokens.toLocaleString()} thinking)`;
+  }
   line += ` [${(durationMs / 1000).toFixed(1)}s]`;
-  line += `\n  Cost: $${inputCost.toFixed(4)} input + $${outputCost.toFixed(4)} output = $${totalCost.toFixed(4)} (${modelName})`;
+  line += `\n  Cost: $${inputCost.toFixed(4)} input + $${outputCost.toFixed(4)} output = $${usage.cost.toFixed(4)} (${modelName})`;
   return line;
+}
+
+export function getTriageRequirementParserVersion(
+  modelStr: string,
+  priorities?: string | null,
+): string {
+  if (!priorities?.trim()) return 'triage-default-requirements-v1';
+  const modelConfig = parseModelConfig(modelStr);
+  return [
+    TRIAGE_REQUIREMENT_PARSER_VERSION,
+    modelConfig.provider,
+    modelConfig.model,
+    modelConfig.thinkingLevel || 'default',
+  ].join(':');
+}
+
+async function parseRequirementSet(input: {
+  ai: any;
+  modelName: string;
+  thinkingLevel: string | null;
+  priorities?: string;
+}): Promise<{
+  requirementSet: CanonicalRequirementSet;
+  call: CallResult | null;
+}> {
+  const parserVersion = getTriageRequirementParserVersion(
+    `${input.modelName}${input.thinkingLevel ? `:${input.thinkingLevel}` : ''}`,
+    input.priorities,
+  );
+  if (!input.priorities?.trim()) {
+    return {
+      requirementSet: buildCanonicalRequirementSet({
+        brief: null,
+        parserVersion,
+      }),
+      call: null,
+    };
+  }
+
+  const call = await callGeminiTriage(
+    input.ai,
+    input.modelName,
+    input.thinkingLevel,
+    REQUIREMENT_PARSE_SYSTEM_PROMPT,
+    input.priorities,
+    REQUIREMENT_PARSE_JSON_SCHEMA,
+    'requirements',
+    0,
+  );
+  let parsed: any;
+  try {
+    parsed = JSON.parse(call.text);
+  } catch {
+    throw new Error(
+      `Failed to parse requirement response as JSON:\n${call.text.slice(0, 500)}`,
+    );
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Requirement response must be a JSON object.');
+  }
+  if (!Array.isArray(parsed.definitions)) {
+    throw new Error('Requirement response must contain definitions.');
+  }
+
+  const parsedBudget: ParsedAnalysisBudget | null =
+    parsed.budget && typeof parsed.budget === 'object'
+      ? {
+          minimumAmount: parsed.budget.minimumAmount ?? null,
+          maximumAmount: parsed.budget.maximumAmount,
+          currency: parsed.budget.currency,
+          basis: 'stay',
+          source: 'brief',
+        }
+      : null;
+
+  return {
+    requirementSet: buildCanonicalRequirementSet({
+      brief: input.priorities,
+      parserVersion,
+      definitions: parsed.definitions as CanonicalRequirementInput[],
+      parsedBudget,
+    }),
+    call,
+  };
+}
+
+function normalizePriceCurrency(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.trim().toUpperCase();
+  if (/^[A-Z]{3}$/.test(text)) return text;
+  if (text === '$' || text.includes('US$')) return 'USD';
+  if (text === '€') return 'EUR';
+  if (text === '£') return 'GBP';
+  if (text.includes('ZŁ')) return 'PLN';
+  return null;
+}
+
+function parsePriceText(
+  value: unknown,
+  fallbackCurrency?: unknown,
+): { amount: number; currency: string } | null {
+  if (typeof value !== 'string') return null;
+  const currency =
+    normalizePriceCurrency(value.match(/\b[A-Z]{3}\b/)?.[0])
+    ?? normalizePriceCurrency(
+      value.includes('zł')
+        ? 'PLN'
+        : value.includes('€')
+          ? 'EUR'
+          : value.includes('£')
+            ? 'GBP'
+            : value.includes('$')
+              ? 'USD'
+              : fallbackCurrency,
+    );
+  if (!currency) return null;
+
+  const numeric = value.match(/\d[\d\s\u00a0.,]*/)?.[0]
+    ?.replace(/[\s\u00a0]/g, '');
+  if (!numeric) return null;
+
+  const lastComma = numeric.lastIndexOf(',');
+  const lastDot = numeric.lastIndexOf('.');
+  let normalized = numeric;
+  if (lastComma >= 0 && lastDot >= 0) {
+    const decimalSeparator = lastComma > lastDot ? ',' : '.';
+    const thousandsSeparator = decimalSeparator === ',' ? '.' : ',';
+    normalized = normalized.split(thousandsSeparator).join('');
+    normalized = normalized.replace(decimalSeparator, '.');
+  } else {
+    const separator = lastComma >= 0 ? ',' : lastDot >= 0 ? '.' : null;
+    if (separator) {
+      const occurrences = normalized.split(separator).length - 1;
+      const fractionalDigits = normalized.length
+        - normalized.lastIndexOf(separator)
+        - 1;
+      if (occurrences > 1 || fractionalDigits === 3) {
+        normalized = normalized.split(separator).join('');
+      } else {
+        normalized = normalized.replace(separator, '.');
+      }
+    }
+  }
+  const amount = Number(normalized);
+  return Number.isFinite(amount) && amount >= 0
+    ? { amount, currency }
+    : null;
+}
+
+export function extractComparableStayPrice(
+  listing: any,
+  freshness: ComparableStayPrice['freshness'] = 'unknown',
+): ComparableStayPrice | null {
+  const pricing = listing?.pricing;
+  if (!pricing || typeof pricing !== 'object') return null;
+
+  const capturedAt =
+    typeof listing.priceCapturedAt === 'string'
+      ? listing.priceCapturedAt
+      : typeof listing.scrapedAt === 'string'
+        ? listing.scrapedAt
+        : null;
+  const rateType: ComparableStayPrice['rateType'] =
+    pricing.rateType === 'member'
+      ? 'member'
+      : pricing.rateType === 'unknown'
+        ? 'unknown'
+        : 'public';
+  const mandatoryChargesResolved =
+    typeof pricing.mandatoryChargesResolved === 'boolean'
+      ? pricing.mandatoryChargesResolved
+      : true;
+
+  if (
+    pricing.total
+    && typeof pricing.total === 'object'
+    && typeof pricing.total.amount === 'number'
+  ) {
+    const currency = normalizePriceCurrency(pricing.total.currency);
+    if (currency) {
+      return {
+        amount: pricing.total.amount,
+        currency,
+        basis: 'stay',
+        source:
+          typeof pricing.total.source === 'string'
+            ? pricing.total.source
+            : 'upstream',
+        capturedAt,
+        freshness,
+        rateType,
+        mandatoryChargesResolved,
+      };
+    }
+  }
+
+  const directTotal = parsePriceText(
+    pricing.totalPrice,
+    pricing.currency,
+  );
+  if (directTotal) {
+    return {
+      ...directTotal,
+      basis: 'stay',
+      source: 'upstream',
+      capturedAt,
+      freshness,
+      rateType,
+      mandatoryChargesResolved,
+    };
+  }
+
+  if (Array.isArray(pricing.rooms)) {
+    const totals = pricing.rooms
+      .map((room: any) =>
+        parsePriceText(room?.totalPrice, pricing.currency))
+      .filter(
+        (
+          total: { amount: number; currency: string } | null,
+        ): total is { amount: number; currency: string } => total != null,
+      )
+      .sort((a: { amount: number }, b: { amount: number }) =>
+        a.amount - b.amount);
+    if (totals.length > 0) {
+      return {
+        ...totals[0],
+        basis: 'stay',
+        source: 'upstream',
+        capturedAt,
+        freshness,
+        rateType,
+        mandatoryChargesResolved,
+      };
+    }
+  }
+  return null;
+}
+
+function deterministicTierReason(
+  score: ReturnType<typeof scoreTriageAssessments>,
+): string {
+  if (score.rankingReason) return score.rankingReason;
+  if (score.capReasons.length > 0) {
+    return (
+      `Deterministic quality score ${score.rawFitScore} was capped to `
+      + `${score.fitScore} by ${score.capReasons.length} hard-requirement `
+      + `${score.capReasons.length === 1 ? 'rule' : 'rules'}.`
+    );
+  }
+  return (
+    `Deterministic quality fit from ${score.requirements.length} canonical `
+    + `requirements with ${Math.round(score.coverage * 100)}% known-weight coverage.`
+  );
 }
 
 // --- Main entry point ---
@@ -300,6 +704,10 @@ function formatUsageSummary(usageMetadata: any, modelName: string, durationMs: n
 export async function runTriage(options: TriageOptions): Promise<TriageResult> {
   const { listingFile, aiReviewsFile, aiPhotosFile, priorities } = options;
   const modelStr = options.model || process.env.LLM_MODEL || 'gemini-3-flash-preview:high';
+  const temperature = options.temperature ?? 0;
+  if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
+    throw new Error('Triage temperature must be between 0 and 2.');
+  }
 
   // 1. Parse model config
   const modelConfig = parseModelConfig(modelStr);
@@ -356,11 +764,24 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
 
   const normalizedEvidenceGaps = normalizeTriageEvidenceGaps(evidenceGaps);
 
-  // 5. Build user message
+  // 5. Resolve the canonical set before evaluating the listing.
+  const { GoogleGenAI } = await import('@google/genai');
+  const ai = new GoogleGenAI({ apiKey });
+  const parsedRequirements = options.requirementSet
+    ? { requirementSet: options.requirementSet, call: null }
+    : await parseRequirementSet({
+        ai,
+        modelName: modelConfig.model,
+        thinkingLevel: modelConfig.thinkingLevel,
+        priorities,
+      });
+  const requirementSet = parsedRequirements.requirementSet;
+
+  // 6. Build the classifier message.
   const sections: string[] = [];
 
-  sections.push('## Guest Requirements');
-  sections.push(priorities || 'No specific requirements provided. Evaluate for a general traveler.');
+  sections.push('## Canonical Requirement Definitions');
+  sections.push(JSON.stringify(requirementSet.definitions, null, 2));
   sections.push('');
 
   sections.push('## Evidence Availability');
@@ -388,12 +809,11 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
 
   const userMessage = sections.join('\n');
 
-  // 6. Call Gemini API
+  // 7. Classify evidence with no model-authored verdict.
   console.error(`Triage: ${listingData.title || listingData.id || listingFile}`);
   console.error(`Model: ${modelConfig.model}${modelConfig.thinkingLevel ? `:${modelConfig.thinkingLevel}` : ''}`);
-
-  const { GoogleGenAI } = await import('@google/genai');
-  const ai = new GoogleGenAI({ apiKey });
+  console.error(`Requirement set: ${requirementSet.id}`);
+  console.error(`Classification temperature: ${temperature}`);
 
   const result = await callGeminiTriage(
     ai,
@@ -403,9 +823,10 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
     userMessage,
     TRIAGE_JSON_SCHEMA,
     'triage',
+    temperature,
   );
 
-  // 7. Parse result
+  // 8. Parse classifications and apply the pure rubric.
   let parsed: any;
   try {
     parsed = JSON.parse(result.text);
@@ -415,25 +836,68 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error('Gemini triage response must be a JSON object.');
   }
-  parsed.evidenceGaps = normalizedEvidenceGaps;
+  if (!Array.isArray(parsed.requirements)) {
+    throw new Error('Gemini triage response must contain requirements.');
+  }
 
-  // 8. Log usage
+  const score = scoreTriageAssessments(
+    requirementSet,
+    parsed.requirements as RequirementAssessmentInput[],
+  );
+  const parsedBudget = requirementSet.parsedBudget;
+  const budget: AffordabilityBudget | null =
+    options.budget
+    ?? (parsedBudget
+      ? {
+          amount: parsedBudget.maximumAmount,
+          currency: parsedBudget.currency,
+          basis: 'stay',
+          source: 'brief',
+        }
+      : null);
+  const price =
+    options.price
+    ?? extractComparableStayPrice(
+      listingData,
+      options.priceFreshness ?? 'unknown',
+    );
+  const affordability = computeAffordability({ budget, price });
+  const triageData = {
+    ...parsed,
+    ...score,
+    tierReason: deterministicTierReason(score),
+    requirementSet,
+    affordability,
+    evidenceGaps: normalizedEvidenceGaps,
+  };
+
+  // 9. Log and return combined parser + classifier usage.
+  const requirementUsage = parsedRequirements.call
+    ? usageSummary(
+        parsedRequirements.call.usageMetadata,
+        modelConfig.model,
+      )
+    : undefined;
+  const classificationUsage = usageSummary(
+    result.usageMetadata,
+    modelConfig.model,
+  );
+  const usage = mergeUsage([requirementUsage, classificationUsage]);
+  const durationMs =
+    (parsedRequirements.call?.durationMs ?? 0) + result.durationMs;
   console.error(`\nUsage:`);
-  console.error(formatUsageSummary(result.usageMetadata, modelConfig.model, result.durationMs));
-
-  const prompt = result.usageMetadata?.promptTokenCount || 0;
-  const response = result.usageMetadata?.candidatesTokenCount || 0;
-  const thinking = result.usageMetadata?.thoughtsTokenCount || 0;
-  const pricing = PRICING[modelConfig.model] || PRICING.default;
-  const cost = +(((prompt / 1_000_000) * pricing.input) + ((response / 1_000_000) * pricing.output)).toFixed(4);
+  console.error(
+    formatUsageSummary(usage, modelConfig.model, durationMs),
+  );
 
   return {
-    data: parsed,
+    data: triageData,
     model: modelConfig.model,
     provider: modelConfig.provider,
+    requirementSet,
     evidenceGaps: normalizedEvidenceGaps,
-    tokensUsed: prompt,
-    usage: { inputTokens: prompt, outputTokens: response, thinkingTokens: thinking || undefined, cost },
+    tokensUsed: usage.inputTokens,
+    usage,
   };
 }
 
@@ -442,7 +906,7 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
 async function main() {
   const args = process.argv.slice(2);
   if (args.length === 0) {
-    console.error('Usage: triage <listing-file> [--ai-reviews <file>] [--ai-photos <file>] [--model <model>] [--priorities <text>]');
+    console.error('Usage: triage <listing-file> [--ai-reviews <file>] [--ai-photos <file>] [--model <model>] [--priorities <text>] [--temperature <n>] [--budget <amount>] [--budget-currency <code>]');
     process.exit(1);
   }
 
@@ -454,15 +918,38 @@ async function main() {
   let aiPhotosFile: string | undefined;
   let model: string | undefined;
   let priorities: string | undefined;
+  let temperature = 0;
+  let budgetAmount: number | undefined;
+  let budgetCurrency = 'USD';
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === '--ai-reviews' && args[i + 1]) { aiReviewsFile = args[++i]; }
     else if (args[i] === '--ai-photos' && args[i + 1]) { aiPhotosFile = args[++i]; }
     else if (args[i] === '--model' && args[i + 1]) { model = args[++i]; }
     else if (args[i] === '--priorities' && args[i + 1]) { priorities = args[++i]; }
+    else if (args[i] === '--temperature' && args[i + 1]) { temperature = Number(args[++i]); }
+    else if (args[i] === '--budget' && args[i + 1]) { budgetAmount = Number(args[++i]); }
+    else if (args[i] === '--budget-currency' && args[i + 1]) { budgetCurrency = args[++i].toUpperCase(); }
   }
 
-  const result = await runTriage({ listingFile, aiReviewsFile, aiPhotosFile, model, priorities });
+  const budget =
+    budgetAmount == null
+      ? undefined
+      : {
+          amount: budgetAmount,
+          currency: budgetCurrency,
+          basis: 'stay' as const,
+          source: 'explicit' as const,
+        };
+  const result = await runTriage({
+    listingFile,
+    aiReviewsFile,
+    aiPhotosFile,
+    model,
+    priorities,
+    temperature,
+    budget,
+  });
   console.log(JSON.stringify(result.data, null, 2));
 }
 

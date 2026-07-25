@@ -5,16 +5,25 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { resolveBatchOutputDir, runBatch } from '../src/batch.js';
+import { buildCanonicalRequirementSet } from '../src/triage-rubric.js';
 
 const repositoryRoot = process.cwd();
 const bookingUrl =
   'https://www.booking.com/hotel/us/example-hotel.en-gb.html';
+const fixtureRequirementSet = buildCanonicalRequirementSet({
+  parserVersion: 'fixture-parser-v1',
+  definitions: [{ label: 'Fixture quality', type: 'priority' }],
+});
 
 function canonicalPath(filePath: string): string {
   return fs.realpathSync(filePath);
 }
 
-function writeBookingFixture(rootDir: string): {
+function writeBookingFixture(
+  rootDir: string,
+  id = 'example-hotel',
+  url = bookingUrl,
+): {
   listingFile: string;
   reviewsFile: string;
   photosDir: string;
@@ -22,14 +31,14 @@ function writeBookingFixture(rootDir: string): {
   const listingFile = path.join(
     rootDir,
     'listings',
-    'listing_example-hotel.json',
+    `listing_${id}.json`,
   );
   const reviewsFile = path.join(
     rootDir,
     'reviews',
-    'example-hotel_reviews.json',
+    `${id}_reviews.json`,
   );
-  const photosDir = path.join(rootDir, 'photos', 'example-hotel');
+  const photosDir = path.join(rootDir, 'photos', id);
 
   fs.mkdirSync(path.dirname(listingFile), { recursive: true });
   fs.mkdirSync(path.dirname(reviewsFile), { recursive: true });
@@ -37,8 +46,8 @@ function writeBookingFixture(rootDir: string): {
   fs.writeFileSync(
     listingFile,
     JSON.stringify({
-      id: 'example-hotel',
-      url: bookingUrl,
+      id,
+      url,
       linkedRoomId: null,
       reviewCount: 1,
       photos: [{ associatedRooms: [] }],
@@ -71,6 +80,152 @@ test('default batch output directories are platform-specific', () => {
     resolveBatchOutputDir({ outputDir: '/tmp/reviewr-output' }, 'booking'),
     '/tmp/reviewr-output',
   );
+});
+
+test('batch freezes one canonical requirement set and reloads it on rerun', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'reviewr-requirement-set-'),
+  );
+  const outputDir = path.join(tempDir, 'output');
+  const manifestPath = path.join(outputDir, 'batch_manifest.json');
+  const urlsFile = path.join(tempDir, 'urls.txt');
+  const originalGeminiApiKey = process.env.GEMINI_API_KEY;
+  const ids = ['first-hotel', 'second-hotel'];
+  const urls = ids.map(
+    (id) => `https://www.booking.com/hotel/us/${id}.en-gb.html`,
+  );
+  const reusableSet = buildCanonicalRequirementSet({
+    parserVersion: 'triage-default-requirements-v1',
+    definitions: [{ label: 'Frozen quality', type: 'priority' }],
+  });
+
+  try {
+    for (let index = 0; index < ids.length; index++) {
+      writeBookingFixture(outputDir, ids[index], urls[index]);
+    }
+    fs.writeFileSync(urlsFile, `${urls.join('\n')}\n`);
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        createdAt: '2026-07-24T00:00:00.000Z',
+        updatedAt: '2026-07-24T00:00:00.000Z',
+        dates: {},
+        listings: Object.fromEntries(
+          ids.map((id, index) => [
+            `booking/${id}`,
+            {
+              platform: 'booking',
+              id,
+              url: urls[index],
+              details: {
+                status: 'fetched',
+                file: `listings/listing_${id}.json`,
+              },
+              reviews: { status: 'skipped', reason: 'not needed' },
+              photos: { status: 'skipped', reason: 'not needed' },
+              aiReviews: { status: 'skipped', reason: 'not needed' },
+              aiPhotos: { status: 'skipped', reason: 'not needed' },
+              triage: { status: 'not_requested' },
+            },
+          ]),
+        ),
+      }),
+    );
+    process.env.GEMINI_API_KEY = 'fixture-key';
+
+    const firstRunSets: Array<string | null> = [];
+    await runBatch(
+      [urlsFile],
+      {
+        fetchDetails: false,
+        fetchReviews: false,
+        fetchPhotos: false,
+        aiReviews: false,
+        aiPhotos: false,
+        triage: true,
+        aiReviewsExplicit: false,
+        aiPhotosExplicit: false,
+        triageExplicit: true,
+        force: false,
+        retryFailed: false,
+        downloadPhotosAll: false,
+        outputDir,
+        scopeManifestToInput: true,
+        print: false,
+        artifactCache: null,
+      },
+      {
+        runTriage: async (options) => {
+          firstRunSets.push(options.requirementSet?.id ?? null);
+          return {
+            data: { tier: 'shortlist', fitScore: 75 },
+            model: 'fixture-model',
+            provider: 'gemini',
+            requirementSet: options.requirementSet ?? reusableSet,
+            evidenceGaps: [],
+          };
+        },
+      },
+    );
+
+    assert.deepEqual(firstRunSets, [null, reusableSet.id]);
+    const persistedSet = JSON.parse(
+      fs.readFileSync(
+        path.join(outputDir, 'triage-requirements.json'),
+        'utf-8',
+      ),
+    );
+    assert.equal(persistedSet.id, reusableSet.id);
+    const persistedManifest = JSON.parse(
+      fs.readFileSync(manifestPath, 'utf-8'),
+    );
+    assert.equal(persistedManifest.requirementSet.id, reusableSet.id);
+
+    const rerunSets: string[] = [];
+    await runBatch(
+      [urlsFile],
+      {
+        fetchDetails: false,
+        fetchReviews: false,
+        fetchPhotos: false,
+        aiReviews: false,
+        aiPhotos: false,
+        triage: true,
+        aiReviewsExplicit: false,
+        aiPhotosExplicit: false,
+        triageExplicit: true,
+        force: true,
+        retryFailed: false,
+        downloadPhotosAll: false,
+        outputDir,
+        scopeManifestToInput: true,
+        print: false,
+        artifactCache: null,
+      },
+      {
+        runTriage: async (options) => {
+          assert.ok(options.requirementSet);
+          rerunSets.push(options.requirementSet.id);
+          return {
+            data: { tier: 'shortlist', fitScore: 75 },
+            model: 'fixture-model',
+            provider: 'gemini',
+            requirementSet: options.requirementSet,
+            evidenceGaps: [],
+          };
+        },
+      },
+    );
+    assert.deepEqual(rerunSets, [reusableSet.id, reusableSet.id]);
+  } finally {
+    if (originalGeminiApiKey === undefined) {
+      delete process.env.GEMINI_API_KEY;
+    } else {
+      process.env.GEMINI_API_KEY = originalGeminiApiKey;
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test('default-dir resumed Booking artifacts remain eligible for every AI phase', async () => {
@@ -202,6 +357,8 @@ test('default-dir resumed Booking artifacts remain eligible for every AI phase',
             data: { tier: 'shortlist', fitScore: 75 },
             model: 'fixture-model',
             provider: 'gemini',
+            requirementSet:
+              options.requirementSet ?? fixtureRequirementSet,
             evidenceGaps: [],
           };
         },
@@ -368,6 +525,8 @@ test('triage records missing review evidence in its artifact and manifest', asyn
             data: { tier: 'consider', fitScore: 55 },
             model: 'fixture-model',
             provider: 'gemini',
+            requirementSet:
+              options.requirementSet ?? fixtureRequirementSet,
             evidenceGaps: [],
           };
         },
@@ -485,6 +644,8 @@ test('triage records missing photo evidence in its artifact and manifest', async
             data: { tier: 'consider', fitScore: 55 },
             model: 'fixture-model',
             provider: 'gemini',
+            requirementSet:
+              options.requirementSet ?? fixtureRequirementSet,
             evidenceGaps: [],
           };
         },
