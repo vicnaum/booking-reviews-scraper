@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   hasPersistedReviewJobResults,
+  toReviewJobListingRecord,
   toReviewJobResponse,
 } from '../web/src/lib/reviewJobs.js';
 import { AI_JOB_BUDGET_ENV } from '../web/src/lib/aiBudget.js';
@@ -118,6 +119,42 @@ function makeListing(overrides: Record<string, unknown> = {}) {
     ...overrides,
   } as any;
 }
+
+test('Airbnb stay totals persist into the dedicated totalPrice column', () => {
+  const row = toReviewJobListingRecord('job_1', {
+    id: 'airbnb_1',
+    platform: 'airbnb',
+    name: 'Airbnb stay',
+    url: 'https://www.airbnb.com/rooms/1',
+    rating: 4.9,
+    reviewCount: 20,
+    pricing: {
+      nightly: {
+        amount: 156.46,
+        currency: 'USD',
+        source: 'upstream',
+      },
+      total: {
+        amount: 1877.52,
+        currency: 'USD',
+        source: 'derived',
+      },
+      display: {
+        amount: 156,
+        currency: 'USD',
+        source: 'displayed',
+        basis: 'night',
+      },
+    },
+    coordinates: null,
+    propertyType: 'Entire home',
+    photoUrl: null,
+  });
+
+  assert.equal(row.priceAmount, 156.46);
+  assert.equal(row.totalPrice, 1877.52);
+  assert.equal(row.priceCurrency, 'USD');
+});
 
 test('native results readiness is derived from persisted analysis state, not report files', () => {
   assert.equal(hasPersistedReviewJobResults(makeJob({ analysisStatus: 'completed' })), true);

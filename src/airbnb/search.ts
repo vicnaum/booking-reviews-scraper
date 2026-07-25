@@ -18,6 +18,7 @@ import {
 } from '../search/adaptive.js';
 import { bboxIntersectsCircle, subdivideBbox } from '../search/geo.js';
 import { filterSearchResults } from '../search/filters.js';
+import { getStayNights } from '../search/pricing.js';
 import type { AirbnbSearchParams, SearchResult, BoundingBox, ProgressCallback } from '../search/types.js';
 
 const AIRBNB_BASE_URL = 'https://www.airbnb.com';
@@ -154,7 +155,11 @@ async function searchAirbnbSSR(
         seenIds.add(id);
 
         const coord = listing.location?.coordinate || listing.coordinate;
-        const pricing = parseAirbnbStructuredDisplayPrice(item?.structuredDisplayPrice, params.currency);
+        const pricing = parseAirbnbStructuredDisplayPrice(
+          item?.structuredDisplayPrice,
+          params.currency,
+          getStayNights(params.checkin, params.checkout),
+        );
 
         // Check for superhost badge
         const badges = item?.badges || [];

@@ -24,6 +24,7 @@ import {
   buildProxyUrl,
   resolveProxyProtocol,
 } from '../config.js';
+import { getStayNights } from '../search/pricing.js';
 import type {
   BookingSearchParams,
   SearchResult,
@@ -77,20 +78,6 @@ function getMatchingUnitConfigurations(result: any): any[] {
   }
 
   return configurations;
-}
-
-function getStayNights(params: BookingSearchParams): number | null {
-  if (!params.checkin || !params.checkout) {
-    return null;
-  }
-
-  const diffMs =
-    new Date(params.checkout).getTime() - new Date(params.checkin).getTime();
-  if (!Number.isFinite(diffMs) || diffMs <= 0) {
-    return null;
-  }
-
-  return Math.max(1, Math.round(diffMs / 86400000));
 }
 
 // --- Session management ---
@@ -733,7 +720,7 @@ function parseSearchResult(r: any, params: BookingSearchParams): SearchResult | 
   const pricing = parseBookingGraphQLPricing(
     priceInfo,
     params.currency,
-    getStayNights(params),
+    getStayNights(params.checkin, params.checkout),
   );
 
   const reviewScore = r?.basicPropertyData?.reviewScore;
