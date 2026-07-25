@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { resolveBatchOutputDir, runBatch } from '../src/batch.js';
 import { buildCanonicalRequirementSet } from '../src/triage-rubric.js';
+import { TRIAGE_CLASSIFIER_VERSION } from '../src/triage-comparability.js';
 
 const repositoryRoot = process.cwd();
 const bookingUrl =
@@ -162,6 +163,8 @@ test('batch freezes one canonical requirement set and reloads it on rerun', asyn
             data: { tier: 'shortlist', fitScore: 75 },
             model: 'fixture-model',
             provider: 'gemini',
+            classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+            modelId: 'gemini:fixture-model:default',
             requirementSet: options.requirementSet ?? reusableSet,
             evidenceGaps: [],
           };
@@ -211,6 +214,8 @@ test('batch freezes one canonical requirement set and reloads it on rerun', asyn
             data: { tier: 'shortlist', fitScore: 75 },
             model: 'fixture-model',
             provider: 'gemini',
+            classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+            modelId: 'gemini:fixture-model:default',
             requirementSet: options.requirementSet,
             evidenceGaps: [],
           };
@@ -357,6 +362,8 @@ test('default-dir resumed Booking artifacts remain eligible for every AI phase',
             data: { tier: 'shortlist', fitScore: 75 },
             model: 'fixture-model',
             provider: 'gemini',
+            classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+            modelId: 'gemini:fixture-model:default',
             requirementSet:
               options.requirementSet ?? fixtureRequirementSet,
             evidenceGaps: [],
@@ -525,6 +532,8 @@ test('triage records missing review evidence in its artifact and manifest', asyn
             data: { tier: 'consider', fitScore: 55 },
             model: 'fixture-model',
             provider: 'gemini',
+            classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+            modelId: 'gemini:fixture-model:default',
             requirementSet:
               options.requirementSet ?? fixtureRequirementSet,
             evidenceGaps: [],
@@ -644,6 +653,8 @@ test('triage records missing photo evidence in its artifact and manifest', async
             data: { tier: 'consider', fitScore: 55 },
             model: 'fixture-model',
             provider: 'gemini',
+            classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+            modelId: 'gemini:fixture-model:default',
             requirementSet:
               options.requirementSet ?? fixtureRequirementSet,
             evidenceGaps: [],

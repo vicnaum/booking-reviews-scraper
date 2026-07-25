@@ -2255,6 +2255,11 @@ export async function runBatch(
             budget: options.analysisBudget,
             priceFreshness:
               entry.details.source === 'network' ? 'fresh' : 'unknown',
+            stayContext: {
+              checkIn: manifest.dates.checkIn,
+              checkOut: manifest.dates.checkOut,
+              adults: manifest.dates.adults,
+            },
           });
 
           if (!result.data || typeof result.data !== 'object' || Array.isArray(result.data)) {

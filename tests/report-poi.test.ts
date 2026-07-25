@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { generateReport } from '../src/report.js';
+import { TRIAGE_CLASSIFIER_VERSION } from '../src/triage-comparability.js';
 
 test('generateReport surfaces POI distance in the report output', async () => {
   const rootDir = fs.mkdtempSync(
@@ -122,6 +123,7 @@ test('generateReport ranks only the active deterministic set', async () => {
         scoreSource: 'deterministic_rubric',
         rubricVersion: '1',
         requirementSetId: 'reqset_active',
+        classifierVersion: TRIAGE_CLASSIFIER_VERSION,
         rawFitScore: 60,
         fitScore: 60,
         tier: 'consider',
@@ -136,6 +138,7 @@ test('generateReport ranks only the active deterministic set', async () => {
         scoreSource: 'deterministic_rubric',
         rubricVersion: '1',
         requirementSetId: 'reqset_active',
+        classifierVersion: TRIAGE_CLASSIFIER_VERSION,
         rawFitScore: 90,
         fitScore: 90,
         tier: 'top_pick',
@@ -236,7 +239,7 @@ test('generateReport ranks only the active deterministic set', async () => {
     assert.doesNotMatch(heroHtml, /Legacy high score/);
     assert.match(
       html,
-      /1 insufficient-evidence and 1 legacy\/stale verdicts/,
+      /1 insufficient-evidence, 0 older-policy, and 1 legacy\/stale-set verdicts/,
     );
     assert.match(
       html,

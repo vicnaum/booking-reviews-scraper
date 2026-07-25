@@ -6,6 +6,7 @@ export const REVIEW_JOB_QUEUE_NAME = 'stayreviewr-review-job';
 export interface ReviewJobQueueData {
   reviewJobId: string;
   phase: 'search' | 'analyze';
+  analysisMode?: 'full' | 'triage';
 }
 
 export function getReviewJobQueueJobId(
@@ -67,7 +68,10 @@ export async function enqueueReviewJobSearch(reviewJobId: string) {
   });
 }
 
-export async function enqueueReviewJobAnalysis(reviewJobId: string) {
+export async function enqueueReviewJobAnalysis(
+  reviewJobId: string,
+  analysisMode: 'full' | 'triage' = 'full',
+) {
   const queue = getReviewJobQueue();
   const jobId = getReviewJobQueueJobId('analyze', reviewJobId);
   const existing = await queue.getJob(jobId);
@@ -82,6 +86,7 @@ export async function enqueueReviewJobAnalysis(reviewJobId: string) {
   return queue.add('run-review-job-analysis', {
     reviewJobId,
     phase: 'analyze',
+    analysisMode,
   }, {
     jobId,
   });

@@ -17,14 +17,19 @@ import { getPriceDisplayInfo, resolveComparablePrice } from '@/lib/pricing';
 import { buildListingUrl } from '@/lib/listingLinks';
 import {
   formatPoiDistance,
-  getActiveRequirementSetId,
+  getActiveTriageComparison,
   getListingResultsSnapshot,
   getTriageComparisonStatus,
+  getTriageRegradeListingCount,
   getTierRank,
   type ParsedTriage,
   type ParsedTheme,
   type TriageComparisonStatus,
 } from '@/lib/results';
+import {
+  estimateTriageRegradeCostUsd,
+  getCurrentTriageComparability,
+} from '@cli/triage-comparability';
 import {
   fetchReviewJobResponse,
   getStoredReviewJobPriceDisplay,
@@ -87,11 +92,13 @@ function comparisonRank(status: TriageComparisonStatus): number {
       return 0;
     case 'insufficient_evidence':
       return 1;
+    case 'stale_classifier_policy':
+      return 2;
     case 'legacy':
     case 'stale_requirement_set':
-      return 2;
-    case 'unscored':
       return 3;
+    case 'unscored':
+      return 4;
   }
 }
 
@@ -111,7 +118,10 @@ function displayedTier(
   if (status === 'insufficient_evidence') {
     return { label: 'Insufficient evidence', tier: null };
   }
-  if (status === 'stale_requirement_set') {
+  if (
+    status === 'stale_requirement_set'
+    || status === 'stale_classifier_policy'
+  ) {
     return { label: 'Unranked', tier: null };
   }
   return { label: tierLabel(triage?.tier ?? null), tier: triage?.tier ?? null };
@@ -127,7 +137,12 @@ function VerdictSourceBadge({
   if (!triage) return null;
   const status =
     comparisonStatus
-    ?? getTriageComparisonStatus(triage, triage.requirementSetId);
+    ?? getTriageComparisonStatus(
+      triage,
+      triage.requirementSetId
+        ? getCurrentTriageComparability(triage.requirementSetId)
+        : null,
+    );
   if (status === 'legacy') {
     return (
       <span className="rounded-full border border-violet-300/20 bg-violet-300/10 px-2 py-1 text-[10px] font-semibold text-violet-100">
@@ -139,6 +154,13 @@ function VerdictSourceBadge({
     return (
       <span className="rounded-full border border-stone-300/20 bg-stone-300/10 px-2 py-1 text-[10px] font-semibold text-stone-200">
         Stale requirement set
+      </span>
+    );
+  }
+  if (status === 'stale_classifier_policy') {
+    return (
+      <span className="rounded-full border border-stone-300/20 bg-stone-300/10 px-2 py-1 text-[10px] font-semibold text-stone-200">
+        Older classifier policy
       </span>
     );
   }
@@ -1177,6 +1199,8 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   const [sortKey, setSortKey] = useState<SortKey>('fitScore');
   const [sortAsc, setSortAsc] = useState(false);
   const [isUpdatingSharing, setIsUpdatingSharing] = useState(false);
+  const [isRegrading, setIsRegrading] = useState(false);
+  const [regradeMessage, setRegradeMessage] = useState<string | null>(null);
   const [shareMessage, setShareMessage] = useState<string | null>(null);
   const rowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
   const resizeFrameRef = useRef<number | null>(null);
@@ -1305,10 +1329,65 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     }
   }, [applyJobUpdate, data.job.id, data.listings]);
 
-  const activeRequirementSetId = useMemo(
-    () => getActiveRequirementSetId(data.listings),
+  const activeTriageComparison = useMemo(
+    () => getActiveTriageComparison(data.listings),
     [data.listings],
   );
+  const olderPolicyCount = useMemo(
+    () =>
+      data.listings.filter(
+        (listing) =>
+          !listing.hidden
+          && getTriageComparisonStatus(
+            getListingResultsSnapshot(listing).triage,
+            activeTriageComparison,
+          ) === 'stale_classifier_policy',
+      ).length,
+    [activeTriageComparison, data.listings],
+  );
+  const regradeListingCount = useMemo(
+    () => getTriageRegradeListingCount(data.listings),
+    [data.listings],
+  );
+  const estimatedRegradeCostUsd =
+    estimateTriageRegradeCostUsd(regradeListingCount);
+  const regradeLocked =
+    isRegrading
+    || data.job.analysisStatus === 'running'
+    || data.job.analysisCurrentPhase === 'queued';
+
+  const startTriageRegrade = useCallback(async () => {
+    if (!viewerCanEdit || regradeLocked) return;
+    setIsRegrading(true);
+    setRegradeMessage(null);
+    try {
+      const response = await fetch(`/api/jobs/${data.job.id}/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'triage' }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.error || 'Failed to queue regrade');
+      }
+      setRegradeMessage(
+        `Whole-job regrade queued for ${regradeListingCount} listings.`,
+      );
+      await refreshJob();
+    } catch (error) {
+      setRegradeMessage(
+        error instanceof Error ? error.message : 'Failed to queue regrade',
+      );
+    } finally {
+      setIsRegrading(false);
+    }
+  }, [
+    data.job.id,
+    refreshJob,
+    regradeListingCount,
+    regradeLocked,
+    viewerCanEdit,
+  ]);
 
   const baseRankedResults = useMemo(() => {
     const next = [...data.listings];
@@ -1318,12 +1397,12 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     next.sort((a, b) => {
       const triageA = getListingResultsSnapshot(a).triage;
       const triageB = getListingResultsSnapshot(b).triage;
-      if (activeRequirementSetId) {
+      if (activeTriageComparison) {
         const groupA = comparisonRank(
-          getTriageComparisonStatus(triageA, activeRequirementSetId),
+          getTriageComparisonStatus(triageA, activeTriageComparison),
         );
         const groupB = comparisonRank(
-          getTriageComparisonStatus(triageB, activeRequirementSetId),
+          getTriageComparisonStatus(triageB, activeTriageComparison),
         );
         if (groupA !== groupB) return groupA - groupB;
         if (groupA !== 0) {
@@ -1368,7 +1447,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     });
     return next;
   }, [
-    activeRequirementSetId,
+    activeTriageComparison,
     data.job.checkin,
     data.job.checkout,
     data.listings,
@@ -1383,32 +1462,32 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
 
     if (sortKey === 'rank') {
       if (!sortAsc) return next;
-      if (!activeRequirementSetId) return [...next].reverse();
+      if (!activeTriageComparison) return [...next].reverse();
       const ranked = next.filter((listing) =>
         getTriageComparisonStatus(
           getListingResultsSnapshot(listing).triage,
-          activeRequirementSetId,
+          activeTriageComparison,
         ) === 'ranked');
       const unranked = next.filter((listing) =>
         getTriageComparisonStatus(
           getListingResultsSnapshot(listing).triage,
-          activeRequirementSetId,
+          activeTriageComparison,
         ) !== 'ranked');
       return [...ranked.reverse(), ...unranked];
     }
 
     next.sort((a, b) => {
-      if (activeRequirementSetId) {
+      if (activeTriageComparison) {
         const groupA = comparisonRank(
           getTriageComparisonStatus(
             getListingResultsSnapshot(a).triage,
-            activeRequirementSetId,
+            activeTriageComparison,
           ),
         );
         const groupB = comparisonRank(
           getTriageComparisonStatus(
             getListingResultsSnapshot(b).triage,
-            activeRequirementSetId,
+            activeTriageComparison,
           ),
         );
         if (groupA !== groupB) return groupA - groupB;
@@ -1460,7 +1539,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
 
     return next;
   }, [
-    activeRequirementSetId,
+    activeTriageComparison,
     baseRankedResults,
     data.job.checkin,
     data.job.checkout,
@@ -1483,11 +1562,11 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         const triage = getListingResultsSnapshot(listing).triage;
         const comparisonStatus = getTriageComparisonStatus(
           triage,
-          activeRequirementSetId,
+          activeTriageComparison,
         );
         const tier = triage?.tier ?? 'unscored';
         if (
-          (!activeRequirementSetId || comparisonStatus === 'ranked')
+          (!activeTriageComparison || comparisonStatus === 'ranked')
           && !activeTiers.has(tier)
         ) {
           return false;
@@ -1519,7 +1598,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       }),
     [
       activeTiers,
-      activeRequirementSetId,
+      activeTriageComparison,
       data.job.checkin,
       data.job.checkout,
       displayableResults,
@@ -1542,10 +1621,10 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   const heroResults = useMemo(() => {
     const comparable = filteredResults.filter(
       (listing) =>
-        !activeRequirementSetId
+        !activeTriageComparison
         || getTriageComparisonStatus(
           getListingResultsSnapshot(listing).triage,
-          activeRequirementSetId,
+          activeTriageComparison,
         ) === 'ranked',
     );
     const topPicks = comparable.filter(
@@ -1555,17 +1634,17 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     return topPicks.length >= 3
       ? topPicks.slice(0, 5)
       : comparable.slice(0, 5);
-  }, [activeRequirementSetId, filteredResults]);
+  }, [activeTriageComparison, filteredResults]);
 
   const tierCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const listing of displayableResults) {
       const triage = getListingResultsSnapshot(listing).triage;
       if (
-        activeRequirementSetId
+        activeTriageComparison
         && getTriageComparisonStatus(
           triage,
-          activeRequirementSetId,
+          activeTriageComparison,
         ) !== 'ranked'
       ) {
         continue;
@@ -1574,7 +1653,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       counts.set(tier, (counts.get(tier) ?? 0) + 1);
     }
     return counts;
-  }, [activeRequirementSetId, displayableResults]);
+  }, [activeTriageComparison, displayableResults]);
 
   useEffect(() => {
     if (filteredResults.length === 0) {
@@ -1739,7 +1818,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         const snapshot = getListingResultsSnapshot(listing);
         const comparisonStatus = getTriageComparisonStatus(
           snapshot.triage,
-          activeRequirementSetId,
+          activeTriageComparison,
         );
         const verdictTier = displayedTier(
           snapshot.triage,
@@ -1751,22 +1830,24 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
             ? comparisonRank(
                 getTriageComparisonStatus(
                   getListingResultsSnapshot(rows[index - 1]).triage,
-                  activeRequirementSetId,
+                  activeTriageComparison,
                 ),
               )
             : null;
         const groupHeader =
-          activeRequirementSetId
+          activeTriageComparison
           && comparisonGroup !== 0
           && comparisonGroup !== previousComparisonGroup
             ? comparisonGroup === 1
               ? 'Insufficient evidence — shown for audit, not ranked with comparable results'
               : comparisonGroup === 2
-                ? 'Legacy or stale verdicts — regrade the whole job before comparing'
+                ? 'Classified under an older policy — regrade the whole job before comparing'
+                : comparisonGroup === 3
+                  ? 'Legacy or stale requirement-set verdicts — regrade before comparing'
                 : 'Unscored listings'
             : null;
         const showPeerRank =
-          !activeRequirementSetId || comparisonStatus === 'ranked';
+          !activeTriageComparison || comparisonStatus === 'ranked';
         const priceInfo = getPriceDisplayInfo(listing, priceDisplay, {
           checkin: data.job.checkin,
           checkout: data.job.checkout,
@@ -1994,7 +2075,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         );
       }),
     [
-      activeRequirementSetId,
+      activeTriageComparison,
       data.job,
       expandedId,
       handleSelect,
@@ -2075,6 +2156,49 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
           </div>
 
           <AiBudgetNotice job={data.job} variant="results" className="mt-4" />
+
+          {olderPolicyCount > 0 && (
+            <div className="mt-5 rounded-2xl border border-amber-300/20 bg-amber-300/[0.08] p-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-amber-100">
+                    Classified under an older policy
+                  </p>
+                  <p className="mt-1 max-w-3xl text-xs leading-5 text-amber-100/75">
+                    {olderPolicyCount} verdict{olderPolicyCount === 1 ? ' is' : 's are'} preserved
+                    for audit but excluded from peer ranking until the whole job is regraded.
+                    This reuses saved review and photo analysis and calls only triage.
+                  </p>
+                  <p className="mt-1 text-xs text-amber-100/65">
+                    Whole-job scope: {regradeListingCount} listing
+                    {regradeListingCount === 1 ? '' : 's'}. Estimated AI cost:{' '}
+                    {formatUsdCost(estimatedRegradeCostUsd)} at about $0.006 per listing.
+                  </p>
+                  {regradeMessage && (
+                    <p className="mt-2 text-xs font-semibold text-amber-100">
+                      {regradeMessage}
+                    </p>
+                  )}
+                </div>
+                {viewerCanEdit ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void startTriageRegrade();
+                    }}
+                    disabled={regradeLocked}
+                    className="rounded-2xl border border-amber-200/25 bg-amber-100/10 px-4 py-2 text-sm font-semibold text-amber-50 transition hover:bg-amber-100/15 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {regradeLocked ? 'Regrade queued or running…' : 'Regrade whole job'}
+                  </button>
+                ) : (
+                  <span className="text-xs font-semibold text-amber-100/70">
+                    Ask the job owner to regrade.
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
 
           <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">

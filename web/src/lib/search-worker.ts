@@ -1083,7 +1083,10 @@ async function syncReviewJobArtifactsToDb(input: {
   };
 }
 
-async function runReviewJobAnalysis(reviewJobId: string) {
+async function runReviewJobAnalysis(
+  reviewJobId: string,
+  analysisMode: 'full' | 'triage' = 'full',
+) {
   await cleanupExpiredReviewJobArtifactRuns('before-analysis');
   await ensureReviewJobAnalysisRows(reviewJobId);
 
@@ -1107,7 +1110,17 @@ async function runReviewJobAnalysis(reviewJobId: string) {
   }
 
   const selectedListings = jobRecord.listings.filter((listing) => listing.selected);
-  const activeListings = selectedListings.length > 0 ? selectedListings : jobRecord.listings;
+  const activeListings =
+    analysisMode === 'triage'
+      ? jobRecord.listings
+      : selectedListings.length > 0
+        ? selectedListings
+        : jobRecord.listings;
+  if (analysisMode === 'triage' && !jobRecord.artifactRoot) {
+    throw new Error(
+      `Review job ${reviewJobId} has no saved artifacts for a triage-only regrade`,
+    );
+  }
   const startedAt = new Date();
   const runId = startedAt.toISOString().replace(/[:.]/g, '-');
   const { rootDir: artifactRoot, urlsFilePath } = prepareReviewJobRunWorkspace({
@@ -1120,6 +1133,7 @@ async function runReviewJobAnalysis(reviewJobId: string) {
       checkOut: jobRecord.checkout ?? undefined,
       adults: jobRecord.adults,
     },
+    mode: analysisMode,
   });
   const analysisModel = process.env.LLM_MODEL || 'gemini-3-flash-preview:high';
   const aiBudgetUsd = resolveAiJobBudgetUsd();
@@ -1155,7 +1169,8 @@ async function runReviewJobAnalysis(reviewJobId: string) {
     totalAiCostUsd: jobRecord.totalAiCostUsd,
   };
   const activeListingIds = activeListings.map((listing) => listing.id);
-  const hasSelectedSubset = selectedListings.length > 0;
+  const hasSelectedSubset =
+    analysisMode === 'full' && selectedListings.length > 0;
   const inactiveListingIds = hasSelectedSubset
     ? jobRecord.listings
       .filter((listing) => !listing.selected)
@@ -1167,6 +1182,7 @@ async function runReviewJobAnalysis(reviewJobId: string) {
     triageCostUsd: 0,
     totalAiCostUsd: 0,
   };
+  let currentRunAiCostUsd = 0;
 
   fs.writeFileSync(
     urlsFilePath,
@@ -1188,10 +1204,16 @@ async function runReviewJobAnalysis(reviewJobId: string) {
         startedAt,
         completedAt: null,
         durationMs: null,
-        aiReviewsCostUsd: 0,
-        aiPhotosCostUsd: 0,
-        triageCostUsd: 0,
-        totalAiCostUsd: 0,
+        ...(analysisMode === 'full'
+          ? {
+              aiReviewsCostUsd: 0,
+              aiPhotosCostUsd: 0,
+              triageCostUsd: 0,
+              totalAiCostUsd: 0,
+            }
+          : {
+              triageCostUsd: 0,
+            }),
       },
     });
     await tx.reviewJob.update({
@@ -1206,10 +1228,16 @@ async function runReviewJobAnalysis(reviewJobId: string) {
         analysisStartedAt: startedAt,
         analysisCompletedAt: null,
         analysisDurationMs: null,
-        aiReviewsCostUsd: 0,
-        aiPhotosCostUsd: 0,
-        triageCostUsd: 0,
-        totalAiCostUsd: 0,
+        ...(analysisMode === 'full'
+          ? {
+              aiReviewsCostUsd: 0,
+              aiPhotosCostUsd: 0,
+              triageCostUsd: 0,
+              totalAiCostUsd: 0,
+            }
+          : {
+              triageCostUsd: 0,
+            }),
       },
     });
   });
@@ -1217,22 +1245,26 @@ async function runReviewJobAnalysis(reviewJobId: string) {
   await appendReviewJobEvent(reviewJobId, {
     phase: 'analysis',
     level: 'info',
-    message: `Started analysis for ${activeListings.length} listings`,
+    message:
+      analysisMode === 'triage'
+        ? `Started triage-only regrade for ${activeListings.length} listings`
+        : `Started analysis for ${activeListings.length} listings`,
     payload: {
       listingCount: activeListings.length,
       artifactRoot,
       model: analysisModel,
       aiBudgetUsd,
+      analysisMode,
     },
   });
 
   try {
     await runBatch([urlsFilePath], {
-      fetchDetails: true,
-      fetchReviews: true,
-      fetchPhotos: true,
-      aiReviews: true,
-      aiPhotos: true,
+      fetchDetails: analysisMode === 'full',
+      fetchReviews: analysisMode === 'full',
+      fetchPhotos: analysisMode === 'full',
+      aiReviews: analysisMode === 'full',
+      aiPhotos: analysisMode === 'full',
       triage: true,
       aiModel: analysisModel,
       aiPriorities: jobRecord.prompt?.trim() || undefined,
@@ -1246,8 +1278,8 @@ async function runReviewJobAnalysis(reviewJobId: string) {
               source: 'explicit',
             }
           : undefined,
-      aiReviewsExplicit: true,
-      aiPhotosExplicit: true,
+      aiReviewsExplicit: analysisMode === 'full',
+      aiPhotosExplicit: analysisMode === 'full',
       triageExplicit: true,
       checkIn: jobRecord.checkin ?? undefined,
       checkOut: jobRecord.checkout ?? undefined,
@@ -1300,10 +1332,10 @@ async function runReviewJobAnalysis(reviewJobId: string) {
         onBeforeAiCall: async (checkpoint) => {
           if (
             aiBudgetUsd != null
-            && hasReachedAiJobBudget(persistedAiCosts.totalAiCostUsd, aiBudgetUsd)
+            && hasReachedAiJobBudget(currentRunAiCostUsd, aiBudgetUsd)
           ) {
             throw new AiJobBudgetExceededError({
-              totalCostUsd: persistedAiCosts.totalAiCostUsd,
+              totalCostUsd: currentRunAiCostUsd,
               budgetUsd: aiBudgetUsd,
               phase: checkpoint.phase,
             });
@@ -1322,6 +1354,10 @@ async function runReviewJobAnalysis(reviewJobId: string) {
             });
             return costs;
           });
+          currentRunAiCostUsd =
+            analysisMode === 'triage'
+              ? persistedAiCosts.triageCostUsd
+              : persistedAiCosts.totalAiCostUsd;
         },
         onScrapeComplete: async ({ outputDir, manifest }) => {
           injectPoiContextIntoListingArtifacts({
@@ -1412,17 +1448,21 @@ async function runReviewJobAnalysis(reviewJobId: string) {
           ...aggregatedAiCosts,
         },
       });
-      await tx.reviewJobEvent.create({
-        data: buildReviewJobEventData(reviewJobId, {
-          phase: 'analysis',
-          level: overallStatus === 'completed' ? 'info' : 'warning',
-          message: 'Analysis completed',
+        await tx.reviewJobEvent.create({
+          data: buildReviewJobEventData(reviewJobId, {
+            phase: 'analysis',
+            level: overallStatus === 'completed' ? 'info' : 'warning',
+            message:
+              analysisMode === 'triage'
+                ? 'Triage-only regrade completed'
+                : 'Analysis completed',
           payload: {
             status: overallStatus,
             listingCount: activeListings.length,
             resultsReady,
             legacyReportAvailable: !!reportPath,
             selectedSubset: hasSelectedSubset,
+            analysisMode,
             costs: aggregatedAiCosts,
           },
         }),
@@ -1430,7 +1470,7 @@ async function runReviewJobAnalysis(reviewJobId: string) {
     });
 
     console.log(
-      `[review-worker] analysis completed ${reviewJobId} with status ${overallStatus}`,
+      `[review-worker] ${analysisMode} analysis completed ${reviewJobId} with status ${overallStatus}`,
     );
   } catch (error) {
     if (error instanceof AiJobBudgetExceededError) {
@@ -1580,7 +1620,10 @@ const reviewJobWorker = new Worker<ReviewJobQueueData>(
       return;
     }
 
-    await runReviewJobAnalysis(job.data.reviewJobId);
+    await runReviewJobAnalysis(
+      job.data.reviewJobId,
+      job.data.analysisMode ?? 'full',
+    );
   },
   {
     connection: getRedisConnectionOptions(),

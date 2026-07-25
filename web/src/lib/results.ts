@@ -2,6 +2,11 @@ import type {
   ReviewJobListing,
   TriageEvidenceGap,
 } from '../types.js';
+import {
+  getCurrentTriageComparability,
+  getTriageComparabilityKey,
+  type TriageComparabilityDescriptor,
+} from '@cli/triage-comparability';
 
 const TRIAGE_EVIDENCE_GAP_ORDER: TriageEvidenceGap[] = [
   'details',
@@ -111,6 +116,9 @@ export interface ParsedTriage {
   scoreSource: 'deterministic_rubric' | 'model_legacy';
   rubricVersion: string | null;
   requirementSetId: string | null;
+  classifierVersion: string | null;
+  modelId: string | null;
+  comparabilityKey: string | null;
   rawFitScore: number | null;
   fitScore: number | null;
   tier: string | null;
@@ -156,7 +164,16 @@ export type TriageComparisonStatus =
   | 'insufficient_evidence'
   | 'legacy'
   | 'stale_requirement_set'
+  | 'stale_classifier_policy'
   | 'unscored';
+
+export type ActiveTriageComparison = TriageComparabilityDescriptor;
+
+export function getTriageRegradeListingCount(
+  listings: Array<Pick<ReviewJobListing, 'hidden'>>,
+): number {
+  return listings.filter((listing) => !listing.hidden).length;
+}
 
 export interface ParsedAiReviews {
   overallSentiment: string | null;
@@ -267,17 +284,32 @@ export function getActiveRequirementSetId(
   );
 }
 
+export function getActiveTriageComparison(
+  listings: ReviewJobListing[],
+): ActiveTriageComparison | null {
+  const requirementSetId = getActiveRequirementSetId(listings);
+  return requirementSetId
+    ? getCurrentTriageComparability(requirementSetId)
+    : null;
+}
+
 export function getTriageComparisonStatus(
   triage: ParsedTriage | null,
-  activeRequirementSetId: string | null,
+  activeComparison: ActiveTriageComparison | null,
 ): TriageComparisonStatus {
   if (!triage) return 'unscored';
   if (triage.scoreSource === 'model_legacy') return 'legacy';
   if (
-    activeRequirementSetId
-    && triage.requirementSetId !== activeRequirementSetId
+    activeComparison
+    && triage.requirementSetId !== activeComparison.requirementSetId
   ) {
     return 'stale_requirement_set';
+  }
+  if (
+    activeComparison
+    && triage.comparabilityKey !== activeComparison.key
+  ) {
+    return 'stale_classifier_policy';
   }
   if (triage.rankingStatus === 'insufficient_evidence') {
     return 'insufficient_evidence';
@@ -297,6 +329,26 @@ function parseTriage(listing: ReviewJobListing): ParsedTriage | null {
     && asString(triage.requirementSetId)
       ? 'deterministic_rubric'
       : 'model_legacy';
+  const rubricVersion =
+    scoreSource === 'deterministic_rubric'
+      ? asString(triage.rubricVersion)
+      : null;
+  const requirementSetId =
+    scoreSource === 'deterministic_rubric'
+      ? asString(triage.requirementSetId)
+      : null;
+  const classifierVersion =
+    scoreSource === 'deterministic_rubric'
+      ? asString(triage.classifierVersion)
+      : null;
+  const comparabilityKey =
+    scoreSource === 'deterministic_rubric'
+      ? getTriageComparabilityKey({
+          rubricVersion,
+          requirementSetId,
+          classifierVersion,
+        })
+      : null;
   const coverage = asNumber(triage.coverage);
   const storedRankingStatus = asString(triage.rankingStatus);
   const rankingStatus: ParsedTriage['rankingStatus'] =
@@ -391,14 +443,11 @@ function parseTriage(listing: ReviewJobListing): ParsedTriage | null {
 
   return {
     scoreSource,
-    rubricVersion:
-      scoreSource === 'deterministic_rubric'
-        ? asString(triage.rubricVersion)
-        : null,
-    requirementSetId:
-      scoreSource === 'deterministic_rubric'
-        ? asString(triage.requirementSetId)
-        : null,
+    rubricVersion,
+    requirementSetId,
+    classifierVersion,
+    modelId: asString(triage.modelId),
+    comparabilityKey,
     rawFitScore: asNumber(triage.rawFitScore),
     fitScore: asNumber(triage.fitScore),
     tier: asString(triage.tier),
