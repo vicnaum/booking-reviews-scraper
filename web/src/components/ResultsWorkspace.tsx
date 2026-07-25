@@ -29,6 +29,7 @@ import { useReviewJobPolling } from '@/hooks/useReviewJobPolling';
 import PlatformBadge from './PlatformBadge';
 import ResultsJobMap from './ResultsJobMap';
 import AiBudgetNotice from './AiBudgetNotice';
+import EvidenceGapBadge from './EvidenceGapBadge';
 
 const MIN_MAP_HEIGHT = 280;
 const TIER_ORDER = ['top_pick', 'shortlist', 'consider', 'unlikely', 'no_go'] as const;
@@ -152,6 +153,7 @@ function buildExportPayload(
       title: listing.name,
       fitScore: snapshot.triage?.fitScore ?? null,
       tier: snapshot.triage?.tier ?? null,
+      evidenceGaps: snapshot.triage?.evidenceGaps ?? [],
       priceTotal: snapshot.triage?.priceTotal ?? null,
       pricePerNight: snapshot.triage?.pricePerNight ?? null,
     };
@@ -445,7 +447,7 @@ function HeroCard({
         <div className="h-44 w-full bg-white/5" />
       )}
       <div className="space-y-3 p-4">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="rounded-lg bg-white text-black px-2 py-1 text-xs font-bold">
             {snapshot.triage?.fitScore ?? '—'}
           </span>
@@ -456,6 +458,7 @@ function HeroCard({
           >
             {tierLabel(snapshot.triage?.tier ?? null)}
           </span>
+          <EvidenceGapBadge gaps={snapshot.triage?.evidenceGaps} />
         </div>
 
         <div>
@@ -593,6 +596,20 @@ function ListingDetailPanel({
 
           {activeTab === 'triage' && (
             <div className="space-y-4 pt-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-lg bg-white px-2.5 py-1.5 text-xs font-bold text-black">
+                  Fit {triage?.fitScore ?? '—'}
+                </span>
+                <span
+                  className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${tierClassName(
+                    triage?.tier ?? null,
+                  )}`}
+                >
+                  {tierLabel(triage?.tier ?? null)}
+                </span>
+                <EvidenceGapBadge gaps={triage?.evidenceGaps} />
+              </div>
+
               <div className="flex flex-wrap gap-2 text-xs text-stone-300">
                 <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
                   {priceInfo.primary}
@@ -1597,13 +1614,16 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 </div>
               </td>
               <td className="px-3 py-3 align-top">
-                <span
-                  className={`inline-flex rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] ${tierClassName(
-                    snapshot.triage?.tier ?? null,
-                  )}`}
-                >
-                  {tierLabel(snapshot.triage?.tier ?? null)}
-                </span>
+                <div className="flex flex-col items-start gap-1.5">
+                  <span
+                    className={`inline-flex rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] ${tierClassName(
+                      snapshot.triage?.tier ?? null,
+                    )}`}
+                  >
+                    {tierLabel(snapshot.triage?.tier ?? null)}
+                  </span>
+                  <EvidenceGapBadge gaps={snapshot.triage?.evidenceGaps} />
+                </div>
               </td>
               <td className="px-3 py-3 align-top text-sm font-semibold text-white">
                 {snapshot.triage?.fitScore ?? '—'}

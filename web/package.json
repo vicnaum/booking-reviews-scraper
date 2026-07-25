@@ -12,7 +12,7 @@
     "backfill:ai-costs": "dotenv -e ../.env -e .env.local -- tsx scripts/backfill-ai-costs.ts",
     "cleanup:artifacts": "dotenv -e ../.env -e .env.local -- tsx scripts/cleanup-artifacts.ts",
     "test:pricing": "tsx --test src/lib/pricing.test.ts",
-    "test:ui": "tsx --test src/components/AiBudgetNotice.test.tsx",
+    "test:ui": "tsx --test src/components/*.test.tsx",
     "lint": "eslint .",
     "db:generate": "dotenv -e ../.env -e .env.local -- prisma generate",
     "db:push": "dotenv -e ../.env -e .env.local -- prisma db push",

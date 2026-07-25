@@ -64,6 +64,8 @@ export type PhaseStatus =
   | 'skipped'
   | 'partial';
 
+export type TriageEvidenceGap = 'details' | 'reviews' | 'photos';
+
 export interface SearchResult {
   id: string;
   platform: Platform;

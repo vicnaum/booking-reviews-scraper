@@ -9,12 +9,14 @@ import type {
 } from '@/types';
 import { resolveComparablePrice } from '@/lib/pricing';
 import { formatUsdCost, hasAiCosts } from '@/lib/aiCosts';
+import { getListingResultsSnapshot } from '@/lib/results';
 import {
   fetchReviewJobResponse,
   getStoredReviewJobPriceDisplay,
 } from '@/lib/reviewJobClient';
 import { useReviewJobPolling } from '@/hooks/useReviewJobPolling';
 import AiBudgetNotice from './AiBudgetNotice';
+import EvidenceGapBadge from './EvidenceGapBadge';
 import ResultCard from './ResultCard';
 
 const JobMap = dynamic(() => import('./JobMap'), {
@@ -63,13 +65,6 @@ function phaseStatusLabel(status: ReviewJobResponse['job']['analysisStatus']) {
   return 'Skipped';
 }
 
-function asStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter((item): item is string => typeof item === 'string');
-}
-
 function getEventDetailLine(
   event: ReviewJobResponse['events'][number],
 ): string | null {
@@ -105,22 +100,19 @@ function getEventDetailLine(
 }
 
 function getSelectedAnalysisSummary(result: ReviewJobResponse['listings'][number] | null) {
-  const triage =
-    result?.analysis?.triage && typeof result.analysis.triage === 'object'
-      ? result.analysis.triage
-      : null;
-
+  const triage = result ? getListingResultsSnapshot(result).triage : null;
   if (!triage) {
     return null;
   }
 
   return {
-    tier: typeof triage.tier === 'string' ? triage.tier : null,
-    fitScore: typeof triage.fitScore === 'number' ? triage.fitScore : null,
-    summary: typeof triage.summary === 'string' ? triage.summary : null,
-    highlights: asStringArray(triage.highlights),
-    concerns: asStringArray(triage.concerns),
-    dealBreakers: asStringArray(triage.dealBreakers),
+    tier: triage.tier,
+    fitScore: triage.fitScore,
+    summary: triage.summary,
+    highlights: triage.highlights,
+    concerns: triage.concerns,
+    dealBreakers: triage.dealBreakers,
+    evidenceGaps: triage.evidenceGaps,
   };
 }
 
@@ -809,6 +801,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                           {selectedAnalysisSummary.tier.replace(/_/g, ' ')}
                         </span>
                       )}
+                      <EvidenceGapBadge gaps={selectedAnalysisSummary.evidenceGaps} />
                       {selectedAnalysisSummary.fitScore != null && (
                         <span className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 font-medium text-stone-300">
                           Fit {selectedAnalysisSummary.fitScore}

@@ -1,7 +1,12 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Prisma, ReviewJobListing, ReviewJobListingAnalysis } from '@prisma/client';
-import type { MapPoint, PhaseStatus, Platform } from '../types.js';
+import type {
+  MapPoint,
+  PhaseStatus,
+  Platform,
+  TriageEvidenceGap,
+} from '../types.js';
 import {
   ensureReviewJobArtifactWorkspace,
   getReviewJobArtifactRunDir,
@@ -139,6 +144,7 @@ export interface AnalysisManifestPhase {
   source?: 'network' | 'cache' | 'local';
   cachedAt?: string;
   cacheAgeMs?: number;
+  evidenceGaps?: TriageEvidenceGap[];
 }
 
 export interface AnalysisManifestEntry {
@@ -192,7 +198,11 @@ export function summarizeManifestEntryStatus(
   ];
 
   if (entry.triage.status === 'fetched') {
-    if (phaseStatuses.includes('failed') || phaseStatuses.includes('partial')) {
+    if (
+      phaseStatuses.includes('failed')
+      || phaseStatuses.includes('partial')
+      || (entry.triage.evidenceGaps?.length ?? 0) > 0
+    ) {
       return 'partial';
     }
     return 'completed';
