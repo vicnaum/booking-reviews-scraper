@@ -16,13 +16,18 @@ import { formatUsdCost, hasAiCosts } from '@/lib/aiCosts';
 import { getPriceDisplayInfo, resolveComparablePrice } from '@/lib/pricing';
 import { buildListingUrl } from '@/lib/listingLinks';
 import {
+  AFFORDABILITY_STATUS_ORDER,
+  compareAffordability,
   formatPoiDistance,
   getActiveTriageComparison,
   getBookingEligibilityRank,
   getListingResultsSnapshot,
   getTriageComparisonStatus,
+  getTriageRegradeReasons,
   getTriageRegradeListingCount,
   getTierRank,
+  matchesAffordabilityFilter,
+  type AffordabilityStatus,
   type ParsedTriage,
   type ParsedTheme,
   type TriageComparisonStatus,
@@ -55,8 +60,14 @@ const SCORE_ORDER = [
   'modernity',
   'valueForMoney',
 ] as const;
-
-type SortKey = 'rank' | 'title' | 'tier' | 'fitScore' | 'price' | 'poiDistance';
+type SortKey =
+  | 'rank'
+  | 'title'
+  | 'tier'
+  | 'fitScore'
+  | 'affordability'
+  | 'price'
+  | 'poiDistance';
 type DetailTab = 'triage' | 'reviews' | 'photos' | 'snapshot';
 
 function listingKey(listing: Pick<ReviewJobListing, 'id' | 'platform'>) {
@@ -95,15 +106,17 @@ function comparisonRank(status: TriageComparisonStatus): number {
   switch (status) {
     case 'ranked':
       return 0;
-    case 'insufficient_evidence':
+    case 'regrade_required':
       return 1;
-    case 'stale_classifier_policy':
+    case 'insufficient_evidence':
       return 2;
+    case 'stale_classifier_policy':
+      return 3;
     case 'legacy':
     case 'stale_requirement_set':
-      return 3;
-    case 'unscored':
       return 4;
+    case 'unscored':
+      return 5;
   }
 }
 
@@ -124,10 +137,15 @@ function displayedTier(
     return { label: 'Insufficient evidence', tier: null };
   }
   if (
+    status === 'regrade_required'
+    ||
     status === 'stale_requirement_set'
     || status === 'stale_classifier_policy'
   ) {
-    return { label: 'Unranked', tier: null };
+    return {
+      label: 'Regrade needed',
+      tier: null,
+    };
   }
   return { label: tierLabel(triage?.tier ?? null), tier: triage?.tier ?? null };
 }
@@ -158,14 +176,21 @@ function VerdictSourceBadge({
   if (status === 'stale_requirement_set') {
     return (
       <span className="rounded-full border border-stone-300/20 bg-stone-300/10 px-2 py-1 text-[10px] font-semibold text-stone-200">
-        Stale requirement set
+        Regrade needed · priority set mismatch
       </span>
     );
   }
   if (status === 'stale_classifier_policy') {
     return (
       <span className="rounded-full border border-stone-300/20 bg-stone-300/10 px-2 py-1 text-[10px] font-semibold text-stone-200">
-        Older classifier policy
+        Regrade needed · policy changed
+      </span>
+    );
+  }
+  if (status === 'regrade_required') {
+    return (
+      <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-1 text-[10px] font-semibold text-amber-100">
+        Regrade needed · brief changed
       </span>
     );
   }
@@ -1253,6 +1278,12 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   const [activeTiers, setActiveTiers] = useState<Set<string>>(
     () => new Set(TIER_ORDER),
   );
+  const [
+    activeAffordabilityStatuses,
+    setActiveAffordabilityStatuses,
+  ] = useState<Set<AffordabilityStatus>>(
+    () => new Set(AFFORDABILITY_STATUS_ORDER),
+  );
   const [maxPriceFilter, setMaxPriceFilter] = useState('');
   const [maxPoiDistanceFilter, setMaxPoiDistanceFilter] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('fitScore');
@@ -1392,17 +1423,28 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     () => getActiveTriageComparison(data.listings),
     [data.listings],
   );
-  const olderPolicyCount = useMemo(
-    () =>
-      data.listings.filter(
-        (listing) =>
-          !listing.hidden
-          && getTriageComparisonStatus(
-            getListingResultsSnapshot(listing).triage,
-            activeTriageComparison,
-          ) === 'stale_classifier_policy',
-      ).length,
-    [activeTriageComparison, data.listings],
+  const regradeReasons = useMemo(
+    () => getTriageRegradeReasons(
+      data.listings,
+      activeTriageComparison,
+      data.job.regradeRequired,
+    ),
+    [
+      activeTriageComparison,
+      data.job.regradeRequired,
+      data.listings,
+    ],
+  );
+  const comparisonGateActive =
+    activeTriageComparison != null || data.job.regradeRequired;
+  const resolveComparisonStatus = useCallback(
+    (triage: ParsedTriage | null) =>
+      getTriageComparisonStatus(
+        triage,
+        activeTriageComparison,
+        { regradeRequired: data.job.regradeRequired },
+      ),
+    [activeTriageComparison, data.job.regradeRequired],
   );
   const regradeListingCount = useMemo(
     () => getTriageRegradeListingCount(data.listings),
@@ -1463,12 +1505,12 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       }
       const triageA = getListingResultsSnapshot(a).triage;
       const triageB = getListingResultsSnapshot(b).triage;
-      if (activeTriageComparison) {
+      if (comparisonGateActive) {
         const groupA = comparisonRank(
-          getTriageComparisonStatus(triageA, activeTriageComparison),
+          resolveComparisonStatus(triageA),
         );
         const groupB = comparisonRank(
-          getTriageComparisonStatus(triageB, activeTriageComparison),
+          resolveComparisonStatus(triageB),
         );
         if (groupA !== groupB) return groupA - groupB;
         if (groupA !== 0) {
@@ -1513,11 +1555,12 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     });
     return next;
   }, [
-    activeTriageComparison,
+    comparisonGateActive,
     data.job.checkin,
     data.job.checkout,
     data.listings,
     priceDisplay,
+    resolveComparisonStatus,
   ]);
 
   const sortableResults = useMemo(() => {
@@ -1528,16 +1571,14 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
 
     if (sortKey === 'rank') {
       if (!sortAsc) return next;
-      if (!activeTriageComparison) return [...next].reverse();
+      if (!comparisonGateActive) return [...next].reverse();
       const ranked = next.filter((listing) =>
-        getTriageComparisonStatus(
+        resolveComparisonStatus(
           getListingResultsSnapshot(listing).triage,
-          activeTriageComparison,
         ) === 'ranked');
       const unranked = next.filter((listing) =>
-        getTriageComparisonStatus(
+        resolveComparisonStatus(
           getListingResultsSnapshot(listing).triage,
-          activeTriageComparison,
         ) !== 'ranked');
       return [...ranked.reverse(), ...unranked];
     }
@@ -1548,26 +1589,40 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       if (eligibilityA !== eligibilityB) {
         return eligibilityA - eligibilityB;
       }
-      if (activeTriageComparison) {
+      if (comparisonGateActive) {
         const groupA = comparisonRank(
-          getTriageComparisonStatus(
+          resolveComparisonStatus(
             getListingResultsSnapshot(a).triage,
-            activeTriageComparison,
           ),
         );
         const groupB = comparisonRank(
-          getTriageComparisonStatus(
+          resolveComparisonStatus(
             getListingResultsSnapshot(b).triage,
-            activeTriageComparison,
           ),
         );
         if (groupA !== groupB) return groupA - groupB;
-        if (groupA !== 0) {
+        if (
+          groupA !== 0
+          && sortKey !== 'affordability'
+        ) {
           return (
             (baseIndex.get(listingKey(a)) ?? 0)
             - (baseIndex.get(listingKey(b)) ?? 0)
           );
         }
+      }
+
+      if (sortKey === 'affordability') {
+        const difference = compareAffordability(
+          a.affordability,
+          b.affordability,
+        );
+        return difference !== 0
+          ? difference
+          : (
+              (baseIndex.get(listingKey(a)) ?? 0)
+              - (baseIndex.get(listingKey(b)) ?? 0)
+            );
       }
 
       if (sortKey === 'title') {
@@ -1610,11 +1665,12 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
 
     return next;
   }, [
-    activeTriageComparison,
     baseRankedResults,
+    comparisonGateActive,
     data.job.checkin,
     data.job.checkout,
     priceDisplay,
+    resolveComparisonStatus,
     sortAsc,
     sortKey,
   ]);
@@ -1631,14 +1687,19 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     () =>
       displayableResults.filter((listing) => {
         const triage = getListingResultsSnapshot(listing).triage;
-        const comparisonStatus = getTriageComparisonStatus(
-          triage,
-          activeTriageComparison,
-        );
+        const comparisonStatus = resolveComparisonStatus(triage);
         const tier = triage?.tier ?? 'unscored';
         if (
-          (!activeTriageComparison || comparisonStatus === 'ranked')
+          (!comparisonGateActive || comparisonStatus === 'ranked')
           && !activeTiers.has(tier)
+        ) {
+          return false;
+        }
+        if (
+          !matchesAffordabilityFilter(
+            listing,
+            activeAffordabilityStatuses,
+          )
         ) {
           return false;
         }
@@ -1668,14 +1729,16 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         return true;
       }),
     [
+      activeAffordabilityStatuses,
       activeTiers,
-      activeTriageComparison,
+      comparisonGateActive,
       data.job.checkin,
       data.job.checkout,
       displayableResults,
       maxPoiDistanceFilter,
       maxPriceFilter,
       priceDisplay,
+      resolveComparisonStatus,
     ],
   );
 
@@ -1694,10 +1757,9 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       (listing) =>
         listing.staySnapshot.bookingEligibility.actionable
         && (
-        !activeTriageComparison
-        || getTriageComparisonStatus(
+        !comparisonGateActive
+        || resolveComparisonStatus(
           getListingResultsSnapshot(listing).triage,
-          activeTriageComparison,
         ) === 'ranked'
         ),
     );
@@ -1708,18 +1770,19 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     return topPicks.length >= 3
       ? topPicks.slice(0, 5)
       : comparable.slice(0, 5);
-  }, [activeTriageComparison, filteredResults]);
+  }, [
+    comparisonGateActive,
+    filteredResults,
+    resolveComparisonStatus,
+  ]);
 
   const tierCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const listing of displayableResults) {
       const triage = getListingResultsSnapshot(listing).triage;
       if (
-        activeTriageComparison
-        && getTriageComparisonStatus(
-          triage,
-          activeTriageComparison,
-        ) !== 'ranked'
+        comparisonGateActive
+        && resolveComparisonStatus(triage) !== 'ranked'
       ) {
         continue;
       }
@@ -1727,7 +1790,25 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       counts.set(tier, (counts.get(tier) ?? 0) + 1);
     }
     return counts;
-  }, [activeTriageComparison, displayableResults]);
+  }, [
+    comparisonGateActive,
+    displayableResults,
+    resolveComparisonStatus,
+  ]);
+  const affordabilityCounts = useMemo(() => {
+    const counts = new Map<AffordabilityStatus, number>();
+    for (const status of AFFORDABILITY_STATUS_ORDER) {
+      counts.set(status, 0);
+    }
+    for (const listing of displayableResults) {
+      const status = listing.affordability.status;
+      counts.set(status, (counts.get(status) ?? 0) + 1);
+    }
+    return counts;
+  }, [displayableResults]);
+  const hasAffordabilityFilter =
+    activeAffordabilityStatuses.size
+    !== AFFORDABILITY_STATUS_ORDER.length;
 
   useEffect(() => {
     if (filteredResults.length === 0) {
@@ -1890,10 +1971,8 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       rows.map((listing, index) => {
         const key = listingKey(listing);
         const snapshot = getListingResultsSnapshot(listing);
-        const comparisonStatus = getTriageComparisonStatus(
-          snapshot.triage,
-          activeTriageComparison,
-        );
+        const comparisonStatus =
+          resolveComparisonStatus(snapshot.triage);
         const verdictTier = displayedTier(
           snapshot.triage,
           comparisonStatus,
@@ -1902,26 +1981,29 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         const previousComparisonGroup =
           index > 0
             ? comparisonRank(
-                getTriageComparisonStatus(
+                resolveComparisonStatus(
                   getListingResultsSnapshot(rows[index - 1]).triage,
-                  activeTriageComparison,
                 ),
               )
             : null;
         const groupHeader =
-          activeTriageComparison
+          comparisonGateActive
           && comparisonGroup !== 0
           && comparisonGroup !== previousComparisonGroup
-            ? comparisonGroup === 1
+            ? comparisonStatus === 'regrade_required'
+              ? 'Regrade needed — these verdicts reflect the previous quality brief'
+              : comparisonStatus === 'insufficient_evidence'
               ? 'Insufficient evidence — shown for audit, not ranked with comparable results'
-              : comparisonGroup === 2
-                ? 'Classified under an older policy — regrade the whole job before comparing'
-                : comparisonGroup === 3
-                  ? 'Legacy or stale requirement-set verdicts — regrade before comparing'
+              : comparisonStatus === 'stale_classifier_policy'
+                ? 'Regrade needed — classifier policy changed'
+                : comparisonStatus === 'stale_requirement_set'
+                  ? 'Regrade needed — canonical priority set mismatch'
+                  : comparisonStatus === 'legacy'
+                    ? 'Legacy verdicts — preserved for audit outside current peer ranking'
                 : 'Unscored listings'
             : null;
         const showPeerRank =
-          !activeTriageComparison || comparisonStatus === 'ranked';
+          !comparisonGateActive || comparisonStatus === 'ranked';
         const priceInfo = getPriceDisplayInfo(listing, priceDisplay, {
           checkin: data.job.checkin,
           checkout: data.job.checkout,
@@ -2149,13 +2231,14 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         );
       }),
     [
-      activeTriageComparison,
+      comparisonGateActive,
       data.job,
       expandedId,
       handleSelect,
       hiddenIds,
       likedIds,
       priceDisplay,
+      resolveComparisonStatus,
       selectedId,
       showHidden,
       toggleHidden,
@@ -2239,49 +2322,6 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
               onQueued={refreshJob}
             />
           </div>
-
-          {olderPolicyCount > 0 && (
-            <div className="mt-5 rounded-2xl border border-amber-300/20 bg-amber-300/[0.08] p-4">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                <div>
-                  <p className="text-sm font-semibold text-amber-100">
-                    Classified under an older policy
-                  </p>
-                  <p className="mt-1 max-w-3xl text-xs leading-5 text-amber-100/75">
-                    {olderPolicyCount} verdict{olderPolicyCount === 1 ? ' is' : 's are'} preserved
-                    for audit but excluded from peer ranking until the whole job is regraded.
-                    This reuses saved review and photo analysis and calls only triage.
-                  </p>
-                  <p className="mt-1 text-xs text-amber-100/65">
-                    Whole-job scope: {regradeListingCount} listing
-                    {regradeListingCount === 1 ? '' : 's'}. Estimated AI cost:{' '}
-                    {formatUsdCost(estimatedRegradeCostUsd)} at about $0.006 per listing.
-                  </p>
-                  {regradeMessage && (
-                    <p className="mt-2 text-xs font-semibold text-amber-100">
-                      {regradeMessage}
-                    </p>
-                  )}
-                </div>
-                {viewerCanEdit ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void startTriageRegrade();
-                    }}
-                    disabled={regradeLocked}
-                    className="rounded-2xl border border-amber-200/25 bg-amber-100/10 px-4 py-2 text-sm font-semibold text-amber-50 transition hover:bg-amber-100/15 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {regradeLocked ? 'Regrade queued or running…' : 'Regrade whole job'}
-                  </button>
-                ) : (
-                  <span className="text-xs font-semibold text-amber-100/70">
-                    Ask the job owner to regrade.
-                  </span>
-                )}
-              </div>
-            </div>
-          )}
 
           <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -2392,6 +2432,18 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
 
         <PrioritiesMatrix
           listings={displayableResults}
+          regradeReasons={regradeReasons}
+          regradeLocked={regradeLocked}
+          regradeListingCount={regradeListingCount}
+          estimatedRegradeCostUsd={estimatedRegradeCostUsd}
+          regradeMessage={regradeMessage}
+          onRegrade={
+            viewerCanEdit
+              ? () => {
+                  void startTriageRegrade();
+                }
+              : undefined
+          }
           onSelectListing={(key) =>
             handleSelect(key, { scroll: true })}
         />
@@ -2458,6 +2510,82 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 );
               })}
             </div>
+            <div className="flex flex-wrap items-end gap-4">
+              <div>
+                <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-500">
+                  Budget status
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {AFFORDABILITY_STATUS_ORDER.map((status) => {
+                    const active =
+                      activeAffordabilityStatuses.has(status);
+                    return (
+                      <button
+                        key={status}
+                        type="button"
+                        onClick={() =>
+                          setActiveAffordabilityStatuses((current) => {
+                            const next = new Set(current);
+                            if (next.has(status)) {
+                              next.delete(status);
+                            } else {
+                              next.add(status);
+                            }
+                            return next;
+                          })
+                        }
+                        className={`rounded-full border px-3 py-1.5 text-xs font-semibold capitalize transition ${
+                          active
+                            ? 'border-white/30 bg-white text-black'
+                            : 'border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08] hover:text-white'
+                        }`}
+                      >
+                        {status}
+                        <span className="ml-2 text-[11px] opacity-70">
+                          {affordabilityCounts.get(status) ?? 0}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-500">
+                  Comparison order
+                </p>
+                <div className="flex rounded-xl border border-white/10 bg-black/20 p-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSortKey('fitScore');
+                      setSortAsc(false);
+                    }}
+                    className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                      sortKey === 'fitScore'
+                        ? 'bg-white text-black'
+                        : 'text-stone-400 hover:text-white'
+                    }`}
+                  >
+                    Quality first
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSortKey('affordability');
+                      setSortAsc(false);
+                    }}
+                    className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                      sortKey === 'affordability'
+                        ? 'bg-white text-black'
+                        : 'text-stone-400 hover:text-white'
+                    }`}
+                    title="Within budget, then least over budget, then unknown; quality breaks ties inside comparable ranked groups"
+                  >
+                    Budget fit
+                  </button>
+                </div>
+              </div>
+            </div>
             <div className="flex flex-wrap gap-3">
               <label className="flex min-w-[180px] flex-col gap-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-500">
                 {priceDisplay === 'perNight' ? 'Max Per Night' : 'Max Total'}
@@ -2487,12 +2615,17 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                   />
                 </label>
               )}
-              {(maxPriceFilter || maxPoiDistanceFilter) && (
+              {(maxPriceFilter
+                || maxPoiDistanceFilter
+                || hasAffordabilityFilter) && (
                 <button
                   type="button"
                   onClick={() => {
                     setMaxPriceFilter('');
                     setMaxPoiDistanceFilter('');
+                    setActiveAffordabilityStatuses(
+                      new Set(AFFORDABILITY_STATUS_ORDER),
+                    );
                   }}
                   className="self-end rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2 text-sm font-semibold text-stone-200 transition hover:bg-white/[0.08]"
                 >

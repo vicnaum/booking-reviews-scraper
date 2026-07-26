@@ -311,15 +311,24 @@ Unknown affordability always carries a machine code and user-facing reason. Requ
 Basis, freshness, invalid-price, and non-public-rate failures have equally specific reasons. The UI
 shows the reason after “Budget unknown”; it does not show a bare unknown state.
 
-The default ranking remains quality-first. A future explicit budget-aware sort may group `within`,
-then `over` by ascending percentage, then `unknown`, with quality score as a tie-breaker. It must not
-create a hidden composite score.
+The default ranking remains quality-first. The native results page also offers an explicit
+budget-fit order: `within`, then `over` by ascending percentage, then `unknown`, with the existing
+quality order as the tie-breaker. Availability eligibility and comparison-status groups remain
+isolated before either ordering is applied. This is not a composite score. Affordability filters
+use the listing's current deterministic `within`, `over`, or `unknown` state and can be combined
+without changing any quality verdict.
 
 Changing only a structured budget or refreshing a price can recompute affordability without an LLM
 call. New rubric results persist the complete comparable-price input used for that calculation.
 Budget edits transactionally replace only the `affordability` object; quality classifications,
 scores, caps, and tiers stay unchanged. Pre-snapshot and legacy JSON are preserved rather than
 reconstructed from guesses. Changing the quality definitions requires a new classification set.
+
+A normalized quality-brief change on a job with completed or partial verdicts durably marks the
+job as requiring a regrade. Leading/trailing whitespace and repeated internal whitespace do not
+invalidate verdicts. The marker survives queued, running, failed, and partial regrade attempts and
+clears only after every listing completes successfully. Structured budget-only edits never set
+the marker and never invoke the LLM.
 
 ## Legacy and mixed verdicts
 
@@ -338,6 +347,10 @@ Stored JSON without `scoreSource`, `rubricVersion`, and `requirementSetId` is
 - The native results page offers an explicit whole-job regrade with an estimated cost. Regrading
   covers every non-hidden listing, reuses saved review and photo analysis, and runs triage only; at
   the measured ~$0.006/listing, a 54-listing job is estimated at ~$0.32.
+- Brief changes, classifier-policy changes, and requirement-set mismatches share one
+  `Regrade needed` presentation with distinct reasons. A brief change preserves the prior verdicts
+  and paid evidence for audit, labels them as reflecting the previous brief, and excludes them from
+  current peer ranks until a fully completed whole-job regrade.
 - Never interleave old model-authored or old-classifier scores with current-policy scores.
 
 CLI/report output follows the same source/version and grouping rules.
@@ -353,6 +366,11 @@ canonical requirement IDs and the current comparability key populate those colum
 stays visibly missing. Insufficient-evidence verdicts keep their auditable cells but remain in a
 separate group outside peer ranking. Older-policy, legacy, mismatched-set, and unscored rows are
 also labeled and never silently label-aligned into current cells.
+
+When the quality brief changes, the matrix remains visible: its priority columns and verdict labels
+say they reflect the previous brief, while evidence snippets, frequencies, years, and sample
+provenance remain available as paid audit data. The matrix header hosts the results page's single
+whole-job regrade banner, action, and cost estimate.
 
 Each classified priority cell carries:
 

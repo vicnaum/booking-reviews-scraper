@@ -244,6 +244,7 @@ export interface ReviewJobState {
   priceRefreshCurrentPhase: string | null;
   location: string | null;
   prompt: string | null;
+  regradeRequired: boolean;
   boundingBox: BoundingBox | null;
   circle: CircleFilter | null;
   poi: MapPoint | null;

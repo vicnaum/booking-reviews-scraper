@@ -18,6 +18,9 @@ import {
   getStoredReviewJobPriceDisplay,
 } from '@/lib/reviewJobClient';
 import { useReviewJobPolling } from '@/hooks/useReviewJobPolling';
+import {
+  normalizeQualityBriefForComparison,
+} from '@/lib/reviewJobEdits';
 import AiBudgetNotice from './AiBudgetNotice';
 import EvidenceGapBadge from './EvidenceGapBadge';
 import ResultCard from './ResultCard';
@@ -264,6 +267,18 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     prompt !== savedPrompt
     || budgetAmount !== savedBudgetAmount
     || budgetCurrency !== savedBudgetCurrency;
+  const qualityBriefDirty =
+    normalizeQualityBriefForComparison(prompt)
+    !== normalizeQualityBriefForComparison(savedPrompt);
+  const qualityRegradeNeeded =
+    data.job.regradeRequired
+    || (
+      qualityBriefDirty
+      && (
+        data.job.analysisStatus === 'completed'
+        || data.job.analysisStatus === 'partial'
+      )
+    );
 
   const persistSelection = useCallback(
     async (
@@ -354,7 +369,11 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
       setBudgetAmount(nextBudgetAmount);
       setSavedBudgetCurrency(nextBudgetCurrency);
       setBudgetCurrency(nextBudgetCurrency);
-      setSaveMessage('Saved');
+      setSaveMessage(
+        nextData.job.regradeRequired
+          ? 'Saved · quality regrade needed'
+          : 'Saved',
+      );
     } catch (error) {
       setSaveMessage(error instanceof Error ? error.message : 'Failed to save prompt');
     } finally {
@@ -392,8 +411,16 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
         throw new Error(payload?.error || 'Failed to save prompt');
       }
 
+      const savedData: ReviewJobResponse = await saveRes.json();
+      const triageOnly =
+        savedData.job.regradeRequired
+        && savedData.job.artifactArchiveAvailable;
       const analyzeRes = await fetch(`/api/jobs/${data.job.id}/analyze`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode: triageOnly ? 'triage' : 'full',
+        }),
       });
 
       if (!analyzeRes.ok) {
@@ -402,7 +429,9 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
       }
 
       await refreshJob();
-      setSaveMessage('Analysis queued');
+      setSaveMessage(
+        triageOnly ? 'Whole-job quality regrade queued' : 'Analysis queued',
+      );
     } catch (error) {
       setSaveMessage(error instanceof Error ? error.message : 'Failed to start analysis');
     } finally {
@@ -518,6 +547,8 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   const analysisButtonLabel =
     analysisQueued
       ? 'Analysis queued...'
+      : qualityRegradeNeeded && data.job.artifactArchiveAvailable
+        ? `Regrade quality (${sortedResults.length} listings)`
       : data.job.analysisStatus === 'completed' || data.job.analysisStatus === 'partial'
       ? selectedCount > 0
         ? `Re-run analysis (${selectedCount} selected)`
@@ -549,13 +580,21 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
             </div>
 
             <div className="flex flex-col items-start gap-2 lg:items-end">
-              <span className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${statusClassName(data.job.status)}`}>
-                {statusLabel(
-                  data.job.status,
-                  data.job.currentPhase,
-                  data.job.analysisStatus,
-                  data.job.reportReady,
-                )}
+              <span
+                className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${
+                  data.job.regradeRequired
+                    ? 'border-amber-300/20 bg-amber-300/10 text-amber-100'
+                    : statusClassName(data.job.status)
+                }`}
+              >
+                {data.job.regradeRequired
+                  ? 'Regrade needed'
+                  : statusLabel(
+                      data.job.status,
+                      data.job.currentPhase,
+                      data.job.analysisStatus,
+                      data.job.reportReady,
+                    )}
               </span>
               <span className="text-xs text-stone-500">Job ID: {data.job.id}</span>
             </div>
@@ -602,7 +641,10 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                   {data.job.pagesScanned} pages scanned
                 </span>
                 <span className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5">
-                  Analysis: {phaseStatusLabel(data.job.analysisStatus)}
+                  Analysis:{' '}
+                  {data.job.regradeRequired
+                    ? 'Regrade needed'
+                    : phaseStatusLabel(data.job.analysisStatus)}
                 </span>
                 {hasAiCosts(data.job.costs) && (
                   <span className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5">
@@ -708,6 +750,13 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                 Price never changes the quality tier. It appears separately as within budget,
                 over by a percentage, or unknown with a reason.
               </p>
+              {qualityRegradeNeeded && (
+                <div className="mt-3 rounded-xl border border-amber-300/20 bg-amber-300/[0.08] px-3 py-2.5 text-xs leading-5 text-amber-100/80">
+                  The saved verdicts reflect the previous quality brief.
+                  Their paid evidence remains available, but a whole-job
+                  triage regrade is required before peer comparison.
+                </div>
+              )}
               <div className="mt-3 flex items-center justify-between gap-3">
                 <span className="text-xs text-stone-500">
                   {saveMessage

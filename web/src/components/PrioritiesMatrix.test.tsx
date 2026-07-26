@@ -158,3 +158,32 @@ test('priorities matrix renders evidence frequencies and sample provenance hones
   assert.match(html, /No review data/);
   assert.match(html, /7 analysed · 7 scraped/);
 });
+
+test('priorities matrix preserves paid evidence after a quality brief edit', () => {
+  const html = renderToStaticMarkup(
+    <PrioritiesMatrix
+      listings={[listing('sleep-test')]}
+      regradeReasons={[
+        'brief_changed',
+        'classifier_policy_changed',
+        'requirement_set_mismatch',
+      ]}
+      estimatedRegradeCostUsd={0.012}
+      onRegrade={() => undefined}
+    />,
+  );
+
+  assert.match(html, /Reflects previous quality brief/);
+  assert.match(
+    html,
+    /Evidence snippets, frequencies, and years remain valid audit data/,
+  );
+  assert.match(html, /The priority columns reflect the previous brief/);
+  assert.match(html, /older classifier policy/);
+  assert.match(html, /different canonical priority set/);
+  assert.match(html, /Previous brief · Comparable ranked results/);
+  assert.match(html, /Regrade needed/);
+  assert.match(html, /42 of 250 AI-analyzed reviews/);
+  assert.match(html, /Regrade whole job/);
+  assert.match(html, /Estimated triage cost: \$0\.012/);
+});
