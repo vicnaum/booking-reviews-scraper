@@ -187,3 +187,25 @@ test('priorities matrix preserves paid evidence after a quality brief edit', () 
   assert.match(html, /Regrade whole job/);
   assert.match(html, /Estimated triage cost: \$0\.012/);
 });
+
+test('duplicate conflicts keep their evidence in a separate unranked group', () => {
+  const html = renderToStaticMarkup(
+    <PrioritiesMatrix
+      listings={[listing('sleep-test')]}
+      duplicateConflictKeys={
+        new Set(['booking:sleep-test'])
+      }
+    />,
+  );
+
+  assert.match(
+    html,
+    /Cross-platform conflict — linked offers visible for audit, outside peer ranking/,
+  );
+  assert.match(html, /Cross-platform conflict/);
+  assert.match(
+    html,
+    /Guests repeatedly report loud HVAC cycling/,
+  );
+  assert.match(html, /42 of 250 AI-analyzed reviews/);
+});

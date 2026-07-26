@@ -231,6 +231,22 @@ export interface ReviewJobListing extends SearchResult {
   analysis: ReviewJobListingAnalysis | null;
 }
 
+export interface ReviewJobDuplicatePair {
+  id: string;
+  airbnbListingId: string;
+  bookingListingId: string;
+  detectorVersion: string;
+  detectorConfidence: 'likely_same' | 'possible_same' | null;
+  decision: 'suggested' | 'confirmed' | 'dismissed';
+  decisionSource: 'detector' | 'user';
+  distanceMeters: number | null;
+  nameScore: number | null;
+  nameSource: 'card' | 'host' | 'address' | 'none' | null;
+  evidence: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ReviewJobState {
   id: string;
   ownerKey: string | null;
@@ -293,6 +309,7 @@ export interface ReviewJobState {
 export interface ReviewJobResponse {
   job: ReviewJobState;
   listings: ReviewJobListing[];
+  duplicatePairs: ReviewJobDuplicatePair[];
   events: ReviewJobEvent[];
 }
 

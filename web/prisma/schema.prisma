@@ -29,6 +29,22 @@ enum PhaseStatus {
   partial
 }
 
+enum DuplicatePairConfidence {
+  likely_same
+  possible_same
+}
+
+enum DuplicatePairDecision {
+  suggested
+  confirmed
+  dismissed
+}
+
+enum DuplicatePairDecisionSource {
+  detector
+  user
+}
+
 enum SearchAreaMode {
   window
   rectangle
@@ -148,6 +164,7 @@ model ReviewJob {
   totalAiCostUsd   Float         @default(0)
   listings       ReviewJobListing[]
   events         ReviewJobEvent[]
+  duplicatePairs ReviewJobDuplicatePair[]
 
   @@index([ownerKey, createdAt])
 }
@@ -222,6 +239,27 @@ model ReviewJobListingAnalysis {
   durationMs      Int?
 
   @@index([status, updatedAt])
+}
+
+model ReviewJobDuplicatePair {
+  id                 String                      @id @default(cuid())
+  jobId              String
+  job                ReviewJob                   @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  airbnbListingId    String
+  bookingListingId   String
+  detectorVersion    String
+  detectorConfidence DuplicatePairConfidence?
+  decision           DuplicatePairDecision       @default(suggested)
+  decisionSource     DuplicatePairDecisionSource @default(detector)
+  distanceMeters     Float?
+  nameScore          Float?
+  nameSource         String?
+  evidence           Json?
+  createdAt          DateTime                    @default(now())
+  updatedAt          DateTime                    @updatedAt
+
+  @@unique([jobId, airbnbListingId, bookingListingId])
+  @@index([jobId, decision])
 }
 
 model ReviewJobEvent {

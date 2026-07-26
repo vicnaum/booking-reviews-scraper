@@ -161,6 +161,27 @@ AI-analyzed sample, post-filter eligible count, whether the configured sample ca
 total scraped reviews. If the artifact run has expired, the page reports unknown provenance
 instead of inferring it from Postgres or provider totals.
 
+## Cross-platform same-property checks
+
+Review jobs run a deterministic, versioned Airbnb-to-Booking candidate detector. It considers
+cross-platform pairs within 250 meters, but coordinates are only a weak prior because Airbnb hotel
+coordinates are intentionally offset. A `likely same` suggestion requires strong distinctive name
+evidence from either the Airbnb card name or its captured host name, or an exact captured address.
+Generous `possible same` suggestions may use weaker evidence, but they have no ranking effect until
+the owner confirms them.
+
+The pair record and its detector evidence persist independently from either listing. Owners can
+confirm, dismiss, undo, or manually link a missed pair; rerunning search or enriching listing
+details updates detector evidence without overwriting user decisions. Public results expose active
+links read-only and omit dismissed suggestions.
+
+The two offers, prices, availability states, public review totals, analyzed samples, and underlying
+analysis remain separate. StayReviewr does not merge reviews or copy one platform's verdict to the
+other. When a likely or confirmed pair has a tier gap of at least two levels, both offers leave the
+top-picks hero and comparable peer ranks. Possible suggestions never trigger that gate. The
+priorities-matrix rows remain visible with all paid evidence, but move into a labeled
+`Cross-platform conflict` audit group outside comparable peers.
+
 `web/.env.local` remains supported as a compatibility fallback for direct `web/` commands, but
 the root `.env` takes precedence. Proxy settings also fall back to
 `~/.config/reviewr/.env` created by `reviewr auth`.
