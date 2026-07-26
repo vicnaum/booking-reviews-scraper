@@ -1,5 +1,6 @@
 'use client';
 
+import React from 'react';
 import type { Platform } from '@/types';
 
 interface PlatformBadgeProps {

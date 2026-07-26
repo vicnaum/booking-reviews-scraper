@@ -199,6 +199,58 @@ test('native results readiness is derived from persisted analysis state, not rep
     triageUsd: 0.0027,
     totalUsd: 0.023,
   });
+  assert.deepEqual(response.listings[0].analysis?.reviewSample, {
+    totalScrapedReviewCount: 10,
+    eligibleReviewCount: null,
+    analyzedReviewCount: null,
+    capped: null,
+    source: 'unknown',
+  });
+});
+
+test('job responses preserve exact AI sample provenance from the batch manifest', () => {
+  const artifactRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'review-job-review-sample-'),
+  );
+  fs.writeFileSync(
+    path.join(artifactRoot, 'batch_manifest.json'),
+    JSON.stringify({
+      version: 2,
+      listings: {
+        'airbnb/listing_1': {
+          platform: 'airbnb',
+          id: 'listing_1',
+          reviews: {
+            status: 'fetched',
+            count: 2632,
+          },
+          aiReviews: {
+            status: 'fetched',
+            count: 250,
+            expected: 1924,
+          },
+        },
+      },
+    }),
+  );
+
+  try {
+    const response = toReviewJobResponse({
+      job: makeJob({ artifactRoot }),
+      listings: [makeListing()],
+      events: [],
+    });
+
+    assert.deepEqual(response.listings[0].analysis?.reviewSample, {
+      totalScrapedReviewCount: 2632,
+      eligibleReviewCount: 1924,
+      analyzedReviewCount: 250,
+      capped: true,
+      source: 'batch_manifest',
+    });
+  } finally {
+    fs.rmSync(artifactRoot, { recursive: true, force: true });
+  }
 });
 
 test('explicit full-stay analysis budget is exposed independently of search currency', () => {

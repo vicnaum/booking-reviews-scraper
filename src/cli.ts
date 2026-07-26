@@ -6,6 +6,7 @@
 // Usage: reviewr <url> | reviewr <command> [options]
 
 import { Command } from 'commander';
+import * as path from 'node:path';
 import { resolveProxy, applyProxyToEnv, saveProxy, showAuthStatus } from './config.js';
 import { detectPlatform, type Platform } from './utils.js';
 
@@ -623,6 +624,10 @@ program
   .description('Generate HTML report from triage results')
   .option('-o, --output-dir <dir>', 'Data directory with manifest + triage results')
   .option('--output-file <file>', 'Output HTML file path')
+  .option(
+    '--priorities-matrix [file]',
+    'Also write a per-priority evidence matrix as JSON',
+  )
   .action(async (cmdOpts: any, command: Command) => {
     const opts = command.optsWithGlobals();
     const { generateReport } = await import('./report.js');
@@ -632,6 +637,18 @@ program
       outputFile: cmdOpts.outputFile || undefined,
     });
     console.log(`Report: ${result}`);
+    if (cmdOpts.prioritiesMatrix) {
+      const { generatePrioritiesMatrixJson } =
+        await import('./priorities-matrix-report.js');
+      const matrixFile = generatePrioritiesMatrixJson({
+        outputDir,
+        outputFile:
+          typeof cmdOpts.prioritiesMatrix === 'string'
+            ? cmdOpts.prioritiesMatrix
+            : path.join(path.dirname(result), 'priorities-matrix.json'),
+      });
+      console.log(`Priorities matrix: ${matrixFile}`);
+    }
   });
 
 // --- auth command ---

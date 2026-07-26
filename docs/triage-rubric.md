@@ -61,10 +61,8 @@ The prose brief and parsed budget are not themselves hashed. Equivalent canonica
 therefore remain comparable, while any material definition or parser-version change creates a new
 set.
 
-These IDs are also the column keys for the priorities matrix planned in #61. Each listing must
-classify the same IDs in the same order. A future matrix cell can display status, confidence,
-evidence, frequency/year metadata, and evidence gaps without attempting to align model-invented
-labels.
+These IDs are also the column keys for the priorities matrix. Each listing must classify the same
+IDs in the same order. Matrix cells are never aligned by model-authored labels.
 
 ### Splitting
 
@@ -343,6 +341,46 @@ Stored JSON without `scoreSource`, `rubricVersion`, and `requirementSetId` is
 - Never interleave old model-authored or old-classifier scores with current-policy scores.
 
 CLI/report output follows the same source/version and grouping rules.
+
+## Priorities matrix
+
+The native results page derives one per-job evidence matrix from persisted deterministic triage;
+it does not make another model call. `Availability` and `Affordability` are fixed leading axes,
+followed by the canonical requirements in their persisted order.
+
+The modal deterministic `requirementSetId` is the active column set. Only verdicts with exact
+canonical requirement IDs and the current comparability key populate those columns. A missing ID
+stays visibly missing. Insufficient-evidence verdicts keep their auditable cells but remain in a
+separate group outside peer ranking. Older-policy, legacy, mismatched-set, and unscored rows are
+also labeled and never silently label-aligned into current cells.
+
+Each classified priority cell carries:
+
+- status, confidence, note, and evidence gaps;
+- all raw matched support and contradiction evidence for drill-down;
+- one strongest status-aligned evidence line, preserving model order within a polarity;
+- the evidence frequency and years when the classifier supplied them.
+
+For `unmet`, contradiction evidence is strongest; for `met`, support evidence is strongest; for
+`partial`, contradiction precedes support. No evidence is synthesized. A missing reviews layer
+must say `No review data`.
+
+A ratio such as `42 of 250` in review evidence means **42 mentions among 250 AI-analyzed
+reviews**. It is not the provider's hotel review total. The row also exposes, separately, the
+number analyzed, the eligible post-filter count, and the total scraped artifact count from
+`batch_manifest.json`. When the analysis cap applies, the UI says so explicitly, for example:
+`250 analysed (capped from 1,924 eligible) · 2,632 scraped`. If manifest provenance has expired,
+these counts remain unknown rather than being guessed from the listing page.
+
+Every evidence axis is sortable. The first click puts risk first, while ranking-status groups stay
+isolated. The CLI emits the same versioned read model:
+
+```bash
+reviewr report -o data/rome --priorities-matrix
+reviewr report -o data/rome --priorities-matrix ./exports/rome-matrix.json
+```
+
+Without an explicit file, `priorities-matrix.json` is written beside the HTML report.
 
 ## Worked examples
 

@@ -109,6 +109,9 @@ reviewr batch --retry --triage --priorities "quiet, elevator" -o data/rome
 # Generate interactive HTML report
 reviewr report -o data/rome
 
+# Also write the versioned per-priority evidence matrix as JSON
+reviewr report -o data/rome --priorities-matrix
+
 # Ask follow-up questions about shortlisted properties
 reviewr ask "Is there free parking? ZTL zone?" --picks liked -o data/rome
 reviewr ask "How noisy at night?" --ids 12345,mamomi-house -o data/rome
@@ -139,7 +142,7 @@ npx tsx src/cli.ts <command> [options]
 | `reviewr analyze-photos <dir>` | AI photo analysis using Gemini vision |
 | `reviewr triage <file>` | AI triage -- grade listing against guest priorities |
 | `reviewr ask <question>` | Ask a question about shortlisted properties |
-| `reviewr report` | Generate HTML report from triage results |
+| `reviewr report` | Generate HTML report; add `--priorities-matrix [file]` for the evidence matrix JSON |
 | `reviewr scrape [path]` | Batch scrape reviews from CSV files |
 | `reviewr analytics [path]` | Run analytics on JSON output |
 | `reviewr transform [path]` | JSON to CSV (Booking only) |

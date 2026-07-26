@@ -31,6 +31,7 @@ import {
   estimateTriageRegradeCostUsd,
   getCurrentTriageComparability,
 } from '@cli/triage-comparability';
+import { parsePrioritiesMatrixFrequency } from '@cli/priorities-matrix';
 import {
   fetchReviewJobResponse,
   getStoredReviewJobPriceDisplay,
@@ -42,6 +43,7 @@ import AiBudgetNotice from './AiBudgetNotice';
 import EvidenceGapBadge from './EvidenceGapBadge';
 import StaySnapshotStatus from './StaySnapshotStatus';
 import PriceRefreshControls from './PriceRefreshControls';
+import PrioritiesMatrix from './PrioritiesMatrix';
 
 const MIN_MAP_HEIGHT = 280;
 const TIER_ORDER = ['top_pick', 'shortlist', 'consider', 'unlikely', 'no_go'] as const;
@@ -843,6 +845,9 @@ function ListingDetailPanel({
                           <th className="px-3 py-2 font-semibold">Status</th>
                           <th className="px-3 py-2 font-semibold">Confidence</th>
                           <th className="px-3 py-2 font-semibold">Note</th>
+                          <th className="min-w-[300px] px-3 py-2 font-semibold">
+                            Matched evidence
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
@@ -875,6 +880,54 @@ function ListingDetailPanel({
                             </td>
                             <td className="px-3 py-2 text-stone-400">{requirement.confidence ?? '—'}</td>
                             <td className="px-3 py-2 text-stone-400">{requirement.note ?? '—'}</td>
+                            <td className="px-3 py-2">
+                              {requirement.evidence.length > 0 ? (
+                                <div className="space-y-2">
+                                  {requirement.evidence.map((evidence, index) => {
+                                    const frequency =
+                                      parsePrioritiesMatrixFrequency(
+                                        evidence.frequency,
+                                      );
+                                    const meta = [
+                                      frequency.display,
+                                      evidence.years.length > 0
+                                        ? evidence.years.join(', ')
+                                        : null,
+                                    ].filter(Boolean).join(' · ');
+                                    return (
+                                      <div
+                                        key={`${evidence.layer}:${evidence.text}:${index}`}
+                                        className="border-l border-white/10 pl-2"
+                                      >
+                                        <p className="text-[11px] leading-5 text-stone-300">
+                                          <span
+                                            className={
+                                              evidence.polarity === 'contradicts'
+                                                ? 'font-bold text-rose-300'
+                                                : 'font-bold text-emerald-300'
+                                            }
+                                          >
+                                            {evidence.polarity === 'contradicts'
+                                              ? '[-]'
+                                              : '[+]'}
+                                          </span>{' '}
+                                          {evidence.text}
+                                        </p>
+                                        {meta && (
+                                          <p className="text-[10px] leading-4 text-stone-500">
+                                            {meta}
+                                          </p>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                <span className="text-stone-500">
+                                  No matched evidence
+                                </span>
+                              )}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -2336,6 +2389,12 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
             </div>
           )}
         </header>
+
+        <PrioritiesMatrix
+          listings={displayableResults}
+          onSelectListing={(key) =>
+            handleSelect(key, { scroll: true })}
+        />
 
         {heroResults.length > 0 && (
           <section className="rounded-[28px] border border-white/10 bg-black/[0.24] px-5 py-5 shadow-[0_28px_90px_rgba(0,0,0,0.38)] backdrop-blur-xl">

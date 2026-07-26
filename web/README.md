@@ -131,6 +131,24 @@ therefore exercised by Booking.
 One job represents one date range. Multi-leg trips require a separate job for each leg; issue #70
 tracks first-class multi-leg support.
 
+## Priorities evidence matrix
+
+The native results page includes a horizontally scrollable `Priorities matrix`. Availability and
+affordability stay as separate leading axes; the remaining columns are the job's canonical guest
+priorities. Each cell shows the deterministic status and confidence, strongest status-aligned
+evidence, review frequency and years, and any missing evidence layers. Expanding a cell or the
+listing triage table preserves all raw support and contradiction lines.
+
+Rows visibly retain their `rankingStatus`. Insufficient-evidence rows are grouped outside
+comparable ranked results, as are older-policy, legacy, mismatched requirement-set, and unscored
+rows. Sorting a column never mixes those groups.
+
+Review frequency denominators are the reviews actually sent to AI, not the hotel's public review
+count. When retained `batch_manifest.json` provenance is available, each row separately states the
+AI-analyzed sample, post-filter eligible count, whether the configured sample cap applied, and
+total scraped reviews. If the artifact run has expired, the page reports unknown provenance
+instead of inferring it from Postgres or provider totals.
+
 `web/.env.local` remains supported as a compatibility fallback for direct `web/` commands, but
 the root `.env` takes precedence. Proxy settings also fall back to
 `~/.config/reviewr/.env` created by `reviewr auth`.

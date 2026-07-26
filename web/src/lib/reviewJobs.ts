@@ -1,3 +1,5 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type {
   Prisma,
   ReviewJob as ReviewJobModel,
@@ -15,6 +17,7 @@ import type {
   FullSearchRequest,
   MapPoint,
   ReviewJobEvent,
+  ReviewAnalysisSample,
   ReviewJobListing,
   ReviewJobListingAnalysis,
   ReviewJobResponse,
@@ -107,6 +110,87 @@ function asPriceRefreshSummary(
     return null;
   }
   return { requested, succeeded, failed };
+}
+
+function asNonNegativeInteger(value: unknown): number | null {
+  return (
+    typeof value === 'number'
+    && Number.isInteger(value)
+    && value >= 0
+  )
+    ? value
+    : null;
+}
+
+function unknownReviewSample(
+  totalScrapedReviewCount: number | null = null,
+): ReviewAnalysisSample {
+  return {
+    totalScrapedReviewCount,
+    eligibleReviewCount: null,
+    analyzedReviewCount: null,
+    capped: null,
+    source: 'unknown',
+  };
+}
+
+function getReviewSamplesFromManifest(
+  artifactRoot: string | null | undefined,
+): Map<string, ReviewAnalysisSample> {
+  const samples = new Map<string, ReviewAnalysisSample>();
+  if (!artifactRoot) return samples;
+
+  try {
+    const manifestPath = path.join(artifactRoot, 'batch_manifest.json');
+    const stat = fs.lstatSync(manifestPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return samples;
+    const manifest = JSON.parse(
+      fs.readFileSync(manifestPath, 'utf8'),
+    ) as unknown;
+    const manifestRecord = asJsonObject(manifest as Prisma.JsonValue);
+    const listings = asJsonObject(
+      (manifestRecord?.listings ?? null) as Prisma.JsonValue | null,
+    );
+    if (!listings) return samples;
+
+    for (const value of Object.values(listings)) {
+      const entry = asJsonObject(value as Prisma.JsonValue);
+      if (!entry) continue;
+      const platform =
+        entry.platform === 'airbnb' || entry.platform === 'booking'
+          ? entry.platform
+          : null;
+      const id = typeof entry.id === 'string' ? entry.id : null;
+      if (!platform || !id) continue;
+
+      const reviews = asJsonObject(
+        (entry.reviews ?? null) as Prisma.JsonValue | null,
+      );
+      const aiReviews = asJsonObject(
+        (entry.aiReviews ?? null) as Prisma.JsonValue | null,
+      );
+      const totalScrapedReviewCount = asNonNegativeInteger(reviews?.count);
+      const analyzedReviewCount = asNonNegativeInteger(aiReviews?.count);
+      const eligibleReviewCount = asNonNegativeInteger(aiReviews?.expected);
+      const hasAiSampleProvenance =
+        analyzedReviewCount != null || eligibleReviewCount != null;
+      samples.set(`${platform}:${id}`, {
+        totalScrapedReviewCount,
+        eligibleReviewCount,
+        analyzedReviewCount,
+        capped:
+          analyzedReviewCount != null && eligibleReviewCount != null
+            ? analyzedReviewCount < eligibleReviewCount
+            : null,
+        source:
+          hasAiSampleProvenance ? 'batch_manifest' : 'unknown',
+      });
+    }
+  } catch {
+    // Artifact retention or a partial legacy workspace leaves provenance unknown.
+  }
+
+  return samples;
 }
 
 function getPersistedReviewJobAiBudgetUsd(
@@ -285,6 +369,7 @@ export function toReviewJobListingRecord(
 
 function toReviewJobListingAnalysisState(
   row: ReviewJobListingAnalysisModel,
+  reviewSample?: ReviewAnalysisSample,
 ): ReviewJobListingAnalysis {
   return {
     id: row.id,
@@ -302,6 +387,9 @@ function toReviewJobListingAnalysisState(
     aiPhotos: asJsonObject(row.aiPhotos),
     triage: asJsonObject(row.triage),
     reviewCount: row.reviewCount ?? null,
+    reviewSample:
+      reviewSample
+      ?? unknownReviewSample(row.reviewCount ?? null),
     photoCount: row.photoCount ?? null,
     costs: buildAiCostBreakdown({
       aiReviewsCostUsd: row.aiReviewsCostUsd,
@@ -323,6 +411,7 @@ export function toWebReviewJobListing(
     job: ReviewJobModel;
     ttlMs?: number;
     now?: Date;
+    reviewSample?: ReviewAnalysisSample;
   },
 ): ReviewJobListing {
   const storedPricing =
@@ -418,7 +507,13 @@ export function toWebReviewJobListing(
     poiDistanceMeters: row.poiDistanceMeters ?? null,
     staySnapshot,
     affordability,
-    analysis: row.analysis ? toReviewJobListingAnalysisState(row.analysis) : null,
+    analysis:
+      row.analysis
+        ? toReviewJobListingAnalysisState(
+            row.analysis,
+            options.reviewSample,
+          )
+        : null,
   };
 }
 
@@ -528,6 +623,7 @@ export function toReviewJobResponse(input: {
   const persistedAiBudgetUsd = getPersistedReviewJobAiBudgetUsd(input.events);
   const ttlMs = resolveStaySnapshotTtlMs();
   const now = new Date();
+  const reviewSamples = getReviewSamplesFromManifest(input.job.artifactRoot);
 
   return {
     job: toReviewJobState(input.job, {
@@ -542,6 +638,15 @@ export function toReviewJobResponse(input: {
         job: input.job,
         ttlMs,
         now,
+        reviewSample:
+          reviewSamples.get(
+            `${listing.platform}:${listing.listingId}`,
+          )
+          ?? (
+            listing.analysis
+              ? unknownReviewSample(listing.analysis.reviewCount ?? null)
+              : undefined
+          ),
       })),
     events: input.events.map(toReviewJobEvent),
   };
