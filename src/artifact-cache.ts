@@ -12,7 +12,7 @@ export const CACHE_TTL_ENV = {
 } as const;
 
 export const DEFAULT_CACHE_TTL_DAYS = {
-  details: 7,
+  details: 1,
   reviews: 30,
   photos: 180,
 } as const;

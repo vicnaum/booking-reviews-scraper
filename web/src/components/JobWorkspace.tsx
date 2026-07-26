@@ -9,7 +9,10 @@ import type {
 } from '@/types';
 import { resolveComparablePrice } from '@/lib/pricing';
 import { formatUsdCost, hasAiCosts } from '@/lib/aiCosts';
-import { getListingResultsSnapshot } from '@/lib/results';
+import {
+  getBookingEligibilityRank,
+  getListingResultsSnapshot,
+} from '@/lib/results';
 import {
   fetchReviewJobResponse,
   getStoredReviewJobPriceDisplay,
@@ -18,6 +21,8 @@ import { useReviewJobPolling } from '@/hooks/useReviewJobPolling';
 import AiBudgetNotice from './AiBudgetNotice';
 import EvidenceGapBadge from './EvidenceGapBadge';
 import ResultCard from './ResultCard';
+import StaySnapshotStatus from './StaySnapshotStatus';
+import PriceRefreshControls from './PriceRefreshControls';
 
 const JobMap = dynamic(() => import('./JobMap'), {
   ssr: false,
@@ -209,6 +214,11 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
   const sortedResults = useMemo(() => {
     const nextResults = data.listings.filter((result) => !result.hidden);
     nextResults.sort((a, b) => {
+      const eligibilityA = getBookingEligibilityRank(a);
+      const eligibilityB = getBookingEligibilityRank(b);
+      if (eligibilityA !== eligibilityB) {
+        return eligibilityA - eligibilityB;
+      }
       const aAmount = resolveComparablePrice(a, priceDisplay, {
         checkin: data.job.checkin,
         checkout: data.job.checkout,
@@ -247,7 +257,9 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     !viewerCanEdit
     || isStartingAnalysis
     || data.job.analysisStatus === 'running'
-    || analysisQueued;
+    || analysisQueued
+    || data.job.priceRefreshStatus === 'running'
+    || data.job.priceRefreshCurrentPhase === 'queued';
   const isPromptDirty =
     prompt !== savedPrompt
     || budgetAmount !== savedBudgetAmount
@@ -500,6 +512,8 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     && (data.job.status === 'completed' || data.job.status === 'failed')
     && data.job.analysisStatus !== 'running'
     && !analysisQueued
+    && data.job.priceRefreshStatus !== 'running'
+    && data.job.priceRefreshCurrentPhase !== 'queued'
     && !isSavingSelection;
   const analysisButtonLabel =
     analysisQueued
@@ -759,6 +773,11 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
           </div>
 
           <AiBudgetNotice job={data.job} />
+          <PriceRefreshControls
+            job={data.job}
+            selectedListings={selectedListings}
+            onQueued={refreshJob}
+          />
 
           <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -920,6 +939,12 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                     <> · {Math.round(selectedResult.poiDistanceMeters)}m from POI</>
                   )}
                 </p>
+                <div className="mt-3">
+                  <StaySnapshotStatus
+                    snapshot={selectedResult.staySnapshot}
+                    compact
+                  />
+                </div>
 
                 {selectedAnalysisSummary ? (
                   <div className="mt-4 space-y-3">

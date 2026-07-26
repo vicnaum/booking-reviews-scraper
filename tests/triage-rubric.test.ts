@@ -629,6 +629,62 @@ test('affordability rejects unknown freshness, non-stay basis, and non-public ra
   assert.equal(memberRate.reasonCode, 'rate_not_public');
 });
 
+test('availability gates affordability without changing the quality verdict', () => {
+  const baseAvailability = {
+    status: 'yes' as const,
+    capturedAt: '2026-07-26T12:00:00.000Z',
+    freshness: 'fresh' as const,
+    reasonCode: 'provider_room_inventory',
+  };
+  const cases = [
+    {
+      availability: { ...baseAvailability, status: 'no' as const },
+      code: 'stay_unavailable',
+    },
+    {
+      availability: {
+        ...baseAvailability,
+        status: 'partial' as const,
+        availableRange: {
+          checkIn: '2026-07-31',
+          checkOut: '2026-08-11',
+        },
+      },
+      code: 'stay_partially_available',
+    },
+    {
+      availability: { ...baseAvailability, status: 'unknown' as const },
+      code: 'availability_unknown',
+    },
+    {
+      availability: {
+        ...baseAvailability,
+        status: 'no' as const,
+        freshness: 'stale' as const,
+      },
+      code: 'availability_stale',
+    },
+  ];
+
+  for (const item of cases) {
+    const result = computeAffordability({
+      budget: usdBudget,
+      price: freshPublicPrice,
+      availability: item.availability,
+      now: new Date('2026-07-26T18:00:00.000Z'),
+    });
+    assert.equal(result.status, 'unknown');
+    assert.equal(result.reasonCode, item.code);
+  }
+
+  const available = computeAffordability({
+    budget: usdBudget,
+    price: freshPublicPrice,
+    availability: baseAvailability,
+  });
+  assert.equal(available.status, 'within');
+});
+
 test('affordability never changes a deterministic quality verdict', () => {
   const set = makeSet([
     { label: 'Quiet', type: 'priority', rank: 1 },

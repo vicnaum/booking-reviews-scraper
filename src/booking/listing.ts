@@ -18,6 +18,8 @@ import * as cheerio from 'cheerio';
 import fetch from 'node-fetch';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { extractHotelInfo } from './scraper.js';
+import { parseBookingStaySnapshot } from './stay-snapshot.js';
+import type { StaySnapshot } from '../stay-snapshot.js';
 
 const OUTPUT_DIR = 'data/booking/output';
 
@@ -44,6 +46,7 @@ export interface BookingListingDetails {
   linkedRoomId: string | null;
   rooms: BookingRoom[];
   pricing: BookingPricing | null;
+  staySnapshot: StaySnapshot;
   scrapedAt: string;
 }
 
@@ -702,6 +705,20 @@ export async function scrapeListingDetails(
 
   const html = await fetchHotelPageHtml(normalizedUrl, { hasDates });
   const parsed = parseHotelPage(html);
+  const capturedAt = new Date().toISOString();
+  const staySnapshot = parseBookingStaySnapshot({
+    html,
+    request: {
+      platform: 'booking',
+      listingId:
+        `${hotelInfo.country_code.toLowerCase()}/${hotelInfo.hotel_name.toLowerCase()}`,
+      checkIn: checkIn ?? null,
+      checkOut: checkOut ?? null,
+      adults: adults ?? null,
+      linkedRoomId,
+    },
+    capturedAt,
+  });
 
   return {
     id: hotelInfo.hotel_name,
@@ -724,7 +741,8 @@ export async function scrapeListingDetails(
     linkedRoomId,
     rooms: parsed.rooms || [],
     pricing: hasDates ? (parsed.pricing || null) : null,
-    scrapedAt: new Date().toISOString(),
+    staySnapshot,
+    scrapedAt: capturedAt,
   };
 }
 

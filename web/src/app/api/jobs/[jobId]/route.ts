@@ -1,9 +1,5 @@
 import { NextResponse } from 'next/server';
 import { Prisma } from '@prisma/client';
-import {
-  recomputeStoredAffordability,
-  type AffordabilityBudget,
-} from '@cli/triage-rubric.js';
 import { prisma } from '@/lib/prisma';
 import { getReviewJobOwnerKey } from '@/lib/reviewJobOwner';
 import {
@@ -12,6 +8,11 @@ import {
   toReviewJobResponseRecordForViewer,
 } from '@/lib/reviewJobs';
 import type { Platform, ReviewJobResponse } from '@/types';
+import {
+  computeReviewJobSnapshotAffordability,
+  getReviewJobStaySnapshotReadModel,
+  resolveStaySnapshotTtlMs,
+} from '@/lib/staySnapshots';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -26,38 +27,13 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function getStoredBriefBudget(
-  triage: Record<string, unknown>,
-): AffordabilityBudget | null {
-  const requirementSet = asRecord(triage.requirementSet);
-  const parsedBudget = asRecord(requirementSet?.parsedBudget);
-  const maximumAmount = Number(parsedBudget?.maximumAmount);
-  const currency =
-    typeof parsedBudget?.currency === 'string'
-      ? parsedBudget.currency.trim().toUpperCase()
-      : '';
-  if (
-    parsedBudget?.basis !== 'stay'
-    || parsedBudget?.source !== 'brief'
-    || !Number.isFinite(maximumAmount)
-    || maximumAmount <= 0
-    || !/^[A-Z]{3}$/.test(currency)
-  ) {
-    return null;
-  }
-  return {
-    amount: maximumAmount,
-    currency,
-    basis: 'stay',
-    source: 'brief',
-  };
-}
-
 async function recomputeJobAffordability(
   tx: Prisma.TransactionClient,
   jobId: string,
-  explicitBudget: AffordabilityBudget | null,
 ) {
+  const job = await tx.reviewJob.findUniqueOrThrow({
+    where: { id: jobId },
+  });
   const analyses = await tx.reviewJobListingAnalysis.findMany({
     where: {
       jobListing: { jobId },
@@ -65,18 +41,38 @@ async function recomputeJobAffordability(
     select: {
       id: true,
       triage: true,
+      details: true,
+      jobListing: {
+        select: {
+          platform: true,
+          listingId: true,
+          url: true,
+          staySnapshot: true,
+          priceRefreshAttempt: true,
+        },
+      },
     },
   });
+  const ttlMs = resolveStaySnapshotTtlMs();
+  const now = new Date();
 
   for (const analysis of analyses) {
     const triage = asRecord(analysis.triage);
     if (triage?.scoreSource !== 'deterministic_rubric') continue;
 
-    const affordability = recomputeStoredAffordability({
-      affordability: triage.affordability,
-      budget: explicitBudget ?? getStoredBriefBudget(triage),
+    const snapshot = getReviewJobStaySnapshotReadModel({
+      job,
+      listing: analysis.jobListing,
+      analysis,
+      ttlMs,
+      now,
     });
-    if (!affordability) continue;
+    const affordability = computeReviewJobSnapshotAffordability({
+      job,
+      triage,
+      snapshot,
+      now,
+    });
 
     await tx.reviewJobListingAnalysis.update({
       where: { id: analysis.id },
@@ -150,6 +146,8 @@ export async function PATCH(request: Request, { params }: Params) {
       currency: true,
       analysisBudgetAmount: true,
       analysisBudgetCurrency: true,
+      priceRefreshStatus: true,
+      priceRefreshCurrentPhase: true,
     },
   });
 
@@ -160,9 +158,11 @@ export async function PATCH(request: Request, { params }: Params) {
   if (
     existingJob.analysisStatus === 'running'
     || existingJob.analysisCurrentPhase === 'queued'
+    || existingJob.priceRefreshStatus === 'running'
+    || existingJob.priceRefreshCurrentPhase === 'queued'
   ) {
     return NextResponse.json(
-      { error: 'Wait for the current analysis run to finish before changing brief, budget, or selection' },
+      { error: 'Wait for the current analysis or price refresh to finish before changing brief, budget, or selection' },
       { status: 409 },
     );
   }
@@ -225,16 +225,7 @@ export async function PATCH(request: Request, { params }: Params) {
     }
 
     if (normalizedBudgetAmount !== undefined) {
-      const explicitBudget: AffordabilityBudget | null =
-        normalizedBudgetAmount != null && normalizedBudgetCurrency
-          ? {
-              amount: normalizedBudgetAmount,
-              currency: normalizedBudgetCurrency,
-              basis: 'stay',
-              source: 'explicit',
-            }
-          : null;
-      await recomputeJobAffordability(tx, jobId, explicitBudget);
+      await recomputeJobAffordability(tx, jobId);
     }
 
     if (selectedListings) {

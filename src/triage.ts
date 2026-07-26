@@ -14,10 +14,12 @@ import {
   type AffordabilityBudget,
   type CanonicalRequirementInput,
   type CanonicalRequirementSet,
+  type ComparableStayAvailability,
   type ComparableStayPrice,
   type ParsedAnalysisBudget,
   type RequirementAssessmentInput,
 } from './triage-rubric.js';
+import { parseStaySnapshot } from './stay-snapshot.js';
 import {
   LEGACY_TRIAGE_CLASSIFIER_VERSION,
   TRIAGE_CLASSIFIER_VERSION,
@@ -43,6 +45,7 @@ export interface TriageOptions {
   temperature?: number;      // Classification temperature. Default: 0
   budget?: AffordabilityBudget;
   price?: ComparableStayPrice;
+  availability?: ComparableStayAvailability;
   priceFreshness?: ComparableStayPrice['freshness'];
   stayContext?: TriageStayContext;
   /** Evaluation/backfill only. Product calls always use the current policy. */
@@ -714,6 +717,14 @@ export function extractComparableStayPrice(
   listing: any,
   freshness: ComparableStayPrice['freshness'] = 'unknown',
 ): ComparableStayPrice | null {
+  const staySnapshot = parseStaySnapshot(listing?.staySnapshot);
+  if (staySnapshot?.priceForStay) {
+    return {
+      ...staySnapshot.priceForStay,
+      freshness,
+    };
+  }
+
   const pricing = listing?.pricing;
   if (!pricing || typeof pricing !== 'object') return null;
 
@@ -797,6 +808,26 @@ export function extractComparableStayPrice(
     }
   }
   return null;
+}
+
+export function extractComparableStayAvailability(
+  listing: any,
+  freshness: ComparableStayAvailability['freshness'] = 'unknown',
+): ComparableStayAvailability {
+  const staySnapshot = parseStaySnapshot(listing?.staySnapshot);
+  if (!staySnapshot) {
+    return {
+      status: 'unknown',
+      capturedAt: null,
+      freshness: 'unknown',
+      reasonCode: 'legacy_snapshot_missing',
+    };
+  }
+
+  return {
+    ...staySnapshot.availability,
+    freshness,
+  };
 }
 
 function deterministicTierReason(
@@ -995,7 +1026,17 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
       listingData,
       options.priceFreshness ?? 'unknown',
     );
-  const affordability = computeAffordability({ budget, price });
+  const availability =
+    options.availability
+    ?? extractComparableStayAvailability(
+      listingData,
+      options.priceFreshness ?? 'unknown',
+    );
+  const affordability = computeAffordability({
+    budget,
+    price,
+    availability,
+  });
   const triageData = {
     ...parsed,
     ...score,

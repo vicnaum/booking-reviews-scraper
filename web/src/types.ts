@@ -1,5 +1,7 @@
 // Re-export and adapt types from the CLI for web usage
 // These mirror src/search/types.ts but are self-contained for the web app
+import type { AffordabilityResult } from '@cli/triage-rubric';
+import type { StaySnapshotReadModel } from '@cli/stay-snapshot';
 
 export interface BoundingBox {
   neLat: number;
@@ -215,6 +217,8 @@ export interface ReviewJobListing extends SearchResult {
   liked: boolean;
   hidden: boolean;
   poiDistanceMeters: number | null;
+  staySnapshot: StaySnapshotReadModel;
+  affordability: AffordabilityResult;
   analysis: ReviewJobListingAnalysis | null;
 }
 
@@ -227,6 +231,8 @@ export interface ReviewJobState {
   currentPhase: string;
   analysisStatus: PhaseStatus;
   analysisCurrentPhase: string | null;
+  priceRefreshStatus: PhaseStatus;
+  priceRefreshCurrentPhase: string | null;
   location: string | null;
   prompt: string | null;
   boundingBox: BoundingBox | null;
@@ -252,6 +258,16 @@ export interface ReviewJobState {
   analysisDurationMs: number | null;
   analysisStartedAt: string | null;
   analysisCompletedAt: string | null;
+  priceRefreshProgress: number;
+  priceRefreshErrorMessage: string | null;
+  priceRefreshSummary: {
+    requested: number;
+    succeeded: number;
+    failed: number;
+  } | null;
+  priceRefreshDurationMs: number | null;
+  priceRefreshStartedAt: string | null;
+  priceRefreshCompletedAt: string | null;
   costs: AiCostBreakdown;
   aiCostBudgetUsd: number | null;
   aiCostBudgetExceeded: boolean;

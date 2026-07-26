@@ -6,5 +6,7 @@ export function shouldPollReviewJob(job: ReviewJobResponse['job']): boolean {
     || job.status === 'running'
     || job.analysisStatus === 'running'
     || job.analysisCurrentPhase === 'queued'
+    || job.priceRefreshStatus === 'running'
+    || job.priceRefreshCurrentPhase === 'queued'
   );
 }
