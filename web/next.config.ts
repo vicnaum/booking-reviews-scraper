@@ -10,12 +10,13 @@ const nextConfig: NextConfig = {
       ...config.resolve.alias,
       '@cli': path.resolve(__dirname, '../src'),
     };
+    // CLI sources use Node ESM .js specifiers while the shared source is .ts.
+    // Priority-matrix derivation is also bundled client-side.
+    config.resolve.extensionAlias = {
+      ...config.resolve.extensionAlias,
+      '.js': ['.ts', '.js'],
+    };
     if (isServer) {
-      // The CLI code uses .js extensions in imports (Node.js ESM convention)
-      // but sources are .ts files. Tell webpack to also try .ts when resolving .js
-      config.resolve.extensionAlias = {
-        '.js': ['.ts', '.js'],
-      };
       // Externalize Playwright to avoid webpack bundling issues
       config.externals = config.externals || [];
       if (Array.isArray(config.externals)) {

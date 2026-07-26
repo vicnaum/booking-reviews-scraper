@@ -187,6 +187,14 @@ export interface ReviewJobEvent {
   createdAt: string;
 }
 
+export interface ReviewAnalysisSample {
+  totalScrapedReviewCount: number | null;
+  eligibleReviewCount: number | null;
+  analyzedReviewCount: number | null;
+  capped: boolean | null;
+  source: 'batch_manifest' | 'unknown';
+}
+
 export interface ReviewJobListingAnalysis {
   id: string;
   status: PhaseStatus;
@@ -203,6 +211,7 @@ export interface ReviewJobListingAnalysis {
   aiPhotos: Record<string, unknown> | null;
   triage: Record<string, unknown> | null;
   reviewCount: number | null;
+  reviewSample: ReviewAnalysisSample;
   photoCount: number | null;
   costs: AiCostBreakdown;
   durationMs: number | null;
