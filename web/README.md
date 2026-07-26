@@ -143,6 +143,18 @@ Rows visibly retain their `rankingStatus`. Insufficient-evidence rows are groupe
 comparable ranked results, as are older-policy, legacy, mismatched requirement-set, and unscored
 rows. Sorting a column never mixes those groups.
 
+Result cards are quality-first by default. Users can opt into budget-fit order (`within`, then
+least-over-budget, then `unknown`, with quality as the tie-breaker) and filter by any combination
+of those three current deterministic affordability states. Neither control changes quality scores,
+tiers, booking-eligibility groups, or comparison-status groups.
+
+Editing a saved quality brief after completed or partial analysis durably marks the job as needing
+a regrade; whitespace-only and structured budget-only edits do not. Prior verdicts and paid
+evidence remain visible and are labeled as reflecting the previous brief, but they are removed from
+current peer ranks. The marker clears only after a fully completed whole-job triage regrade and
+survives failed or partial attempts. Brief, classifier-policy, and requirement-set staleness share
+one regrade banner with distinct reasons and the same whole-job action and cost estimate.
+
 Review frequency denominators are the reviews actually sent to AI, not the hotel's public review
 count. When retained `batch_manifest.json` provenance is available, each row separately states the
 AI-analyzed sample, post-filter eligible count, whether the configured sample cap applied, and

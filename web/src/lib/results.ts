@@ -161,6 +161,7 @@ export interface ParsedTriage {
 
 export type TriageComparisonStatus =
   | 'ranked'
+  | 'regrade_required'
   | 'insufficient_evidence'
   | 'legacy'
   | 'stale_requirement_set'
@@ -168,6 +169,66 @@ export type TriageComparisonStatus =
   | 'unscored';
 
 export type ActiveTriageComparison = TriageComparabilityDescriptor;
+export type TriageRegradeReason =
+  | 'brief_changed'
+  | 'classifier_policy_changed'
+  | 'requirement_set_mismatch';
+export type AffordabilityStatus =
+  ReviewJobListing['affordability']['status'];
+
+export const TRIAGE_REGRADE_REASON_COPY: Record<
+  TriageRegradeReason,
+  string
+> = {
+  brief_changed:
+    'The quality brief changed, so these verdicts reflect the previous brief.',
+  classifier_policy_changed:
+    'Some verdicts use an older classifier policy.',
+  requirement_set_mismatch:
+    'Some verdicts use a different canonical priority set.',
+};
+
+const TRIAGE_REGRADE_REASON_ORDER: TriageRegradeReason[] = [
+  'brief_changed',
+  'classifier_policy_changed',
+  'requirement_set_mismatch',
+];
+
+export const AFFORDABILITY_STATUS_ORDER: AffordabilityStatus[] = [
+  'within',
+  'over',
+  'unknown',
+];
+
+export function compareAffordability(
+  left: ReviewJobListing['affordability'],
+  right: ReviewJobListing['affordability'],
+): number {
+  const leftRank = AFFORDABILITY_STATUS_ORDER.indexOf(left.status);
+  const rightRank = AFFORDABILITY_STATUS_ORDER.indexOf(right.status);
+  if (leftRank !== rightRank) return leftRank - rightRank;
+
+  if (left.status === 'over' && right.status === 'over') {
+    if (
+      left.overByPercent == null
+      && right.overByPercent == null
+    ) {
+      return 0;
+    }
+    if (left.overByPercent == null) return 1;
+    if (right.overByPercent == null) return -1;
+    return left.overByPercent - right.overByPercent;
+  }
+
+  return 0;
+}
+
+export function matchesAffordabilityFilter(
+  listing: Pick<ReviewJobListing, 'affordability'>,
+  activeStatuses: ReadonlySet<AffordabilityStatus>,
+): boolean {
+  return activeStatuses.has(listing.affordability.status);
+}
 
 export function getTriageRegradeListingCount(
   listings: Array<Pick<ReviewJobListing, 'hidden'>>,
@@ -307,11 +368,38 @@ export function getActiveTriageComparison(
     : null;
 }
 
+export function getTriageRegradeReasons(
+  listings: ReviewJobListing[],
+  activeComparison: ActiveTriageComparison | null,
+  briefChanged: boolean,
+): TriageRegradeReason[] {
+  const reasons = new Set<TriageRegradeReason>();
+  if (briefChanged) reasons.add('brief_changed');
+
+  for (const listing of listings) {
+    if (listing.hidden) continue;
+    const status = getTriageComparisonStatus(
+      getListingResultsSnapshot(listing).triage,
+      activeComparison,
+    );
+    if (status === 'stale_classifier_policy') {
+      reasons.add('classifier_policy_changed');
+    } else if (status === 'stale_requirement_set') {
+      reasons.add('requirement_set_mismatch');
+    }
+  }
+
+  return TRIAGE_REGRADE_REASON_ORDER.filter((reason) =>
+    reasons.has(reason));
+}
+
 export function getTriageComparisonStatus(
   triage: ParsedTriage | null,
   activeComparison: ActiveTriageComparison | null,
+  options: { regradeRequired?: boolean } = {},
 ): TriageComparisonStatus {
   if (!triage) return 'unscored';
+  if (options.regradeRequired) return 'regrade_required';
   if (triage.scoreSource === 'model_legacy') return 'legacy';
   if (
     activeComparison

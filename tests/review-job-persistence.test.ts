@@ -22,6 +22,7 @@ function makeJob(overrides: Record<string, unknown> = {}) {
     priceRefreshCurrentPhase: null,
     location: 'London',
     prompt: 'quiet and close to POI',
+    regradeRequired: false,
     boundingBox: null,
     circle: null,
     poi: null,
@@ -187,6 +188,7 @@ test('native results readiness is derived from persisted analysis state, not rep
   assert.equal(response.job.reportReady, true);
   assert.equal(response.job.legacyReportAvailable, false);
   assert.equal(response.job.artifactArchiveAvailable, false);
+  assert.equal(response.job.regradeRequired, false);
   assert.deepEqual(response.job.costs, {
     aiReviewsUsd: 0.0142,
     aiPhotosUsd: 0.0061,
@@ -206,6 +208,17 @@ test('native results readiness is derived from persisted analysis state, not rep
     capped: null,
     source: 'unknown',
   });
+});
+
+test('job responses expose the durable quality regrade requirement', () => {
+  const response = toReviewJobResponse({
+    job: makeJob({ regradeRequired: true }),
+    listings: [makeListing()],
+    events: [],
+  });
+
+  assert.equal(response.job.regradeRequired, true);
+  assert.equal(response.job.reportReady, true);
 });
 
 test('job responses preserve exact AI sample provenance from the batch manifest', () => {

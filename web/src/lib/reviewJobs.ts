@@ -546,6 +546,7 @@ export function toReviewJobState(
     priceRefreshCurrentPhase: job.priceRefreshCurrentPhase ?? null,
     location: job.location ?? null,
     prompt: job.prompt ?? null,
+    regradeRequired: job.regradeRequired,
     boundingBox: parseStoredBoundingBox(job.boundingBox) ?? null,
     circle: asCircleFilter(job.circle),
     poi: asMapPoint(job.poi),

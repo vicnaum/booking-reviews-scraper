@@ -103,6 +103,7 @@ model ReviewJob {
   priceRefreshCurrentPhase String?
   location       String?
   prompt         String?
+  regradeRequired Boolean         @default(false)
   boundingBox    Json?
   circle         Json?
   poi            Json?

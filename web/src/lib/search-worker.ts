@@ -70,6 +70,7 @@ import {
   getReviewJobStaySnapshotReadModel,
   resolveStaySnapshotTtlMs,
 } from './staySnapshots.js';
+import { regradeRequiredAfterAnalysis } from './reviewJobEdits.js';
 
 for (const envPath of [
   path.resolve(process.cwd(), '.env.local'),
@@ -1907,6 +1908,10 @@ async function runReviewJobAnalysis(
           analysisErrorMessage: null,
           analysisCompletedAt: completedAt,
           analysisDurationMs: completedAt.getTime() - startedAt.getTime(),
+          regradeRequired: regradeRequiredAfterAnalysis(
+            jobRecord.regradeRequired,
+            overallStatus,
+          ),
           artifactRoot,
           reportPath,
           ...aggregatedAiCosts,

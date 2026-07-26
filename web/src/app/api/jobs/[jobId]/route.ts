@@ -13,6 +13,7 @@ import {
   getReviewJobStaySnapshotReadModel,
   resolveStaySnapshotTtlMs,
 } from '@/lib/staySnapshots';
+import { getQualityBriefEditEffect } from '@/lib/reviewJobEdits';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -143,6 +144,8 @@ export async function PATCH(request: Request, { params }: Params) {
       id: true,
       analysisStatus: true,
       analysisCurrentPhase: true,
+      prompt: true,
+      regradeRequired: true,
       currency: true,
       analysisBudgetAmount: true,
       analysisBudgetCurrency: true,
@@ -166,6 +169,28 @@ export async function PATCH(request: Request, { params }: Params) {
       { status: 409 },
     );
   }
+
+  const hasPromptUpdate =
+    Object.prototype.hasOwnProperty.call(body, 'prompt');
+  if (
+    hasPromptUpdate
+    && body.prompt != null
+    && typeof body.prompt !== 'string'
+  ) {
+    return NextResponse.json(
+      { error: 'Analysis brief must be text or null' },
+      { status: 400 },
+    );
+  }
+  const qualityBriefEffect =
+    hasPromptUpdate
+      ? getQualityBriefEditEffect({
+          currentPrompt: existingJob.prompt,
+          nextPrompt: body.prompt,
+          analysisStatus: existingJob.analysisStatus,
+          regradeRequired: existingJob.regradeRequired,
+        })
+      : null;
 
   const hasBudgetUpdate =
     Object.prototype.hasOwnProperty.call(body, 'analysisBudgetAmount')
@@ -206,8 +231,10 @@ export async function PATCH(request: Request, { params }: Params) {
 
   const job = await prisma.$transaction(async (tx) => {
     const updateData: Prisma.ReviewJobUpdateInput = {};
-    if (Object.prototype.hasOwnProperty.call(body, 'prompt')) {
-      updateData.prompt = body.prompt?.trim() || null;
+    if (qualityBriefEffect) {
+      updateData.prompt = qualityBriefEffect.storedPrompt;
+      updateData.regradeRequired =
+        qualityBriefEffect.regradeRequired;
     }
     if (normalizedBudgetAmount !== undefined) {
       updateData.analysisBudgetAmount = normalizedBudgetAmount;
@@ -221,6 +248,24 @@ export async function PATCH(request: Request, { params }: Params) {
       await tx.reviewJob.update({
         where: { id: jobId },
         data: updateData,
+      });
+    }
+
+    if (
+      qualityBriefEffect?.qualityBriefChanged
+      && qualityBriefEffect.regradeRequired
+    ) {
+      await tx.reviewJobEvent.create({
+        data: {
+          jobId,
+          phase: 'triage',
+          level: 'warning',
+          message:
+            'Quality brief changed; saved verdicts require a whole-job regrade.',
+          payload: {
+            reason: 'brief_changed',
+          },
+        },
       });
     }
 

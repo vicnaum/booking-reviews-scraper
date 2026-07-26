@@ -2,12 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  compareAffordability,
   getActiveTriageComparison,
   getActiveRequirementSetId,
   getBookingEligibilityRank,
   getListingResultsSnapshot,
   getTriageComparisonStatus,
+  getTriageRegradeReasons,
   getTriageRegradeListingCount,
+  matchesAffordabilityFilter,
 } from '../web/src/lib/results.js';
 import type { ReviewJobListing } from '../web/src/types.js';
 import {
@@ -341,5 +344,100 @@ test('whole-job regrade scope counts every non-hidden listing', () => {
   assert.equal(
     getTriageRegradeListingCount([stale, current, hidden]),
     2,
+  );
+});
+
+test('brief and comparability staleness share ordered regrade reason codes', () => {
+  const current = listing('current', {
+    scoreSource: 'deterministic_rubric',
+    rubricVersion: '1',
+    requirementSetId: 'reqset_active',
+    classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+    fitScore: 80,
+    tier: 'top_pick',
+    rankingStatus: 'ranked',
+  });
+  const oldPolicy = listing('old-policy', {
+    scoreSource: 'deterministic_rubric',
+    rubricVersion: '1',
+    requirementSetId: 'reqset_active',
+    fitScore: 79,
+    tier: 'shortlist',
+    rankingStatus: 'ranked',
+  });
+  const mismatched = listing('mismatched', {
+    scoreSource: 'deterministic_rubric',
+    rubricVersion: '1',
+    requirementSetId: 'reqset_other',
+    classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+    fitScore: 90,
+    tier: 'top_pick',
+    rankingStatus: 'ranked',
+  });
+  const activeComparison =
+    getCurrentTriageComparability('reqset_active');
+
+  assert.deepEqual(
+    getTriageRegradeReasons(
+      [current, oldPolicy, mismatched],
+      activeComparison,
+      true,
+    ),
+    [
+      'brief_changed',
+      'classifier_policy_changed',
+      'requirement_set_mismatch',
+    ],
+  );
+  assert.equal(
+    getTriageComparisonStatus(
+      getListingResultsSnapshot(current).triage,
+      activeComparison,
+      { regradeRequired: true },
+    ),
+    'regrade_required',
+  );
+});
+
+test('budget-fit ordering is within, least over, then unknown', () => {
+  const affordability = (
+    status: 'within' | 'over' | 'unknown',
+    overByPercent: number | null = null,
+  ) => ({
+    status,
+    overByPercent,
+  }) as ReviewJobListing['affordability'];
+  const values = [
+    affordability('unknown'),
+    affordability('over', 18),
+    affordability('within'),
+    affordability('over', 4),
+    affordability('over', null),
+  ];
+
+  values.sort(compareAffordability);
+  assert.deepEqual(
+    values.map((value) => [value.status, value.overByPercent]),
+    [
+      ['within', null],
+      ['over', 4],
+      ['over', 18],
+      ['over', null],
+      ['unknown', null],
+    ],
+  );
+  assert.equal(
+    matchesAffordabilityFilter(
+      { affordability: affordability('over', 4) },
+      new Set(['within', 'unknown']),
+    ),
+    false,
+  );
+  assert.equal(
+    matchesAffordabilityFilter(
+      { affordability: affordability('unknown') },
+      new Set(['within', 'unknown']),
+    ),
+    true,
   );
 });
