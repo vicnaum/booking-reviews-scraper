@@ -18,6 +18,7 @@ import { buildListingUrl } from '@/lib/listingLinks';
 import {
   formatPoiDistance,
   getActiveTriageComparison,
+  getBookingEligibilityRank,
   getListingResultsSnapshot,
   getTriageComparisonStatus,
   getTriageRegradeListingCount,
@@ -39,6 +40,8 @@ import PlatformBadge from './PlatformBadge';
 import ResultsJobMap from './ResultsJobMap';
 import AiBudgetNotice from './AiBudgetNotice';
 import EvidenceGapBadge from './EvidenceGapBadge';
+import StaySnapshotStatus from './StaySnapshotStatus';
+import PriceRefreshControls from './PriceRefreshControls';
 
 const MIN_MAP_HEIGHT = 280;
 const TIER_ORDER = ['top_pick', 'shortlist', 'consider', 'unlikely', 'no_go'] as const;
@@ -734,6 +737,9 @@ function ListingDetailPanel({
               </button>
             ))}
           </div>
+          <div className="pt-4">
+            <StaySnapshotStatus snapshot={listing.staySnapshot} />
+          </div>
 
           {activeTab === 'triage' && (
             <div className="space-y-4 pt-4">
@@ -1354,7 +1360,9 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   const regradeLocked =
     isRegrading
     || data.job.analysisStatus === 'running'
-    || data.job.analysisCurrentPhase === 'queued';
+    || data.job.analysisCurrentPhase === 'queued'
+    || data.job.priceRefreshStatus === 'running'
+    || data.job.priceRefreshCurrentPhase === 'queued';
 
   const startTriageRegrade = useCallback(async () => {
     if (!viewerCanEdit || regradeLocked) return;
@@ -1395,6 +1403,11 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       next.map((listing, index) => [listingKey(listing), index]),
     );
     next.sort((a, b) => {
+      const eligibilityA = getBookingEligibilityRank(a);
+      const eligibilityB = getBookingEligibilityRank(b);
+      if (eligibilityA !== eligibilityB) {
+        return eligibilityA - eligibilityB;
+      }
       const triageA = getListingResultsSnapshot(a).triage;
       const triageB = getListingResultsSnapshot(b).triage;
       if (activeTriageComparison) {
@@ -1477,6 +1490,11 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     }
 
     next.sort((a, b) => {
+      const eligibilityA = getBookingEligibilityRank(a);
+      const eligibilityB = getBookingEligibilityRank(b);
+      if (eligibilityA !== eligibilityB) {
+        return eligibilityA - eligibilityB;
+      }
       if (activeTriageComparison) {
         const groupA = comparisonRank(
           getTriageComparisonStatus(
@@ -1621,11 +1639,14 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   const heroResults = useMemo(() => {
     const comparable = filteredResults.filter(
       (listing) =>
+        listing.staySnapshot.bookingEligibility.actionable
+        && (
         !activeTriageComparison
         || getTriageComparisonStatus(
           getListingResultsSnapshot(listing).triage,
           activeTriageComparison,
-        ) === 'ranked',
+        ) === 'ranked'
+        ),
     );
     const topPicks = comparable.filter(
       (listing) =>
@@ -2156,6 +2177,15 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
           </div>
 
           <AiBudgetNotice job={data.job} variant="results" className="mt-4" />
+          <div className="mt-4">
+            <PriceRefreshControls
+              job={data.job}
+              selectedListings={data.listings.filter(
+                (listing) => listing.liked && !listing.hidden,
+              )}
+              onQueued={refreshJob}
+            />
+          </div>
 
           {olderPolicyCount > 0 && (
             <div className="mt-5 rounded-2xl border border-amber-300/20 bg-amber-300/[0.08] p-4">

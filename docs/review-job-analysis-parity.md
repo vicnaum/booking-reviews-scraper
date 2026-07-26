@@ -127,7 +127,7 @@ the same temporary file inputs that `runAnalyze`, `runAnalyzePhotos`, and
 - Airbnb keys use room ID. Booking keys use `country_code/hotel_name`. Details additionally
   fingerprint exact dates, guest count, and Booking linked-room selection; Booking photo keys
   fingerprint linked-room versus download-all selection.
-- Default TTLs are 7 days for details, 30 days for reviews, and 180 days for photos. Cache hits
+- Default TTLs are 1 day for details, 30 days for reviews, and 180 days for photos. Cache hits
   are copied into the run's normal v2 artifact layout and recorded with `source = cache`,
   `cachedAt`, and `cacheAgeMs` in the manifest.
 - Only complete `fetched` outputs populate the cache. Partial, failed, stale, corrupt, and
@@ -135,6 +135,22 @@ the same temporary file inputs that `runAnalyze`, `runAnalyzePhotos`, and
   after successful fetches. AI analysis and triage outputs are not cached.
 - The v1 cache has no size bound. Removing the configured `REVIEWR_CACHE_DIR` is always safe;
   later jobs recreate it as needed.
+
+## Details-only price refresh
+
+- A price refresh clones the current run and executes only `details` with `force = true` and
+  `scopeManifestToInput = false`. It bypasses details-cache reads, then publishes successful
+  exact-date details to the normal cache.
+- Reviews, photos, AI review analysis, AI photo analysis, and quality classification are preserved
+  byte-for-byte. The worker recomputes only deterministic affordability and booking eligibility.
+- Failed or structurally unknown provider responses restore the prior details artifact and
+  snapshot, while persisting the separate attempt time and error. Mixed outcomes are `partial`.
+- Airbnb exact-date price quotes update the price but do not prove inventory. Airbnb availability
+  remains `unknown` unless its PDP explicitly refuses the stay or volunteers an alternate range;
+  search inclusion is not promoted to `yes`. Fresh-`no` exclusion is Booking-only in v1 unless
+  stronger Airbnb provider evidence is captured.
+- One review job has one snapshot date range. Run separate jobs for multi-leg trips; issue #70
+  tracks multi-leg support.
 
 ## Persistence Goals For The Web Job
 

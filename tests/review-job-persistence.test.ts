@@ -18,6 +18,8 @@ function makeJob(overrides: Record<string, unknown> = {}) {
     currentPhase: 'results-ready',
     analysisStatus: 'completed',
     analysisCurrentPhase: 'completed',
+    priceRefreshStatus: 'pending',
+    priceRefreshCurrentPhase: null,
     location: 'London',
     prompt: 'quiet and close to POI',
     boundingBox: null,
@@ -40,6 +42,7 @@ function makeJob(overrides: Record<string, unknown> = {}) {
     errorMessage: null,
     queueJobId: null,
     analysisQueueJobId: null,
+    priceRefreshQueueJobId: null,
     artifactRoot: null,
     reportPath: null,
     createdAt: new Date('2026-03-14T00:00:00.000Z'),
@@ -51,6 +54,12 @@ function makeJob(overrides: Record<string, unknown> = {}) {
     analysisStartedAt: new Date('2026-03-14T00:03:00.000Z'),
     analysisCompletedAt: new Date('2026-03-14T00:04:00.000Z'),
     analysisDurationMs: 60000,
+    priceRefreshProgress: 0,
+    priceRefreshErrorMessage: null,
+    priceRefreshSummary: null,
+    priceRefreshStartedAt: null,
+    priceRefreshCompletedAt: null,
+    priceRefreshDurationMs: null,
     aiReviewsCostUsd: 0.0142,
     aiPhotosCostUsd: 0.0061,
     triageCostUsd: 0.0027,
@@ -87,8 +96,11 @@ function makeListing(overrides: Record<string, unknown> = {}) {
     stars: null,
     freeCancellation: null,
     selected: true,
+    liked: false,
     hidden: false,
     poiDistanceMeters: 42,
+    staySnapshot: null,
+    priceRefreshAttempt: null,
     createdAt: new Date('2026-03-14T00:00:00.000Z'),
     analysis: {
       id: 'analysis_1',
@@ -203,6 +215,121 @@ test('explicit full-stay analysis budget is exposed independently of search curr
   assert.equal(response.job.currency, 'PLN');
   assert.equal(response.job.analysisBudgetAmount, 4500);
   assert.equal(response.job.analysisBudgetCurrency, 'USD');
+});
+
+test('exact-stay snapshots override search pricing and fresh unavailability is excluded', () => {
+  const capturedAt = new Date().toISOString();
+  const staySnapshot = {
+    schemaVersion: 1,
+    request: {
+      platform: 'booking',
+      listingId: 'us/test-listing',
+      checkIn: '2026-03-20',
+      checkOut: '2026-03-29',
+      adults: 2,
+      linkedRoomId: null,
+    },
+    priceForStay: {
+      amount: 1500,
+      currency: 'USD',
+      basis: 'stay',
+      capturedAt,
+      source: 'booking_property_page',
+      rateType: 'public',
+      mandatoryChargesResolved: true,
+    },
+    availability: {
+      status: 'no',
+      capturedAt,
+      reasonCode: 'provider_unavailable',
+    },
+    providerEvidence: {
+      availabilityText: 'No availability for the requested dates',
+    },
+  };
+  const response = toReviewJobResponse({
+    job: makeJob({
+      analysisBudgetAmount: 2000,
+      analysisBudgetCurrency: 'USD',
+    }),
+    listings: [
+      makeListing({
+        platform: 'booking',
+        staySnapshot,
+        priceRefreshAttempt: {
+          attemptedAt: capturedAt,
+          status: 'succeeded',
+          error: null,
+        },
+      }),
+    ],
+    events: [],
+  });
+
+  assert.equal(response.listings[0].pricing?.total?.amount, 1500);
+  assert.equal(response.listings[0].staySnapshot.freshness.price, 'fresh');
+  assert.equal(
+    response.listings[0].staySnapshot.bookingEligibility.status,
+    'excluded',
+  );
+  assert.equal(response.listings[0].affordability.reasonCode, 'stay_unavailable');
+});
+
+test('legacy listing details expose unknown freshness without inventing a capture time', () => {
+  const response = toReviewJobResponse({
+    job: makeJob(),
+    listings: [
+      makeListing({
+        staySnapshot: null,
+        analysis: {
+          ...makeListing().analysis,
+          details: { title: 'Legacy details' },
+        },
+      }),
+    ],
+    events: [],
+  });
+
+  assert.equal(response.listings[0].staySnapshot.legacy, true);
+  assert.equal(response.listings[0].staySnapshot.availability.capturedAt, null);
+  assert.equal(
+    response.listings[0].staySnapshot.freshness.availability,
+    'unknown',
+  );
+  assert.equal(
+    response.listings[0].staySnapshot.bookingEligibility.status,
+    'unknown',
+  );
+});
+
+test('price refresh progress and partial counts serialize independently of analysis', () => {
+  const response = toReviewJobResponse({
+    job: makeJob({
+      priceRefreshStatus: 'partial',
+      priceRefreshCurrentPhase: 'completed',
+      priceRefreshProgress: 1,
+      priceRefreshErrorMessage:
+        '1 of 2 price refreshes failed; last known snapshots were preserved.',
+      priceRefreshSummary: {
+        requested: 2,
+        succeeded: 1,
+        failed: 1,
+      },
+      priceRefreshStartedAt: new Date('2026-07-26T18:00:00.000Z'),
+      priceRefreshCompletedAt: new Date('2026-07-26T18:01:00.000Z'),
+      priceRefreshDurationMs: 60000,
+    }),
+    listings: [makeListing()],
+    events: [],
+  });
+
+  assert.equal(response.job.priceRefreshStatus, 'partial');
+  assert.deepEqual(response.job.priceRefreshSummary, {
+    requested: 2,
+    succeeded: 1,
+    failed: 1,
+  });
+  assert.equal(response.job.priceRefreshDurationMs, 60000);
 });
 
 test('legacy html export availability remains separate from native results readiness', () => {

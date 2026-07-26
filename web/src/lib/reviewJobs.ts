@@ -33,8 +33,24 @@ import {
   isReviewJobArtifactFileAvailable,
   isReviewJobArtifactRootAvailable,
 } from './reviewJobArtifacts.js';
+import {
+  computeReviewJobSnapshotAffordability,
+  getReviewJobStaySnapshotReadModel,
+  resolveStaySnapshotTtlMs,
+} from './staySnapshots.js';
 
 const EARTH_RADIUS_METERS = 6371000;
+
+function getStayNightCount(
+  checkin: string | null,
+  checkout: string | null,
+): number | null {
+  if (!checkin || !checkout) return null;
+  const start = Date.parse(`${checkin}T00:00:00Z`);
+  const end = Date.parse(`${checkout}T00:00:00Z`);
+  const nights = Math.round((end - start) / 86_400_000);
+  return Number.isFinite(nights) && nights > 0 ? nights : null;
+}
 
 function asNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -78,6 +94,19 @@ function asJsonObject(value: Prisma.JsonValue | null): Record<string, unknown> |
   }
 
   return value as Record<string, unknown>;
+}
+
+function asPriceRefreshSummary(
+  value: Prisma.JsonValue | null,
+): ReviewJobState['priceRefreshSummary'] {
+  const summary = asJsonObject(value);
+  const requested = asNumber(summary?.requested);
+  const succeeded = asNumber(summary?.succeeded);
+  const failed = asNumber(summary?.failed);
+  if (requested == null || succeeded == null || failed == null) {
+    return null;
+  }
+  return { requested, succeeded, failed };
 }
 
 function getPersistedReviewJobAiBudgetUsd(
@@ -290,8 +319,13 @@ function toReviewJobListingAnalysisState(
 
 export function toWebReviewJobListing(
   row: ReviewJobListingModel & { analysis?: ReviewJobListingAnalysisModel | null },
+  options: {
+    job: ReviewJobModel;
+    ttlMs?: number;
+    now?: Date;
+  },
 ): ReviewJobListing {
-  const pricing =
+  const storedPricing =
     asSearchPricing((row as ReviewJobListingModel & { pricing?: Prisma.JsonValue | null }).pricing)
     ?? (
       row.priceAmount != null || row.totalPrice != null
@@ -316,6 +350,44 @@ export function toWebReviewJobListing(
           }
         : null
     );
+  const staySnapshot = getReviewJobStaySnapshotReadModel({
+    job: options.job,
+    listing: row,
+    analysis: row.analysis,
+    ttlMs: options.ttlMs,
+    now: options.now,
+  });
+  const snapshotPrice = staySnapshot.priceForStay;
+  const nights = getStayNightCount(options.job.checkin, options.job.checkout);
+  const pricing = snapshotPrice
+    ? {
+        nightly:
+          nights
+            ? {
+                amount: snapshotPrice.amount / nights,
+                currency: snapshotPrice.currency,
+                source: 'derived' as const,
+              }
+            : null,
+        total: {
+          amount: snapshotPrice.amount,
+          currency: snapshotPrice.currency,
+          source: 'upstream' as const,
+        },
+        display: {
+          amount: snapshotPrice.amount,
+          currency: snapshotPrice.currency,
+          source: 'upstream' as const,
+          basis: 'stay' as const,
+        },
+      }
+    : storedPricing;
+  const affordability = computeReviewJobSnapshotAffordability({
+    job: options.job,
+    triage: row.analysis?.triage,
+    snapshot: staySnapshot,
+    now: options.now,
+  });
 
   return {
     id: row.listingId,
@@ -344,6 +416,8 @@ export function toWebReviewJobListing(
     liked: row.liked,
     hidden: row.hidden,
     poiDistanceMeters: row.poiDistanceMeters ?? null,
+    staySnapshot,
+    affordability,
     analysis: row.analysis ? toReviewJobListingAnalysisState(row.analysis) : null,
   };
 }
@@ -373,6 +447,8 @@ export function toReviewJobState(
     currentPhase: job.currentPhase,
     analysisStatus: job.analysisStatus,
     analysisCurrentPhase: job.analysisCurrentPhase ?? null,
+    priceRefreshStatus: job.priceRefreshStatus,
+    priceRefreshCurrentPhase: job.priceRefreshCurrentPhase ?? null,
     location: job.location ?? null,
     prompt: job.prompt ?? null,
     boundingBox: parseStoredBoundingBox(job.boundingBox) ?? null,
@@ -398,6 +474,12 @@ export function toReviewJobState(
     analysisDurationMs: job.analysisDurationMs ?? null,
     analysisStartedAt: job.analysisStartedAt?.toISOString() ?? null,
     analysisCompletedAt: job.analysisCompletedAt?.toISOString() ?? null,
+    priceRefreshProgress: job.priceRefreshProgress,
+    priceRefreshErrorMessage: job.priceRefreshErrorMessage ?? null,
+    priceRefreshSummary: asPriceRefreshSummary(job.priceRefreshSummary),
+    priceRefreshDurationMs: job.priceRefreshDurationMs ?? null,
+    priceRefreshStartedAt: job.priceRefreshStartedAt?.toISOString() ?? null,
+    priceRefreshCompletedAt: job.priceRefreshCompletedAt?.toISOString() ?? null,
     costs: buildAiCostBreakdown({
       aiReviewsCostUsd: job.aiReviewsCostUsd,
       aiPhotosCostUsd: job.aiPhotosCostUsd,
@@ -444,6 +526,8 @@ export function toReviewJobResponse(input: {
 }): ReviewJobResponse {
   const resultsReady = hasPersistedReviewJobResults(input.job);
   const persistedAiBudgetUsd = getPersistedReviewJobAiBudgetUsd(input.events);
+  const ttlMs = resolveStaySnapshotTtlMs();
+  const now = new Date();
 
   return {
     job: toReviewJobState(input.job, {
@@ -453,7 +537,12 @@ export function toReviewJobResponse(input: {
       viewerCanEdit: input.viewerCanEdit,
       aiCostBudgetUsd: persistedAiBudgetUsd,
     }),
-    listings: input.listings.map(toWebReviewJobListing),
+    listings: input.listings.map((listing) =>
+      toWebReviewJobListing(listing, {
+        job: input.job,
+        ttlMs,
+        now,
+      })),
     events: input.events.map(toReviewJobEvent),
   };
 }

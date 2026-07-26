@@ -198,7 +198,7 @@ output directories:
 
 ```env
 REVIEWR_CACHE_DIR=~/.cache/reviewr/artifacts-v1
-REVIEWR_CACHE_DETAILS_TTL_DAYS=7
+REVIEWR_CACHE_DETAILS_TTL_DAYS=1
 REVIEWR_CACHE_REVIEWS_TTL_DAYS=30
 REVIEWR_CACHE_PHOTOS_TTL_DAYS=180
 ```
@@ -233,7 +233,7 @@ npm run cleanup:artifacts -- --apply  # delete expired runs
 
 An available run can be downloaded as a streamed ZIP from the job or results page. The per-job
 run intentionally duplicates some details/reviews/photos from the cross-job cache: cache freshness
-is bounded by its 7/30/180-day TTLs, while complete run bundles retain for 30 days by default.
+is bounded by its 1/30/180-day TTLs, while complete run bundles retain for 30 days by default.
 Disk therefore grows in two locations; the cache still has no global size cap, and either store
 can be removed without losing the Postgres-backed results.
 

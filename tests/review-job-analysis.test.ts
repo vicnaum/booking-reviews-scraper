@@ -6,14 +6,18 @@ import * as path from 'node:path';
 
 import {
   getPoiDistanceMeters,
+  getListingMatchKey,
   getManifestPathFromRoot,
   getReviewJobRunDir,
   injectPoiContextIntoListingArtifacts,
+  prepareReviewJobPriceRefreshWorkspace,
   prepareReviewJobRunWorkspace,
   pruneAnalysisManifestToListings,
   readJsonFile,
+  reconcilePriceRefreshManifest,
   summarizeAnalysisStatus,
   summarizeManifestEntryStatus,
+  writeJsonFile,
   type AnalysisManifest,
 } from '../web/src/lib/review-job-analysis.js';
 import { REVIEW_JOB_ARTIFACT_DIR_ENV } from '../web/src/lib/reviewJobArtifacts.js';
@@ -329,5 +333,218 @@ test('prepareReviewJobRunWorkspace stages a fresh rerun with AI outputs invalida
     }
     fs.rmSync(sourceRoot, { recursive: true, force: true });
     fs.rmSync(artifactStore, { recursive: true, force: true });
+  }
+});
+
+test('price refresh staging preserves non-detail artifacts and restores last known details on failure', () => {
+  const artifactStore = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'review-job-price-refresh-store-'),
+  );
+  const sourceRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'review-job-price-refresh-source-'),
+  );
+  const previousArtifactDir = process.env[REVIEW_JOB_ARTIFACT_DIR_ENV];
+  process.env[REVIEW_JOB_ARTIFACT_DIR_ENV] = artifactStore;
+
+  const url = 'https://www.booking.com/hotel/us/example.en-gb.html';
+  const entry: AnalysisManifest['listings'][string] = {
+    platform: 'booking',
+    id: 'example',
+    url,
+    details: {
+      status: 'fetched',
+      file: 'listings/listing_example.json',
+      source: 'network',
+    },
+    reviews: {
+      status: 'fetched',
+      file: 'reviews/example_reviews.json',
+    },
+    photos: { status: 'fetched', dir: 'photos/example' },
+    aiReviews: { status: 'fetched', file: 'ai-reviews/example.json' },
+    aiPhotos: { status: 'fetched', file: 'ai-photos/example.json' },
+    triage: { status: 'fetched', file: 'triage/example.json' },
+  };
+  const manifest: AnalysisManifest = {
+    version: 2,
+    createdAt: '2026-07-25T12:00:00.000Z',
+    updatedAt: '2026-07-25T12:00:00.000Z',
+    dates: {
+      checkIn: '2026-08-02',
+      checkOut: '2026-08-11',
+      adults: 2,
+    },
+    listings: { 'booking/example': entry },
+  };
+  const oldDetails = {
+    title: 'Last known details',
+    staySnapshot: {
+      schemaVersion: 1,
+      request: {
+        platform: 'booking',
+        listingId: 'us/example',
+        checkIn: '2026-08-02',
+        checkOut: '2026-08-11',
+        adults: 2,
+        linkedRoomId: null,
+      },
+      priceForStay: {
+        amount: 900,
+        currency: 'USD',
+        basis: 'stay',
+        capturedAt: '2026-07-25T12:00:00.000Z',
+        source: 'booking_property_page',
+        rateType: 'public',
+        mandatoryChargesResolved: true,
+      },
+      availability: {
+        status: 'yes',
+        capturedAt: '2026-07-25T12:00:00.000Z',
+        reasonCode: 'provider_room_inventory',
+      },
+      providerEvidence: {},
+    },
+  };
+
+  try {
+    for (const dir of [
+      'listings',
+      'reviews',
+      'photos/example',
+      'ai-reviews',
+      'ai-photos',
+      'triage',
+    ]) {
+      fs.mkdirSync(path.join(sourceRoot, dir), { recursive: true });
+    }
+    writeJsonFile(getManifestPathFromRoot(sourceRoot), manifest);
+    writeJsonFile(path.join(sourceRoot, entry.details.file!), oldDetails);
+    writeJsonFile(path.join(sourceRoot, entry.reviews.file!), []);
+    writeJsonFile(path.join(sourceRoot, entry.aiReviews.file!), { kept: true });
+    writeJsonFile(path.join(sourceRoot, entry.aiPhotos.file!), { kept: true });
+    writeJsonFile(path.join(sourceRoot, entry.triage.file!), { kept: true });
+    fs.writeFileSync(path.join(sourceRoot, 'photos/example/01.jpg'), 'photo');
+
+    const staged = prepareReviewJobPriceRefreshWorkspace({
+      jobId: 'job_price_refresh',
+      runId: 'run_failed',
+      previousArtifactRoot: sourceRoot,
+      dates: {
+        checkIn: '2026-08-02',
+        checkOut: '2026-08-11',
+        adults: 2,
+      },
+    });
+    const failedManifest = readJsonFile<AnalysisManifest>(
+      getManifestPathFromRoot(staged.rootDir),
+    );
+    assert.ok(failedManifest);
+    failedManifest.listings['booking/example'].details = {
+      status: 'failed',
+      error: 'provider timeout',
+    };
+    writeJsonFile(getManifestPathFromRoot(staged.rootDir), failedManifest);
+    writeJsonFile(
+      path.join(staged.rootDir, entry.details.file!),
+      { title: 'corrupt replacement' },
+    );
+
+    const outcomes = reconcilePriceRefreshManifest({
+      rootDir: staged.rootDir,
+      previousArtifactRoot: sourceRoot,
+      previousManifest: staged.previousManifest,
+      targetKeys: new Set([getListingMatchKey('booking', url)]),
+    });
+    assert.equal(outcomes[0].status, 'failed');
+    assert.match(outcomes[0].error ?? '', /provider timeout/);
+    assert.deepEqual(
+      readJsonFile(path.join(staged.rootDir, entry.details.file!)),
+      oldDetails,
+    );
+    assert.deepEqual(
+      readJsonFile(path.join(staged.rootDir, entry.aiReviews.file!)),
+      { kept: true },
+    );
+    assert.deepEqual(
+      readJsonFile(path.join(staged.rootDir, entry.aiPhotos.file!)),
+      { kept: true },
+    );
+    assert.deepEqual(
+      readJsonFile(path.join(staged.rootDir, entry.triage.file!)),
+      { kept: true },
+    );
+    assert.equal(
+      fs.readFileSync(
+        path.join(staged.rootDir, 'photos/example/01.jpg'),
+        'utf8',
+      ),
+      'photo',
+    );
+
+    const successful = prepareReviewJobPriceRefreshWorkspace({
+      jobId: 'job_price_refresh',
+      runId: 'run_successful',
+      previousArtifactRoot: sourceRoot,
+      dates: {
+        checkIn: '2026-08-02',
+        checkOut: '2026-08-11',
+        adults: 2,
+      },
+    });
+    const nextDetails = {
+      ...oldDetails,
+      title: 'Refreshed details',
+      staySnapshot: {
+        ...oldDetails.staySnapshot,
+        priceForStay: {
+          ...oldDetails.staySnapshot.priceForStay,
+          amount: 950,
+          capturedAt: '2026-07-26T18:00:00.000Z',
+        },
+        availability: {
+          status: 'no',
+          capturedAt: '2026-07-26T18:00:00.000Z',
+          reasonCode: 'provider_unavailable',
+        },
+      },
+    };
+    writeJsonFile(
+      path.join(successful.rootDir, entry.details.file!),
+      nextDetails,
+    );
+    const successfulManifest = readJsonFile<AnalysisManifest>(
+      getManifestPathFromRoot(successful.rootDir),
+    );
+    assert.ok(successfulManifest);
+    successfulManifest.listings['booking/example'].details = {
+      status: 'fetched',
+      file: entry.details.file,
+      source: 'network',
+    };
+    writeJsonFile(
+      getManifestPathFromRoot(successful.rootDir),
+      successfulManifest,
+    );
+    const successfulOutcomes = reconcilePriceRefreshManifest({
+      rootDir: successful.rootDir,
+      previousArtifactRoot: sourceRoot,
+      previousManifest: successful.previousManifest,
+      targetKeys: new Set([getListingMatchKey('booking', url)]),
+    });
+    assert.equal(successfulOutcomes[0].status, 'succeeded');
+    assert.equal(successfulOutcomes[0].snapshot?.priceForStay?.amount, 950);
+    assert.equal(successfulOutcomes[0].snapshot?.availability.status, 'no');
+    assert.deepEqual(
+      readJsonFile(path.join(successful.rootDir, entry.aiReviews.file!)),
+      { kept: true },
+    );
+  } finally {
+    if (previousArtifactDir == null) {
+      delete process.env[REVIEW_JOB_ARTIFACT_DIR_ENV];
+    } else {
+      process.env[REVIEW_JOB_ARTIFACT_DIR_ENV] = previousArtifactDir;
+    }
+    fs.rmSync(artifactStore, { recursive: true, force: true });
+    fs.rmSync(sourceRoot, { recursive: true, force: true });
   }
 });

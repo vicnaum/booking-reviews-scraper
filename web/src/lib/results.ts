@@ -232,6 +232,20 @@ export function getTierRank(tier: string | null): number {
   }
 }
 
+export function getBookingEligibilityRank(
+  listing: Pick<ReviewJobListing, 'staySnapshot'>,
+): number {
+  switch (listing.staySnapshot.bookingEligibility.status) {
+    case 'eligible':
+      return 0;
+    case 'conditional':
+    case 'unknown':
+      return 1;
+    case 'excluded':
+      return 2;
+  }
+}
+
 export function formatPoiDistance(meters: number | null): string | null {
   if (meters == null || !Number.isFinite(meters)) {
     return null;
@@ -414,7 +428,9 @@ function parseTriage(listing: ReviewJobListing): ParsedTriage | null {
     : [];
 
   const price = asRecord(triage.price);
-  const affordabilityRecord = asRecord(triage.affordability);
+  const affordabilityRecord =
+    asRecord(listing.affordability)
+    ?? asRecord(triage.affordability);
   const affordabilityStatus = asString(affordabilityRecord?.status);
   const affordability: ParsedTriage['affordability'] =
     affordabilityStatus === 'within'

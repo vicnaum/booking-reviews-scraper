@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
 import { TRIAGE_RUBRIC_VERSION } from './triage-comparability.js';
+import type {
+  StayAvailabilityStatus,
+  StayDateRange,
+  StaySnapshotFreshness,
+} from './stay-snapshot.js';
 
 export { TRIAGE_RUBRIC_VERSION } from './triage-comparability.js';
 export const REQUIREMENT_SCHEMA_VERSION = '1';
@@ -117,6 +122,14 @@ export interface ComparableStayPrice {
   mandatoryChargesResolved: boolean;
 }
 
+export interface ComparableStayAvailability {
+  status: StayAvailabilityStatus;
+  capturedAt?: string | null;
+  freshness: StaySnapshotFreshness;
+  reasonCode: string;
+  availableRange?: StayDateRange;
+}
+
 export type AffordabilityUnknownReasonCode =
   | 'no_budget_given'
   | 'invalid_budget'
@@ -127,7 +140,12 @@ export type AffordabilityUnknownReasonCode =
   | 'currency_mismatch'
   | 'stay_basis_unresolved'
   | 'mandatory_charges_unresolved'
-  | 'rate_not_public';
+  | 'rate_not_public'
+  | 'stay_unavailable'
+  | 'stay_partially_available'
+  | 'availability_unknown'
+  | 'availability_stale'
+  | 'availability_freshness_unknown';
 
 export interface AffordabilityResult {
   status: 'within' | 'over' | 'unknown';
@@ -149,6 +167,10 @@ export interface AffordabilityResult {
   rateType: ComparableStayPrice['rateType'] | null;
   mandatoryChargesResolved: boolean | null;
   comparablePrice: ComparableStayPrice | null;
+  availabilityStatus: StayAvailabilityStatus | null;
+  availabilityCapturedAt: string | null;
+  availabilityFreshness: StaySnapshotFreshness | null;
+  comparableAvailability: ComparableStayAvailability | null;
 }
 
 const REQUIREMENT_TYPES = new Set<RequirementType>([
@@ -673,10 +695,12 @@ function staleAgeLabel(
 export function computeAffordability(input: {
   budget?: AffordabilityBudget | null;
   price?: ComparableStayPrice | null;
+  availability?: ComparableStayAvailability | null;
   now?: Date;
 }): AffordabilityResult {
   const budget = input.budget ?? null;
   const price = input.price ?? null;
+  const availability = input.availability ?? null;
   const now = input.now ?? new Date();
   const budgetCurrencySnapshot = budget
     ? normalizedCurrency(budget.currency) || null
@@ -696,6 +720,18 @@ export function computeAffordability(input: {
         mandatoryChargesResolved: price.mandatoryChargesResolved,
       }
     : null;
+  const comparableAvailability: ComparableStayAvailability | null =
+    availability
+      ? {
+          status: availability.status,
+          capturedAt: availability.capturedAt ?? null,
+          freshness: availability.freshness,
+          reasonCode: availability.reasonCode,
+          ...(availability.availableRange
+            ? { availableRange: availability.availableRange }
+            : {}),
+        }
+      : null;
 
   const unknown = (
     reasonCode: AffordabilityUnknownReasonCode,
@@ -721,6 +757,10 @@ export function computeAffordability(input: {
     rateType: price?.rateType ?? null,
     mandatoryChargesResolved: price?.mandatoryChargesResolved ?? null,
     comparablePrice,
+    availabilityStatus: availability?.status ?? null,
+    availabilityCapturedAt: availability?.capturedAt ?? null,
+    availabilityFreshness: availability?.freshness ?? null,
+    comparableAvailability,
     ...values,
   });
 
@@ -746,6 +786,54 @@ export function computeAffordability(input: {
     );
   }
   const budgetAmount = minorUnitsToNumber(budgetMinor, budgetDigits);
+
+  if (availability) {
+    const availabilityValues = {
+      budgetAmount,
+      currency: budgetCurrency,
+    };
+    if (availability.freshness === 'stale') {
+      return unknown(
+        'availability_stale',
+        `Availability is stale (${staleAgeLabel(availability.capturedAt, now)}).`,
+        availabilityValues,
+      );
+    }
+    if (availability.freshness !== 'fresh') {
+      return unknown(
+        'availability_freshness_unknown',
+        'Availability freshness is unknown.',
+        availabilityValues,
+      );
+    }
+    if (availability.status === 'no') {
+      return unknown(
+        'stay_unavailable',
+        'The property is unavailable for the recorded dates and guest count.',
+        availabilityValues,
+      );
+    }
+    if (availability.status === 'partial') {
+      return unknown(
+        'stay_partially_available',
+        availability.availableRange
+          ? (
+              `The requested stay is unavailable; the provider offered `
+              + `${availability.availableRange.checkIn} to `
+              + `${availability.availableRange.checkOut}.`
+            )
+          : 'The provider offered only conditional or alternate availability.',
+        availabilityValues,
+      );
+    }
+    if (availability.status !== 'yes') {
+      return unknown(
+        'availability_unknown',
+        'Availability could not be confirmed for the recorded dates and guest count.',
+        availabilityValues,
+      );
+    }
+  }
 
   if (!price) {
     return unknown(
@@ -845,6 +933,10 @@ export function computeAffordability(input: {
       rateType: price.rateType,
       mandatoryChargesResolved: price.mandatoryChargesResolved,
       comparablePrice,
+      availabilityStatus: availability?.status ?? null,
+      availabilityCapturedAt: availability?.capturedAt ?? null,
+      availabilityFreshness: availability?.freshness ?? null,
+      comparableAvailability,
     };
   }
 
@@ -873,6 +965,10 @@ export function computeAffordability(input: {
     rateType: price.rateType,
     mandatoryChargesResolved: price.mandatoryChargesResolved,
     comparablePrice,
+    availabilityStatus: availability?.status ?? null,
+    availabilityCapturedAt: availability?.capturedAt ?? null,
+    availabilityFreshness: availability?.freshness ?? null,
+    comparableAvailability,
   };
 }
 
@@ -926,6 +1022,47 @@ function parseStoredComparablePrice(
   };
 }
 
+function parseStoredComparableAvailability(
+  value: unknown,
+): ComparableStayAvailability | null | undefined {
+  if (value === null) return null;
+  const record = asStoredRecord(value);
+  if (!record) return undefined;
+  const status = record.status;
+  const capturedAt = record.capturedAt;
+  const freshness = record.freshness;
+  const reasonCode = record.reasonCode;
+  const availableRange = asStoredRecord(record.availableRange);
+  if (
+    (status !== 'yes' && status !== 'no'
+      && status !== 'partial' && status !== 'unknown')
+    || (capturedAt !== null && capturedAt !== undefined
+      && typeof capturedAt !== 'string')
+    || (freshness !== 'fresh' && freshness !== 'stale'
+      && freshness !== 'unknown')
+    || typeof reasonCode !== 'string'
+  ) {
+    return undefined;
+  }
+
+  const parsedRange =
+    availableRange
+    && typeof availableRange.checkIn === 'string'
+    && typeof availableRange.checkOut === 'string'
+      ? {
+          checkIn: availableRange.checkIn,
+          checkOut: availableRange.checkOut,
+        }
+      : undefined;
+  return {
+    status,
+    capturedAt: typeof capturedAt === 'string' ? capturedAt : null,
+    freshness,
+    reasonCode,
+    ...(parsedRange ? { availableRange: parsedRange } : {}),
+  };
+}
+
 /**
  * Recalculate only the affordability dimension from a persisted rubric result.
  * Returns null for pre-snapshot records so callers preserve old JSON rather than
@@ -945,9 +1082,17 @@ export function recomputeStoredAffordability(input: {
   }
   const price = parseStoredComparablePrice(stored.comparablePrice);
   if (price === undefined) return null;
+  const availability = Object.prototype.hasOwnProperty.call(
+    stored,
+    'comparableAvailability',
+  )
+    ? parseStoredComparableAvailability(stored.comparableAvailability)
+    : null;
+  if (availability === undefined) return null;
   return computeAffordability({
     budget: input.budget ?? null,
     price,
+    availability,
     now: input.now,
   });
 }

@@ -99,6 +99,8 @@ model ReviewJob {
   currentPhase   String          @default("search")
   analysisStatus PhaseStatus     @default(pending)
   analysisCurrentPhase String?
+  priceRefreshStatus PhaseStatus @default(pending)
+  priceRefreshCurrentPhase String?
   location       String?
   prompt         String?
   boundingBox    Json?
@@ -121,6 +123,7 @@ model ReviewJob {
   errorMessage   String?
   queueJobId     String?
   analysisQueueJobId String?
+  priceRefreshQueueJobId String?
   artifactRoot   String?
   reportPath     String?
   createdAt      DateTime        @default(now())
@@ -132,6 +135,12 @@ model ReviewJob {
   analysisStartedAt DateTime?
   analysisCompletedAt DateTime?
   analysisDurationMs Int?
+  priceRefreshProgress Float     @default(0)
+  priceRefreshErrorMessage String?
+  priceRefreshSummary Json?
+  priceRefreshStartedAt DateTime?
+  priceRefreshCompletedAt DateTime?
+  priceRefreshDurationMs Int?
   aiReviewsCostUsd Float         @default(0)
   aiPhotosCostUsd  Float         @default(0)
   triageCostUsd    Float         @default(0)
@@ -173,6 +182,8 @@ model ReviewJobListing {
   liked            Boolean   @default(false)
   hidden           Boolean   @default(false)
   poiDistanceMeters Float?
+  staySnapshot     Json?
+  priceRefreshAttempt Json?
   createdAt        DateTime  @default(now())
   analysis         ReviewJobListingAnalysis?
 

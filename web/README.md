@@ -60,7 +60,7 @@ CLI:
 
 ```dotenv
 REVIEWR_CACHE_DIR=~/.cache/reviewr/artifacts-v1
-REVIEWR_CACHE_DETAILS_TTL_DAYS=7
+REVIEWR_CACHE_DETAILS_TTL_DAYS=1
 REVIEWR_CACHE_REVIEWS_TTL_DAYS=30
 REVIEWR_CACHE_PHOTOS_TTL_DAYS=180
 ```
@@ -94,10 +94,42 @@ npm run cleanup:artifacts -- --apply  # remove expired runs
 ```
 
 Per-job runs deliberately duplicate some scrape files held by the cross-job cache. Cache freshness
-uses 7-day details, 30-day reviews, and 180-day photos; full run bundles retain for 30 days. Disk
+uses 1-day details, 30-day reviews, and 180-day photos; full run bundles retain for 30 days. Disk
 therefore grows in both the cache and `STAYREVIEWR_ARTIFACT_DIR`. The cache has no global size cap,
 but both stores are disposable because Postgres holds product state and live scraping can recreate
 inputs.
+
+## Exact-stay price and availability snapshots
+
+Each analyzed listing stores one public snapshot for the job's exact check-in, check-out, adult
+count, platform listing ID, and Booking room selection. The snapshot contains a numeric
+platform-currency full-stay price when available plus an independent provider availability state:
+`yes`, `no`, `partial`, or `unknown`. `unknown` means the request or extraction did not confirm
+inventory; it is never silently converted to `no`.
+
+Freshness is derived when a job is read from the snapshot's `capturedAt` and the same
+`REVIEWR_CACHE_DETAILS_TTL_DAYS` policy used by the details cache. There is no separate price TTL
+or stored expiry. Legacy details without snapshot timestamps remain visibly unknown.
+
+Owners can refresh every listing or the current shortlist from either job page. This queue action
+bypasses only details-cache reads, publishes successful details to the normal cache, and does not
+rerun reviews, photos, AI review/photo analysis, or quality classification. A failed listing keeps
+its last known snapshot and records the attempt time and error. Partial runs report succeeded and
+failed counts. Affordability is recomputed deterministically from the refreshed public stay price
+and availability; the independent quality score and tier remain unchanged.
+
+A fresh `no` is excluded from actionable ranking. `partial`, `unknown`, and stale availability
+remain visible as conditional or unknown. Signed-in and Genius rates may be lower than the public
+snapshot.
+
+Airbnb v1 is deliberately conservative: an exact-date PDP price quote is retained as price
+evidence but is not promoted to verified inventory. Airbnb availability therefore remains
+`unknown` unless Airbnb itself emits an explicit refusal or a provider-volunteered alternate
+range. Search inclusion is not treated as proof. In current fixtures, fresh-`no` exclusion is
+therefore exercised by Booking.
+
+One job represents one date range. Multi-leg trips require a separate job for each leg; issue #70
+tracks first-class multi-leg support.
 
 `web/.env.local` remains supported as a compatibility fallback for direct `web/` commands, but
 the root `.env` takes precedence. Proxy settings also fall back to

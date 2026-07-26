@@ -57,6 +57,16 @@ export async function POST(request: Request, { params }: Params) {
     );
   }
 
+  if (
+    job.priceRefreshStatus === 'running'
+    || job.priceRefreshCurrentPhase === 'queued'
+  ) {
+    return NextResponse.json(
+      { error: 'Wait for the current price refresh to finish before starting analysis' },
+      { status: 409 },
+    );
+  }
+
   if (mode === 'triage' && !job.artifactRoot) {
     return NextResponse.json(
       { error: 'Saved analysis artifacts are required for a triage-only regrade' },

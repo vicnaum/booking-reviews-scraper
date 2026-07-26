@@ -13,6 +13,8 @@ import * as path from 'path';
 import fetch from 'node-fetch';
 import { BROWSER_HEADERS, getApiKey, makeRequest } from './scraper.js';
 import { getListingHash, isStaleHash, refreshHashesViaPlaywright, invalidateSessionCache } from './hash-manager.js';
+import { parseAirbnbStaySnapshot } from './stay-snapshot.js';
+import type { StaySnapshot } from '../stay-snapshot.js';
 const OUTPUT_DIR = 'data/airbnb/output';
 
 const API_HEADERS = {
@@ -47,6 +49,7 @@ export interface AirbnbListingDetails {
   checkOut: string | null;
   cancellationPolicy: string | null;
   sleepingArrangements: SleepingArrangement[] | null;
+  staySnapshot: StaySnapshot;
   scrapedAt: string;
 }
 
@@ -261,6 +264,8 @@ export async function fetchListingPageData(
 function buildListingDetails(
   roomId: string,
   parsed: Partial<AirbnbListingDetails>,
+  staySnapshot: StaySnapshot,
+  capturedAt: string,
 ): AirbnbListingDetails {
   return {
     id: roomId,
@@ -286,7 +291,8 @@ function buildListingDetails(
     checkOut: parsed.checkOut || null,
     cancellationPolicy: parsed.cancellationPolicy || null,
     sleepingArrangements: parsed.sleepingArrangements || null,
-    scrapedAt: new Date().toISOString(),
+    staySnapshot,
+    scrapedAt: capturedAt,
   };
 }
 
@@ -546,14 +552,48 @@ export async function fetchListingDetails(
   roomId: string,
   options?: { checkIn?: string; checkOut?: string; adults?: number }
 ): Promise<AirbnbListingDetails> {
+  let htmlFallback: AirbnbListingDetails | null = null;
   try {
     const pageData = await fetchListingPageData(roomId, options);
     const parsedFromHtml = parseSections(pageData.sections, pageData.metadata);
-    return buildListingDetails(roomId, parsedFromHtml);
+    const capturedAt = new Date().toISOString();
+    const staySnapshot = parseAirbnbStaySnapshot({
+      sections: pageData.sections,
+      request: {
+        platform: 'airbnb',
+        listingId: roomId,
+        checkIn: options?.checkIn ?? null,
+        checkOut: options?.checkOut ?? null,
+        adults: options?.adults ?? null,
+        linkedRoomId: null,
+      },
+      capturedAt,
+      currency: 'USD',
+    });
+    const htmlDetails = buildListingDetails(
+      roomId,
+      parsedFromHtml,
+      staySnapshot,
+      capturedAt,
+    );
+    if (
+      !options?.checkIn
+      || !options?.checkOut
+      || staySnapshot.availability.status !== 'unknown'
+      || staySnapshot.priceForStay != null
+    ) {
+      return htmlDetails;
+    }
+    htmlFallback = htmlDetails;
+    console.warn(
+      `Warning: Airbnb HTML did not expose exact-stay availability for `
+      + `${roomId}; trying the PDP API`,
+    );
   } catch (htmlError: any) {
     console.warn(`Warning: Airbnb listing HTML extraction failed for ${roomId}: ${htmlError.message}`);
   }
 
+  try {
   const globalId = Buffer.from(`StayListing:${roomId}`).toString('base64');
   const demandId = Buffer.from(`DemandStayListing:${roomId}`).toString('base64');
 
@@ -660,6 +700,7 @@ export async function fetchListingDetails(
   }
 
   let sections = page.sections?.sections || [];
+  let snapshotSections = sections;
   const metadata = page.sections?.metadata || {};
 
   if (sections.length === 0) {
@@ -682,6 +723,7 @@ export async function fetchListingDetails(
         page = json?.data?.presentation?.stayProductDetailPage;
         if (page) {
           sections = page.sections?.sections || sections;
+          snapshotSections = sections;
         }
       } catch (err: any) {
         console.error(`Warning: Hash refresh failed: ${err.message}`);
@@ -734,6 +776,7 @@ export async function fetchListingDetails(
       const pricingPage = pricingJson?.data?.presentation?.stayProductDetailPage;
       if (pricingPage) {
         const pricingSections = pricingPage.sections?.sections || [];
+        snapshotSections = [...pricingSections, ...sections];
         const pricingParsed = parseSections(pricingSections, {});
         if (pricingParsed.pricing) {
           parsed.pricing = pricingParsed.pricing;
@@ -750,7 +793,35 @@ export async function fetchListingDetails(
     }
   }
 
-  return buildListingDetails(roomId, parsed);
+  const capturedAt = new Date().toISOString();
+  return buildListingDetails(
+    roomId,
+    parsed,
+    parseAirbnbStaySnapshot({
+      sections: snapshotSections,
+      request: {
+        platform: 'airbnb',
+        listingId: roomId,
+        checkIn: options?.checkIn ?? null,
+        checkOut: options?.checkOut ?? null,
+        adults: options?.adults ?? null,
+        linkedRoomId: null,
+      },
+      capturedAt,
+      currency: 'USD',
+    }),
+    capturedAt,
+  );
+  } catch (apiError) {
+    if (htmlFallback) {
+      console.warn(
+        `Warning: Airbnb PDP API fallback failed for ${roomId}; preserving `
+        + `the HTML extraction with unknown availability`,
+      );
+      return htmlFallback;
+    }
+    throw apiError;
+  }
 }
 
 /**

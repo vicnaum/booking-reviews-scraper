@@ -34,11 +34,14 @@ import {
   getPoiDistanceMeters,
   getReportPathFromRoot,
   injectPoiContextIntoListingArtifacts,
+  prepareReviewJobPriceRefreshWorkspace,
   prepareReviewJobRunWorkspace,
   readJsonFile,
+  reconcilePriceRefreshManifest,
   summarizeAnalysisStatus,
   summarizeManifestEntryStatus,
   toPhaseStatus,
+  writeJsonFile,
   type AnalysisManifest,
 } from './review-job-analysis.js';
 import {
@@ -61,6 +64,12 @@ import type {
   SearchResult,
 } from '../types.js';
 import { filterResultsForRequest } from './resultFilters.js';
+import { parseStaySnapshot } from '../../../src/stay-snapshot.js';
+import {
+  computeReviewJobSnapshotAffordability,
+  getReviewJobStaySnapshotReadModel,
+  resolveStaySnapshotTtlMs,
+} from './staySnapshots.js';
 
 for (const envPath of [
   path.resolve(process.cwd(), '.env.local'),
@@ -88,6 +97,12 @@ function asStoredMapPoint(value: unknown): { lat: number; lng: number } | null {
   return { lat, lng };
 }
 
+function asStoredRecord(value: unknown): Record<string, unknown> | null {
+  return value != null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
 async function appendReviewJobEvent(
   reviewJobId: string,
   input: Parameters<typeof buildReviewJobEventData>[1],
@@ -105,6 +120,8 @@ async function cleanupExpiredReviewJobArtifactRuns(reason: string) {
         OR: [
           { analysisStatus: 'running' },
           { analysisCurrentPhase: 'queued' },
+          { priceRefreshStatus: 'running' },
+          { priceRefreshCurrentPhase: 'queued' },
         ],
       },
       select: { artifactRoot: true },
@@ -966,6 +983,7 @@ async function persistReviewJobManifestEntryToDb(input: {
   const aiReviews = readArtifactJson(input.artifactRoot, input.entry.aiReviews.file);
   const aiPhotos = readArtifactJson(input.artifactRoot, input.entry.aiPhotos.file);
   const triage = readArtifactJson(input.artifactRoot, input.entry.triage.file);
+  const staySnapshot = parseStaySnapshot(details?.staySnapshot);
   const aiCostFields = getManifestEntryAiCostFields(input.entry);
   const terminalStatus = summarizeManifestEntryStatus(input.entry);
   const completedAt =
@@ -982,6 +1000,12 @@ async function persistReviewJobManifestEntryToDb(input: {
       where: { id: input.listing.id },
       data: {
         poiDistanceMeters: poiDistanceMeters ?? null,
+        ...(staySnapshot
+          ? {
+              staySnapshot:
+                staySnapshot as unknown as Prisma.InputJsonValue,
+            }
+          : {}),
       },
     });
 
@@ -1081,6 +1105,446 @@ async function syncReviewJobArtifactsToDb(input: {
   return {
     manifest,
   };
+}
+
+async function runReviewJobPriceRefresh(
+  reviewJobId: string,
+  listingRowIds: string[],
+) {
+  await cleanupExpiredReviewJobArtifactRuns('before-price-refresh');
+  await ensureReviewJobAnalysisRows(reviewJobId);
+
+  const jobRecord = await prisma.reviewJob.findUnique({
+    where: { id: reviewJobId },
+    include: {
+      listings: {
+        where: {
+          hidden: false,
+          id: { in: listingRowIds },
+        },
+        orderBy: { createdAt: 'asc' },
+        include: { analysis: true },
+      },
+    },
+  });
+  if (!jobRecord) {
+    throw new Error(`Review job ${reviewJobId} not found`);
+  }
+  if (!jobRecord.checkin || !jobRecord.checkout) {
+    throw new Error('Exact check-in and check-out dates are required');
+  }
+  if (!jobRecord.artifactRoot) {
+    throw new Error('Saved analysis artifacts are required');
+  }
+  if (jobRecord.listings.length === 0) {
+    throw new Error('No visible listings matched the requested price refresh');
+  }
+
+  const startedAt = new Date();
+  const attemptedAt = startedAt.toISOString();
+  const runId =
+    `price-refresh-${startedAt.toISOString().replace(/[:.]/g, '-')}`;
+  const staged = prepareReviewJobPriceRefreshWorkspace({
+    jobId: reviewJobId,
+    runId,
+    previousArtifactRoot: jobRecord.artifactRoot,
+    dates: {
+      checkIn: jobRecord.checkin,
+      checkOut: jobRecord.checkout,
+      adults: jobRecord.adults,
+    },
+  });
+  fs.writeFileSync(
+    staged.urlsFilePath,
+    `${jobRecord.listings.map((listing) => listing.url).join('\n')}\n`,
+    'utf8',
+  );
+
+  const listingByKey = new Map(
+    jobRecord.listings.map((listing) => [
+      getListingMatchKey(listing.platform, listing.url),
+      listing,
+    ]),
+  );
+  const targetKeys = new Set(listingByKey.keys());
+  const completedKeys = new Set<string>();
+  const requested = jobRecord.listings.length;
+
+  await prisma.reviewJob.update({
+    where: { id: reviewJobId },
+    data: {
+      priceRefreshStatus: 'running',
+      priceRefreshCurrentPhase: 'details',
+      priceRefreshProgress: 0.05,
+      priceRefreshErrorMessage: null,
+      priceRefreshSummary: {
+        requested,
+        succeeded: 0,
+        failed: 0,
+      },
+      priceRefreshStartedAt: startedAt,
+      priceRefreshCompletedAt: null,
+      priceRefreshDurationMs: null,
+    },
+  });
+  await appendReviewJobEvent(reviewJobId, {
+    phase: 'price-refresh',
+    level: 'info',
+    message: `Started exact-stay price refresh for ${requested} listings`,
+    payload: {
+      requested,
+      checkIn: jobRecord.checkin,
+      checkOut: jobRecord.checkout,
+      adults: jobRecord.adults,
+      artifactRoot: staged.rootDir,
+      phases: ['details'],
+    },
+  });
+
+  try {
+    await runBatch([staged.urlsFilePath], {
+      fetchDetails: true,
+      fetchReviews: false,
+      fetchPhotos: false,
+      aiReviews: false,
+      aiPhotos: false,
+      triage: false,
+      aiReviewsExplicit: false,
+      aiPhotosExplicit: false,
+      triageExplicit: false,
+      checkIn: jobRecord.checkin,
+      checkOut: jobRecord.checkout,
+      adults: jobRecord.adults,
+      force: true,
+      retryFailed: false,
+      downloadPhotosAll: false,
+      outputDir: staged.rootDir,
+      scopeManifestToInput: false,
+      print: false,
+      programmatic: true,
+      hooks: {
+        onPhaseUpdate: async (update) => {
+          if (update.phase !== 'details') return;
+          const matchKey = getListingMatchKey(
+            update.entry.platform,
+            update.entry.url,
+          );
+          if (!targetKeys.has(matchKey)) return;
+          completedKeys.add(matchKey);
+          await prisma.reviewJob.update({
+            where: { id: reviewJobId },
+            data: {
+              priceRefreshStatus: 'running',
+              priceRefreshCurrentPhase:
+                `${update.entry.platform}:${update.entry.id}`,
+              priceRefreshProgress:
+                0.05 + (0.75 * completedKeys.size) / requested,
+            },
+          });
+        },
+        onEvent: async (event) => {
+          if (event.level === 'info') return;
+          await appendReviewJobEvent(reviewJobId, {
+            phase: 'price-refresh',
+            level: event.level,
+            message: event.message,
+            listingId: event.listingId ?? null,
+            listingPlatform: event.platform ?? null,
+            payload:
+              (event.payload ?? undefined) as
+                | Prisma.InputJsonValue
+                | undefined,
+          });
+        },
+      },
+    });
+
+    const outcomes = reconcilePriceRefreshManifest({
+      rootDir: staged.rootDir,
+      previousArtifactRoot: jobRecord.artifactRoot,
+      previousManifest: staged.previousManifest,
+      targetKeys,
+    });
+    const reconciledManifest = readJsonFile<AnalysisManifest>(
+      getManifestPathFromRoot(staged.rootDir),
+    );
+    if (!reconciledManifest) {
+      throw new Error('Reconciled price refresh manifest is missing');
+    }
+    const poi = asStoredMapPoint(jobRecord.poi);
+    injectPoiContextIntoListingArtifacts({
+      rootDir: staged.rootDir,
+      manifest: reconciledManifest,
+      poi,
+      fallbackListings: jobRecord.listings.map((listing) => ({
+        platform: listing.platform,
+        url: listing.url,
+        lat: listing.lat,
+        lng: listing.lng,
+        poiDistanceMeters: listing.poiDistanceMeters,
+      })),
+    });
+
+    const ttlMs = resolveStaySnapshotTtlMs();
+    const updates: Array<{
+      listing: typeof jobRecord.listings[number];
+      attempt: {
+        attemptedAt: string;
+        status: 'succeeded' | 'failed';
+        error: string | null;
+      };
+      snapshot: ReturnType<typeof parseStaySnapshot>;
+      details: Record<string, unknown> | null;
+      triage: Record<string, unknown> | null;
+    }> = [];
+
+    for (const outcome of outcomes) {
+      const listing = listingByKey.get(
+        getListingMatchKey(outcome.platform, outcome.url),
+      );
+      if (!listing) continue;
+      const attempt = {
+        attemptedAt,
+        status: outcome.status,
+        error: outcome.error,
+      };
+      if (outcome.status === 'failed' || !outcome.snapshot) {
+        updates.push({
+          listing,
+          attempt,
+          snapshot: null,
+          details: null,
+          triage: null,
+        });
+        continue;
+      }
+
+      const entry = Object.values(reconciledManifest.listings).find(
+        (candidate) =>
+          getListingMatchKey(candidate.platform, candidate.url)
+          === getListingMatchKey(outcome.platform, outcome.url),
+      );
+      const details = entry?.details.file
+        ? readJsonFile<Record<string, unknown>>(
+            path.join(staged.rootDir, entry.details.file),
+          )
+        : outcome.details;
+      const currentTriage = asStoredRecord(listing.analysis?.triage);
+      let triage = currentTriage;
+      if (
+        currentTriage?.scoreSource === 'deterministic_rubric'
+        && details
+      ) {
+        const snapshotReadModel = getReviewJobStaySnapshotReadModel({
+          job: jobRecord,
+          listing: {
+            ...listing,
+            staySnapshot:
+              outcome.snapshot as unknown as Prisma.JsonValue,
+            priceRefreshAttempt:
+              attempt as unknown as Prisma.JsonValue,
+          },
+          analysis: listing.analysis,
+          ttlMs,
+          now: startedAt,
+        });
+        triage = {
+          ...currentTriage,
+          affordability: computeReviewJobSnapshotAffordability({
+            job: jobRecord,
+            triage: currentTriage,
+            snapshot: snapshotReadModel,
+            now: startedAt,
+          }),
+        };
+        if (entry?.triage.file) {
+          writeJsonFile(
+            path.join(staged.rootDir, entry.triage.file),
+            triage,
+          );
+        }
+      }
+      updates.push({
+        listing,
+        attempt,
+        snapshot: outcome.snapshot,
+        details,
+        triage,
+      });
+    }
+
+    const succeeded = updates.filter(
+      (update) => update.attempt.status === 'succeeded',
+    ).length;
+    const failed = requested - succeeded;
+    const status: DbPhaseStatus =
+      failed === 0 ? 'completed' : succeeded === 0 ? 'failed' : 'partial';
+    const completedAt = new Date();
+    let reportPath = jobRecord.reportPath;
+    if (succeeded > 0) {
+      try {
+        const nextReportPath = getReportPathFromRoot(staged.rootDir);
+        await generateReport({
+          outputDir: staged.rootDir,
+          outputFile: nextReportPath,
+        });
+        reportPath = nextReportPath;
+      } catch (error) {
+        reportPath = null;
+        await appendReviewJobEvent(reviewJobId, {
+          phase: 'price-refresh',
+          level: 'warning',
+          message:
+            `Price snapshots were saved, but report regeneration failed: `
+            + `${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+
+    await prisma.$transaction(async (tx) => {
+      for (const update of updates) {
+        await tx.reviewJobListing.update({
+          where: { id: update.listing.id },
+          data: {
+            priceRefreshAttempt:
+              update.attempt as unknown as Prisma.InputJsonValue,
+            ...(update.snapshot
+              ? {
+                  staySnapshot:
+                    update.snapshot as unknown as Prisma.InputJsonValue,
+                }
+              : {}),
+          },
+        });
+        if (update.snapshot && update.details) {
+          await tx.reviewJobListingAnalysis.update({
+            where: { jobListingId: update.listing.id },
+            data: {
+              details:
+                update.details as unknown as Prisma.InputJsonValue,
+              detailsStatus: 'completed',
+              ...(update.triage
+                ? {
+                    triage:
+                      update.triage as unknown as Prisma.InputJsonValue,
+                  }
+                : {}),
+            },
+          });
+        }
+        if (update.attempt.status === 'failed') {
+          await tx.reviewJobEvent.create({
+            data: buildReviewJobEventData(reviewJobId, {
+              phase: 'price-refresh',
+              level: 'warning',
+              message:
+                `Price refresh failed; last known snapshot preserved. `
+                + `${update.attempt.error ?? 'Unknown provider failure'}`,
+              listingId: update.listing.listingId,
+              listingPlatform: update.listing.platform,
+            }),
+          });
+        }
+      }
+
+      await tx.reviewJob.update({
+        where: { id: reviewJobId },
+        data: {
+          priceRefreshStatus: status,
+          priceRefreshCurrentPhase: 'completed',
+          priceRefreshProgress: 1,
+          priceRefreshErrorMessage:
+            failed > 0
+              ? `${failed} of ${requested} price refreshes failed; last known snapshots were preserved.`
+              : null,
+          priceRefreshSummary: {
+            requested,
+            succeeded,
+            failed,
+          },
+          priceRefreshCompletedAt: completedAt,
+          priceRefreshDurationMs:
+            completedAt.getTime() - startedAt.getTime(),
+          ...(succeeded > 0
+            ? {
+                artifactRoot: staged.rootDir,
+                reportPath,
+              }
+            : {}),
+        },
+      });
+      await tx.reviewJobEvent.create({
+        data: buildReviewJobEventData(reviewJobId, {
+          phase: 'price-refresh',
+          level: failed === 0 ? 'info' : 'warning',
+          message:
+            failed === 0
+              ? `Refreshed ${succeeded} exact-stay price snapshots`
+              : `Price refresh completed with ${succeeded} succeeded and ${failed} failed`,
+          payload: {
+            requested,
+            succeeded,
+            failed,
+            reviewArtifactsRefreshed: false,
+            photoArtifactsRefreshed: false,
+            aiArtifactsRefreshed: false,
+          },
+        }),
+      });
+    });
+    console.log(
+      `[review-worker] price refresh completed ${reviewJobId}: `
+      + `${succeeded} succeeded, ${failed} failed`,
+    );
+  } catch (error) {
+    const completedAt = new Date();
+    const message =
+      error instanceof Error ? error.message : 'Price refresh failed';
+    const failedAttempt = {
+      attemptedAt,
+      status: 'failed' as const,
+      error: message,
+    };
+    await prisma.$transaction(async (tx) => {
+      await tx.reviewJobListing.updateMany({
+        where: { id: { in: jobRecord.listings.map((listing) => listing.id) } },
+        data: {
+          priceRefreshAttempt:
+            failedAttempt as unknown as Prisma.InputJsonValue,
+        },
+      });
+      await tx.reviewJob.update({
+        where: { id: reviewJobId },
+        data: {
+          priceRefreshStatus: 'failed',
+          priceRefreshCurrentPhase: 'failed',
+          priceRefreshErrorMessage: message,
+          priceRefreshSummary: {
+            requested,
+            succeeded: 0,
+            failed: requested,
+          },
+          priceRefreshCompletedAt: completedAt,
+          priceRefreshDurationMs:
+            completedAt.getTime() - startedAt.getTime(),
+        },
+      });
+      await tx.reviewJobEvent.create({
+        data: buildReviewJobEventData(reviewJobId, {
+          phase: 'price-refresh',
+          level: 'error',
+          message:
+            `Price refresh failed; all last known snapshots were preserved. ${message}`,
+          payload: {
+            requested,
+            succeeded: 0,
+            failed: requested,
+          },
+        }),
+      });
+    });
+    throw error;
+  }
 }
 
 async function runReviewJobAnalysis(
@@ -1617,6 +2081,13 @@ const reviewJobWorker = new Worker<ReviewJobQueueData>(
     await startupArtifactCleanup;
     if (job.data.phase === 'search') {
       await runReviewJobSearch(job.data.reviewJobId);
+      return;
+    }
+    if (job.data.phase === 'refresh-prices') {
+      await runReviewJobPriceRefresh(
+        job.data.reviewJobId,
+        job.data.listingRowIds ?? [],
+      );
       return;
     }
 

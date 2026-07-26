@@ -249,6 +249,9 @@ The quality verdict and affordability are independent:
   "freshness": "fresh",
   "rateType": "public",
   "mandatoryChargesResolved": true,
+  "availabilityStatus": "yes",
+  "availabilityCapturedAt": "2026-07-25T12:00:00Z",
+  "availabilityFreshness": "fresh",
   "comparablePrice": {
     "amount": 4950,
     "currency": "USD",
@@ -258,6 +261,12 @@ The quality verdict and affordability are independent:
     "freshness": "fresh",
     "rateType": "public",
     "mandatoryChargesResolved": true
+  },
+  "comparableAvailability": {
+    "status": "yes",
+    "capturedAt": "2026-07-25T12:00:00Z",
+    "freshness": "fresh",
+    "reasonCode": "provider_room_inventory"
   }
 }
 ```
@@ -279,6 +288,14 @@ A comparable price must be a public-rate total for the same stay dates and occup
 currency and stay basis, with mandatory charges resolved. Fresh/stale is consumed from price
 provenance; this rubric does not invent a second TTL.
 
+Availability is an independent booking-eligibility axis. Only a fresh `yes` permits an actionable
+affordability comparison. A fresh `no` is excluded from actionable ranking; `partial`, `unknown`,
+and stale states remain visible as conditional or unknown. Alternate Airbnb ranges are accepted
+only when the provider volunteers them—v1 never probes speculative windows. An Airbnb price quote
+does not by itself verify inventory, so Airbnb remains non-actionable `unknown` unless the PDP
+provides an explicit availability signal. Fresh-`no` exclusion is therefore Booking-only in the
+current v1 evidence set.
+
 Unknown affordability always carries a machine code and user-facing reason. Required examples:
 
 | Code | User-facing reason |
@@ -288,6 +305,10 @@ Unknown affordability always carries a machine code and user-facing reason. Requ
 | `price_stale` | Price is stale (12 days old). |
 | `currency_mismatch` | Price currency PLN does not match budget currency USD. |
 | `mandatory_charges_unresolved` | Mandatory charges are unresolved in this price. |
+| `stay_unavailable` | The property is unavailable for the recorded dates and guest count. |
+| `stay_partially_available` | The provider offered only conditional or alternate availability. |
+| `availability_stale` | Availability is stale (12 days old). |
+| `availability_unknown` | Availability could not be confirmed for the recorded dates and guest count. |
 
 Basis, freshness, invalid-price, and non-public-rate failures have equally specific reasons. The UI
 shows the reason after “Budget unknown”; it does not show a bare unknown state.

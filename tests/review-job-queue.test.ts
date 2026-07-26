@@ -14,6 +14,10 @@ test('review-job queue ids are deterministic per phase and job', () => {
     getReviewJobQueueJobId('analyze', 'job_123'),
     'review-job:analyze:job_123',
   );
+  assert.equal(
+    getReviewJobQueueJobId('refresh-prices', 'job_123'),
+    'review-job:refresh-prices:job_123',
+  );
 });
 
 test('review-job queue reuses only active queued states', () => {

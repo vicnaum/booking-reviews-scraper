@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   getActiveTriageComparison,
   getActiveRequirementSetId,
+  getBookingEligibilityRank,
   getListingResultsSnapshot,
   getTriageComparisonStatus,
   getTriageRegradeListingCount,
@@ -65,6 +66,20 @@ test('missing rubric metadata is explicitly parsed as a legacy AI score', () => 
   assert.equal(snapshot.triage?.requirementSetId, null);
   assert.equal(snapshot.triage?.requirements[0].label, 'Quiet');
   assert.equal(snapshot.triage?.requirements[0].requirementId, null);
+});
+
+test('booking eligibility groups fresh unavailable listings after conditional results', () => {
+  const rank = (status: 'eligible' | 'conditional' | 'unknown' | 'excluded') =>
+    getBookingEligibilityRank({
+      staySnapshot: {
+        bookingEligibility: { status },
+      },
+    } as unknown as Pick<ReviewJobListing, 'staySnapshot'>);
+
+  assert.equal(rank('eligible'), 0);
+  assert.equal(rank('conditional'), 1);
+  assert.equal(rank('unknown'), 1);
+  assert.equal(rank('excluded'), 2);
 });
 
 test('deterministic metadata and affordability reason survive parsing', () => {

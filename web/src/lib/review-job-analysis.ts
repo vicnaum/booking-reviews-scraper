@@ -12,6 +12,11 @@ import {
   getReviewJobArtifactRunDir,
   getReviewJobArtifactWorkspaceDir,
 } from './reviewJobArtifacts.js';
+import {
+  isStaySnapshotCacheable,
+  parseStaySnapshot,
+  type StaySnapshot,
+} from '@cli/stay-snapshot';
 
 function sanitize(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]+/g, '-');
@@ -372,6 +377,216 @@ export function prepareReviewJobRunWorkspace(input: {
     rootDir: runRoot,
     urlsFilePath: path.join(runRoot, 'job_urls.txt'),
   };
+}
+
+export function prepareReviewJobPriceRefreshWorkspace(input: {
+  jobId: string;
+  runId: string;
+  previousArtifactRoot: string;
+  dates: { checkIn: string; checkOut: string; adults: number };
+}) {
+  if (!fs.existsSync(input.previousArtifactRoot)) {
+    throw new Error(
+      `Saved analysis artifacts are unavailable: ${input.previousArtifactRoot}`,
+    );
+  }
+
+  const runRoot = getReviewJobRunDir(input.jobId, input.runId);
+  removeDirIfExists(runRoot);
+  fs.mkdirSync(runRoot, { recursive: true });
+  fs.cpSync(input.previousArtifactRoot, runRoot, {
+    recursive: true,
+    force: true,
+    filter(src) {
+      return path.basename(src) !== 'runs';
+    },
+  });
+
+  const manifestPath = getManifestPathFromRoot(runRoot);
+  const manifest = readJsonFile<AnalysisManifest>(manifestPath);
+  if (!manifest) {
+    throw new Error(`Batch manifest not found: ${manifestPath}`);
+  }
+  manifest.dates = input.dates;
+  manifest.updatedAt = new Date().toISOString();
+  writeJsonFile(manifestPath, manifest);
+
+  return {
+    rootDir: runRoot,
+    urlsFilePath: path.join(runRoot, 'price_refresh_urls.txt'),
+    previousManifest: manifest,
+  };
+}
+
+export interface PriceRefreshManifestOutcome {
+  key: string;
+  platform: Platform;
+  id: string;
+  url: string;
+  status: 'succeeded' | 'failed';
+  error: string | null;
+  snapshot: StaySnapshot | null;
+  details: Record<string, unknown> | null;
+}
+
+function sameRefreshRequest(
+  snapshot: StaySnapshot,
+  manifest: AnalysisManifest,
+  entry: AnalysisManifestEntry,
+): boolean {
+  let expectedListingId: string | null = null;
+  let expectedLinkedRoomId: string | null = null;
+  try {
+    const parsed = new URL(entry.url);
+    if (entry.platform === 'airbnb') {
+      expectedListingId = parsed.pathname.match(/\/rooms\/(\d+)/i)?.[1] ?? null;
+    } else {
+      const match = parsed.pathname.match(
+        /\/hotel\/([^/]+)\/([^/.]+)(?:\.[a-z-]+)?\.html/i,
+      );
+      expectedListingId = match
+        ? `${match[1].toLowerCase()}/${match[2].toLowerCase()}`
+        : null;
+      const blockId =
+        parsed.searchParams.get('matching_block_id')
+        ?? parsed.searchParams.get('highlighted_blocks');
+      expectedLinkedRoomId = blockId?.match(/^(\d+)/)?.[1] ?? null;
+    }
+  } catch {
+    // A malformed URL will fail the listing-id comparison below.
+  }
+
+  return (
+    snapshot.request.platform === entry.platform
+    && expectedListingId != null
+    && snapshot.request.listingId === expectedListingId
+    && snapshot.request.checkIn === (manifest.dates.checkIn ?? null)
+    && snapshot.request.checkOut === (manifest.dates.checkOut ?? null)
+    && snapshot.request.adults === (manifest.dates.adults ?? null)
+    && snapshot.request.linkedRoomId === expectedLinkedRoomId
+  );
+}
+
+export function reconcilePriceRefreshManifest(input: {
+  rootDir: string;
+  previousArtifactRoot: string;
+  previousManifest: AnalysisManifest;
+  targetKeys: Set<string>;
+}): PriceRefreshManifestOutcome[] {
+  const manifestPath = getManifestPathFromRoot(input.rootDir);
+  const refreshedManifest = readJsonFile<AnalysisManifest>(manifestPath);
+  if (!refreshedManifest) {
+    throw new Error(`Batch manifest not found: ${manifestPath}`);
+  }
+
+  const outcomes: PriceRefreshManifestOutcome[] = [];
+  for (const [key, refreshedEntry] of Object.entries(
+    refreshedManifest.listings,
+  )) {
+    if (!input.targetKeys.has(getListingMatchKey(
+      refreshedEntry.platform,
+      refreshedEntry.url,
+    ))) {
+      continue;
+    }
+
+    const details = refreshedEntry.details.file
+      ? readJsonFile<Record<string, unknown>>(
+          path.join(input.rootDir, refreshedEntry.details.file),
+        )
+      : null;
+    const snapshot = parseStaySnapshot(details?.staySnapshot);
+    let error: string | null = null;
+    if (
+      refreshedEntry.details.status !== 'fetched'
+      || !details
+      || !snapshot
+    ) {
+      error =
+        refreshedEntry.details.error
+        ?? 'The provider response did not yield a structured stay snapshot.';
+    } else if (!sameRefreshRequest(snapshot, refreshedManifest, refreshedEntry)) {
+      error = 'The provider response did not match the requested stay.';
+    } else if (!isStaySnapshotCacheable(snapshot)) {
+      error = 'The provider response did not confirm availability.';
+    }
+
+    if (!error) {
+      outcomes.push({
+        key,
+        platform: refreshedEntry.platform,
+        id: refreshedEntry.id,
+        url: refreshedEntry.url,
+        status: 'succeeded',
+        error: null,
+        snapshot,
+        details,
+      });
+      continue;
+    }
+
+    const previousEntry =
+      input.previousManifest.listings[key]
+      ?? Object.values(input.previousManifest.listings).find((entry) =>
+        getListingMatchKey(entry.platform, entry.url)
+        === getListingMatchKey(refreshedEntry.platform, refreshedEntry.url));
+    if (previousEntry) {
+      refreshedEntry.details = { ...previousEntry.details };
+      if (previousEntry.details.file) {
+        const sourcePath = path.join(
+          input.previousArtifactRoot,
+          previousEntry.details.file,
+        );
+        const destinationPath = path.join(
+          input.rootDir,
+          previousEntry.details.file,
+        );
+        if (fs.existsSync(sourcePath)) {
+          fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+          fs.copyFileSync(sourcePath, destinationPath);
+        }
+      }
+    }
+
+    outcomes.push({
+      key,
+      platform: refreshedEntry.platform,
+      id: refreshedEntry.id,
+      url: refreshedEntry.url,
+      status: 'failed',
+      error,
+      snapshot: null,
+      details: null,
+    });
+  }
+
+  const seenKeys = new Set(
+    outcomes.map((outcome) =>
+      getListingMatchKey(outcome.platform, outcome.url)),
+  );
+  for (const previousEntry of Object.values(input.previousManifest.listings)) {
+    const matchKey = getListingMatchKey(
+      previousEntry.platform,
+      previousEntry.url,
+    );
+    if (!input.targetKeys.has(matchKey) || seenKeys.has(matchKey)) {
+      continue;
+    }
+    outcomes.push({
+      key: matchKey,
+      platform: previousEntry.platform,
+      id: previousEntry.id,
+      url: previousEntry.url,
+      status: 'failed',
+      error: 'The refresh run did not return this listing.',
+      snapshot: null,
+      details: null,
+    });
+  }
+
+  refreshedManifest.updatedAt = new Date().toISOString();
+  writeJsonFile(manifestPath, refreshedManifest);
+  return outcomes;
 }
 
 export function getListingMatchKey(

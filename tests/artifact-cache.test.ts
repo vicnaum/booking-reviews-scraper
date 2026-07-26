@@ -29,7 +29,7 @@ test('cache policy uses the approved TTLs and supports per-artifact opt-out', ()
   assert.equal(policy.ttlMs.photos, 365 * DAY_MS);
 
   const defaults = resolveArtifactCachePolicy({});
-  assert.equal(defaults.ttlMs.details, 7 * DAY_MS);
+  assert.equal(defaults.ttlMs.details, DAY_MS);
   assert.equal(defaults.ttlMs.reviews, 30 * DAY_MS);
   assert.equal(defaults.ttlMs.photos, 180 * DAY_MS);
   assert.match(defaults.rootDir, /\.cache[/\\]reviewr[/\\]artifacts-v1$/);
@@ -66,9 +66,9 @@ test('details cache isolates request variants and expires from metadata time', (
     const metadata = cache.publishFile(key, sourcePath);
     assert.equal(metadata?.cachedAt, '2026-07-23T10:00:00.000Z');
 
-    now += 6 * DAY_MS;
+    now += DAY_MS / 2;
     const hit = cache.restoreFile(key, restoredPath);
-    assert.equal(hit?.ageMs, 6 * DAY_MS);
+    assert.equal(hit?.ageMs, DAY_MS / 2);
     assert.deepEqual(JSON.parse(fs.readFileSync(restoredPath, 'utf-8')), {
       title: 'Fresh details',
     });
@@ -84,7 +84,7 @@ test('details cache isolates request variants and expires from metadata time', (
     };
     assert.equal(cache.restoreFile(differentDates, restoredPath), null);
 
-    now += DAY_MS + 1;
+    now += DAY_MS / 2 + 1;
     assert.equal(cache.restoreFile(key, restoredPath), null);
     assert.equal(fs.existsSync(cache.getEntryPath(key)), false);
   } finally {

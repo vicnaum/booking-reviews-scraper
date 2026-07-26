@@ -5,8 +5,9 @@ export const REVIEW_JOB_QUEUE_NAME = 'stayreviewr-review-job';
 
 export interface ReviewJobQueueData {
   reviewJobId: string;
-  phase: 'search' | 'analyze';
+  phase: 'search' | 'analyze' | 'refresh-prices';
   analysisMode?: 'full' | 'triage';
+  listingRowIds?: string[];
 }
 
 export function getReviewJobQueueJobId(
@@ -87,6 +88,30 @@ export async function enqueueReviewJobAnalysis(
     reviewJobId,
     phase: 'analyze',
     analysisMode,
+  }, {
+    jobId,
+  });
+}
+
+export async function enqueueReviewJobPriceRefresh(
+  reviewJobId: string,
+  listingRowIds: string[],
+) {
+  const queue = getReviewJobQueue();
+  const jobId = getReviewJobQueueJobId('refresh-prices', reviewJobId);
+  const existing = await queue.getJob(jobId);
+  if (existing) {
+    const state = await existing.getState();
+    if (shouldReuseReviewJobQueueState(state)) {
+      return existing;
+    }
+    await existing.remove().catch(() => {});
+  }
+
+  return queue.add('run-review-job-price-refresh', {
+    reviewJobId,
+    phase: 'refresh-prices',
+    listingRowIds,
   }, {
     jobId,
   });

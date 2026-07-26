@@ -30,10 +30,16 @@ import {
   buildDetailsCacheVariant,
   buildPhotosCacheVariant,
   createArtifactCache,
+  resolveArtifactCachePolicy,
   type ArtifactCache,
   type ArtifactCacheHit,
   type ArtifactCacheKey,
 } from './artifact-cache.js';
+import {
+  deriveStaySnapshotFreshness,
+  isStaySnapshotCacheable,
+  parseStaySnapshot,
+} from './stay-snapshot.js';
 import {
   formatReviewProgressLabel,
   getScrapeProgressFraction,
@@ -987,11 +993,13 @@ export async function runBatch(
                     `listing_${roomId}.json`,
                     listingsDir,
                   );
-                  publishCachedFile({
-                    cache: artifactCache,
-                    key: detailsCacheKey,
-                    sourcePath: detailsFile,
-                  });
+                  if (isStaySnapshotCacheable(details.staySnapshot)) {
+                    publishCachedFile({
+                      cache: artifactCache,
+                      key: detailsCacheKey,
+                      sourcePath: detailsFile,
+                    });
+                  }
                 }
                 statusParts.push(`details \u2713 (${formatDuration(Date.now() - t)})`);
                 airbnbResult.details.fetched++;
@@ -1425,11 +1433,13 @@ export async function runBatch(
               details = await bookingListing.scrapeListingDetails(url, dateOpts);
               if (!options.print) {
                 bookingListing.saveListingDetails(details, `listing_${id}.json`, listingsDir);
-                publishCachedFile({
-                  cache: artifactCache,
-                  key: detailsCacheKey,
-                  sourcePath: detailsFile,
-                });
+                if (isStaySnapshotCacheable(details.staySnapshot)) {
+                  publishCachedFile({
+                    cache: artifactCache,
+                    key: detailsCacheKey,
+                    sourcePath: detailsFile,
+                  });
+                }
               }
               statusParts.push(`details \u2713 (${formatDuration(Date.now() - t)})`);
               bookingResult.details.fetched++;
@@ -2237,6 +2247,20 @@ export async function runBatch(
         ]);
 
         const t = Date.now();
+        const listingData = readJsonFile<Record<string, unknown>>(listingPath);
+        const staySnapshot = parseStaySnapshot(listingData?.staySnapshot);
+        let detailsTtlMs = artifactCache?.policy.ttlMs.details;
+        if (detailsTtlMs == null) {
+          try {
+            detailsTtlMs = resolveArtifactCachePolicy().ttlMs.details;
+          } catch {
+            detailsTtlMs = Number.NaN;
+          }
+        }
+        const staySnapshotFreshness = deriveStaySnapshotFreshness(
+          staySnapshot?.availability.capturedAt,
+          detailsTtlMs,
+        );
         if (!fs.existsSync(triageOutputDir)) fs.mkdirSync(triageOutputDir, { recursive: true });
         await emitBeforeAiCall(options, {
           outputDir: aiOutputDir,
@@ -2253,8 +2277,7 @@ export async function runBatch(
             priorities: options.aiPriorities,
             requirementSet: activeRequirementSet,
             budget: options.analysisBudget,
-            priceFreshness:
-              entry.details.source === 'network' ? 'fresh' : 'unknown',
+            priceFreshness: staySnapshotFreshness,
             stayContext: {
               checkIn: manifest.dates.checkIn,
               checkOut: manifest.dates.checkOut,
