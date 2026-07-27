@@ -31,6 +31,7 @@ import {
   getTriageRegradeReasons,
   getTriageRegradeListingCount,
   getTierRank,
+  isPeerComparableTriageStatus,
   matchesAffordabilityFilter,
   type AffordabilityStatus,
   type ParsedTriage,
@@ -140,7 +141,10 @@ function comparisonRank(status: ResultsComparisonStatus): number {
 function isPeerComparableStatus(
   status: ResultsComparisonStatus,
 ): boolean {
-  return status === 'ranked' || status === 'regrade_suggested';
+  return (
+    status !== 'duplicate_conflict'
+    && isPeerComparableTriageStatus(status)
+  );
 }
 
 function displayedTier(
