@@ -118,6 +118,32 @@ its last known snapshot and records the attempt time and error. Partial runs rep
 failed counts. Affordability is recomputed deterministically from the refreshed public stay price
 and availability; the independent quality score and tier remain unchanged.
 
+For parser repairs that must fill missing persisted details without refreshing prices or changing
+affordability, use the separate maintenance command. It currently supports Airbnb only and is
+dry-run-first:
+
+```bash
+npm run repair:job-details -- --job <review-job-id> --platform airbnb
+```
+
+The dry run requires an idle job, clones the current artifact run, removes only the cloned target
+details files, and runs only the details phase with normal cache semantics. It fills only core
+fields that were previously missing (`title`, `rating`, `reviewCount`, `subRatings`, and
+`amenities`); existing values and every non-details artifact remain byte-identical. It prints a
+per-listing before/after coverage matrix and an explicit apply command containing the staged root.
+Apply revalidates the unchanged database baseline, original manifest, staged report, target detail
+files, and all preserved artifacts before one serializable transaction:
+
+```bash
+npm run repair:job-details -- --job <review-job-id> --platform airbnb \
+  --apply --staged-root "<path printed by the dry run>"
+```
+
+That transaction updates only repaired listing-analysis `details`/`detailsStatus` fields and the
+job's artifact/report pointers. Reviews, photos, AI artifacts, triage verdicts, costs, curation,
+duplicate decisions, and listing price snapshots are not rewritten. The previous artifact root is
+retained for operator verification; the command never deletes it.
+
 A fresh `no` is excluded from actionable ranking. `partial`, `unknown`, and stale availability
 remain visible as conditional or unknown. Signed-in and Genius rates may be lower than the public
 snapshot.
