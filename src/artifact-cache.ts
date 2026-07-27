@@ -65,13 +65,18 @@ export function buildDetailsCacheVariant(input: {
   checkOut?: string;
   adults?: number;
   linkedRoomId?: string | null;
+  parserVersion?: string;
 }): CacheVariant {
-  return {
+  const variant: CacheVariant = {
     checkIn: input.checkIn ?? null,
     checkOut: input.checkOut ?? null,
     adults: input.adults ?? null,
     linkedRoomId: input.linkedRoomId ?? null,
   };
+  if (input.parserVersion?.trim()) {
+    variant.parserVersion = input.parserVersion.trim();
+  }
+  return variant;
 }
 
 export function buildPhotosCacheVariant(input: {

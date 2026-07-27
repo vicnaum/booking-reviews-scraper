@@ -83,6 +83,79 @@ test('default batch output directories are platform-specific', () => {
   );
 });
 
+test('Airbnb details with missing core fields are recorded as partial', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'reviewr-airbnb-details-partial-'),
+  );
+  const outputDir = path.join(tempDir, 'output');
+  const listingsDir = path.join(outputDir, 'listings');
+  const urlsFile = path.join(tempDir, 'urls.txt');
+  const roomId = '51945222';
+
+  try {
+    fs.mkdirSync(listingsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(listingsDir, `listing_${roomId}.json`),
+      JSON.stringify({
+        id: roomId,
+        url: `https://www.airbnb.com/rooms/${roomId}`,
+        title: '',
+        rating: null,
+        reviewCount: null,
+        amenities: [],
+        photos: [],
+      }),
+    );
+    fs.writeFileSync(
+      urlsFile,
+      `https://www.airbnb.com/rooms/${roomId}\n`,
+    );
+
+    const result = await runBatch(
+      [urlsFile],
+      {
+        fetchDetails: true,
+        fetchReviews: false,
+        fetchPhotos: false,
+        aiReviews: false,
+        aiPhotos: false,
+        triage: false,
+        aiReviewsExplicit: false,
+        aiPhotosExplicit: false,
+        triageExplicit: false,
+        force: false,
+        retryFailed: true,
+        downloadPhotosAll: false,
+        outputDir,
+        scopeManifestToInput: true,
+        print: false,
+        artifactCache: null,
+      },
+    );
+
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(outputDir, 'batch_manifest.json'), 'utf8'),
+    );
+    assert.deepEqual(
+      manifest.listings[`airbnb/${roomId}`].details,
+      {
+        status: 'partial',
+        file: `listings/listing_${roomId}.json`,
+        source: 'local',
+        reason:
+          'missing_core_fields:missing_title,missing_rating,missing_amenities',
+        error:
+          'Airbnb details incomplete: missing title, rating, amenities',
+      },
+    );
+    assert.equal(result.airbnb.details.partial, 1);
+    assert.equal(result.airbnb.details.fetched, 0);
+    assert.equal(result.airbnb.details.skipped, 0);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('batch freezes one canonical requirement set and reloads it on rerun', async () => {
   const tempDir = fs.mkdtempSync(
     path.join(os.tmpdir(), 'reviewr-requirement-set-'),

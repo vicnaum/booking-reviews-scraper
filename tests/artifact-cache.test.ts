@@ -11,6 +11,7 @@ import {
   resolveArtifactCachePolicy,
   type ArtifactCacheKey,
 } from '../src/artifact-cache.js';
+import { AIRBNB_DETAILS_PARSER_VERSION } from '../src/airbnb/listing.js';
 import { runBatch } from '../src/batch.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -83,6 +84,21 @@ test('details cache isolates request variants and expires from metadata time', (
       }),
     };
     assert.equal(cache.restoreFile(differentDates, restoredPath), null);
+
+    const differentParser = {
+      ...key,
+      variant: buildDetailsCacheVariant({
+        checkIn: '2026-08-01',
+        checkOut: '2026-08-05',
+        adults: 2,
+        linkedRoomId: '123',
+        parserVersion: AIRBNB_DETAILS_PARSER_VERSION,
+      }),
+    };
+    assert.notEqual(
+      cache.getEntryPath(differentParser),
+      cache.getEntryPath(key),
+    );
 
     now += DAY_MS / 2 + 1;
     assert.equal(cache.restoreFile(key, restoredPath), null);
@@ -160,7 +176,9 @@ test('shared batch path restores all Airbnb scrape artifacts without an upstream
     JSON.stringify({
       id: roomId,
       title: 'Cached listing',
+      rating: 4.9,
       reviewCount: 1,
+      amenities: [{ name: 'Wifi', available: true, category: 'Internet' }],
       photos: [{ url: 'https://example.com/photo.jpeg', caption: null }],
     }),
   );
@@ -178,7 +196,9 @@ test('shared batch path restores all Airbnb scrape artifacts without an upstream
     platform: 'airbnb',
     listingId: roomId,
     artifact: 'details',
-    variant: buildDetailsCacheVariant({}),
+    variant: buildDetailsCacheVariant({
+      parserVersion: AIRBNB_DETAILS_PARSER_VERSION,
+    }),
   }, detailsPath);
   cache.publishFile({
     platform: 'airbnb',
