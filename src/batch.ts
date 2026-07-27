@@ -171,9 +171,13 @@ interface PhaseResult {
   failed: number;
 }
 
+interface DetailsPhaseResult extends PhaseResult {
+  partial: number;
+}
+
 interface PlatformResult {
   total: number;
-  details: PhaseResult;
+  details: DetailsPhaseResult;
   reviews: PhaseResult & { totalReviewCount: number };
   photos: PhaseResult;
   aiReviews: PhaseResult;
@@ -244,6 +248,46 @@ function cacheProvenance(hit: ArtifactCacheHit) {
     cachedAt: hit.cachedAt,
     cacheAgeMs: hit.ageMs,
   };
+}
+
+function classifyAirbnbDetailsPhase(
+  details: airbnbListing.AirbnbListingDetails,
+  completeStatus: 'fetched' | 'skipped',
+  base: Omit<ManifestPhase, 'status' | 'reason'>,
+): {
+  phase: ManifestPhase;
+  degradationReasons: airbnbListing.AirbnbDetailsDegradationReason[];
+} {
+  const degradationReasons =
+    airbnbListing.getAirbnbDetailsDegradationReasons(details);
+  if (degradationReasons.length > 0) {
+    const missingFields = formatAirbnbDetailsDegradation(degradationReasons);
+    return {
+      phase: {
+        ...base,
+        status: 'partial',
+        reason: `missing_core_fields:${degradationReasons.join(',')}`,
+        error: `Airbnb details incomplete: missing ${missingFields}`,
+      },
+      degradationReasons,
+    };
+  }
+
+  return {
+    phase: {
+      ...base,
+      status: completeStatus,
+    },
+    degradationReasons,
+  };
+}
+
+function formatAirbnbDetailsDegradation(
+  reasons: airbnbListing.AirbnbDetailsDegradationReason[],
+): string {
+  return reasons
+    .map((reason) => reason.replace(/^missing_/, ''))
+    .join(', ');
 }
 
 function restoreCachedJson<T>(input: {
@@ -570,7 +614,7 @@ function shouldRetryPhase(manifest: BatchManifest, key: string, phase: 'details'
 function newPlatformResult(total: number): PlatformResult {
   return {
     total,
-    details: { fetched: 0, skipped: 0, failed: 0 },
+    details: { fetched: 0, skipped: 0, failed: 0, partial: 0 },
     reviews: { fetched: 0, skipped: 0, failed: 0, totalReviewCount: 0 },
     photos: { fetched: 0, skipped: 0, failed: 0 },
     aiReviews: { fetched: 0, skipped: 0, failed: 0 },
@@ -898,7 +942,10 @@ export async function runBatch(
         platform: 'airbnb',
         listingId: roomId,
         artifact: 'details',
-        variant: buildDetailsCacheVariant(dateOpts),
+        variant: buildDetailsCacheVariant({
+          ...dateOpts,
+          parserVersion: airbnbListing.AIRBNB_DETAILS_PARSER_VERSION,
+        }),
       };
       const reviewsCacheKey: ArtifactCacheKey = {
         platform: 'airbnb',
@@ -937,22 +984,36 @@ export async function runBatch(
         const listingsDir = getListingsDir(airbnbOutputDir);
         const detailsFile = path.join(listingsDir, `listing_${roomId}.json`);
         const relativeDetailsFile = `listings/listing_${roomId}.json`;
-        const localDetails = !options.force
+        const retryingPartialDetails =
+          isRetryListing && entry.details.status === 'partial';
+        const localDetails = !options.force && !retryingPartialDetails
           ? readJsonFile<airbnbListing.AirbnbListingDetails>(detailsFile)
           : null;
 
         if (localDetails) {
           details = localDetails;
-          statusParts.push('details \u2298 local');
-          airbnbResult.details.skipped++;
-          entry.details = {
-            status: 'skipped',
-            file: relativeDetailsFile,
-            source: 'local',
-          };
+          const classification = classifyAirbnbDetailsPhase(
+            details,
+            'skipped',
+            {
+              file: relativeDetailsFile,
+              source: 'local',
+            },
+          );
+          entry.details = classification.phase;
+          if (classification.degradationReasons.length > 0) {
+            statusParts.push(
+              `details \u26a0 local (missing: `
+              + `${formatAirbnbDetailsDegradation(classification.degradationReasons)})`,
+            );
+            airbnbResult.details.partial++;
+          } else {
+            statusParts.push('details \u2298 local');
+            airbnbResult.details.skipped++;
+          }
           await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
         } else {
-          const cachedDetails = !options.force
+          const cachedDetails = !options.force && !retryingPartialDetails
             ? restoreCachedJson<airbnbListing.AirbnbListingDetails>({
                 cache: artifactCache,
                 key: detailsCacheKey,
@@ -963,13 +1024,27 @@ export async function runBatch(
           if (cachedDetails) {
             details = cachedDetails.data;
             cacheHits.push('details');
-            statusParts.push(`details \u26a1 cache (${formatCacheAge(cachedDetails.hit.ageMs)})`);
-            airbnbResult.details.skipped++;
-            entry.details = {
-              status: 'fetched',
-              file: relativeDetailsFile,
-              ...cacheProvenance(cachedDetails.hit),
-            };
+            const classification = classifyAirbnbDetailsPhase(
+              details,
+              'fetched',
+              {
+                file: relativeDetailsFile,
+                ...cacheProvenance(cachedDetails.hit),
+              },
+            );
+            entry.details = classification.phase;
+            if (classification.degradationReasons.length > 0) {
+              statusParts.push(
+                `details \u26a0 cache (missing: `
+                + `${formatAirbnbDetailsDegradation(classification.degradationReasons)})`,
+              );
+              airbnbResult.details.partial++;
+            } else {
+              statusParts.push(
+                `details \u26a1 cache (${formatCacheAge(cachedDetails.hit.ageMs)})`,
+              );
+              airbnbResult.details.skipped++;
+            }
             await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
           } else {
             const resolvedApiKey = await ensureAirbnbApiKey();
@@ -987,13 +1062,24 @@ export async function runBatch(
                   roomId,
                   dateOpts,
                 );
+                const classification = classifyAirbnbDetailsPhase(
+                  details,
+                  'fetched',
+                  {
+                    file: relativeDetailsFile,
+                    source: 'network',
+                  },
+                );
                 if (!options.print) {
                   airbnbListing.saveListingDetails(
                     details,
                     `listing_${roomId}.json`,
                     listingsDir,
                   );
-                  if (isStaySnapshotCacheable(details.staySnapshot)) {
+                  if (
+                    classification.degradationReasons.length === 0
+                    && isStaySnapshotCacheable(details.staySnapshot)
+                  ) {
                     publishCachedFile({
                       cache: artifactCache,
                       key: detailsCacheKey,
@@ -1001,13 +1087,17 @@ export async function runBatch(
                     });
                   }
                 }
-                statusParts.push(`details \u2713 (${formatDuration(Date.now() - t)})`);
-                airbnbResult.details.fetched++;
-                entry.details = {
-                  status: 'fetched',
-                  file: relativeDetailsFile,
-                  source: 'network',
-                };
+                entry.details = classification.phase;
+                if (classification.degradationReasons.length > 0) {
+                  statusParts.push(
+                    `details \u26a0 (${formatDuration(Date.now() - t)}; missing: `
+                    + `${formatAirbnbDetailsDegradation(classification.degradationReasons)})`,
+                  );
+                  airbnbResult.details.partial++;
+                } else {
+                  statusParts.push(`details \u2713 (${formatDuration(Date.now() - t)})`);
+                  airbnbResult.details.fetched++;
+                }
                 await persistPhaseUpdate(options, manifest, manifestPath, manifestKey, 'details');
               } catch (err: any) {
                 statusParts.push('details \u2717 error');
@@ -2395,7 +2485,10 @@ export async function runBatch(
   if (preprocessed.airbnb.count > 0) {
     const { details: d, reviews: r, photos: p, aiReviews: ai, aiPhotos: ap, triage: t } = airbnbResult;
     let line = `  Airbnb:  ${airbnbResult.total} listings`;
-    if (d.fetched + d.skipped + d.failed > 0) line += ` | details: ${d.fetched}\u2713 ${d.skipped}\u2298 ${d.failed}\u2717`;
+    if (d.fetched + d.skipped + d.failed + d.partial > 0) {
+      line += ` | details: ${d.fetched}\u2713 ${d.skipped}\u2298 ${d.failed}\u2717`;
+      if (d.partial > 0) line += ` ${d.partial}\u26a0`;
+    }
     if (r.fetched + r.skipped + r.failed > 0) line += ` | reviews: ${r.fetched}\u2713 ${r.skipped}\u2298 ${r.failed}\u2717`;
     if (p.fetched + p.skipped + p.failed > 0) line += ` | photos: ${p.fetched}\u2713 ${p.skipped}\u2298 ${p.failed}\u2717`;
     if (ai.fetched + ai.skipped + ai.failed > 0) line += ` | ai-reviews: ${ai.fetched}\u2713 ${ai.skipped}\u2298 ${ai.failed}\u2717`;
@@ -2406,7 +2499,10 @@ export async function runBatch(
   if (preprocessed.booking.count > 0) {
     const { details: d, reviews: r, photos: p, aiReviews: ai, aiPhotos: ap, triage: t } = bookingResult;
     let line = `  Booking: ${bookingResult.total} listings`;
-    if (d.fetched + d.skipped + d.failed > 0) line += ` | details: ${d.fetched}\u2713 ${d.skipped}\u2298 ${d.failed}\u2717`;
+    if (d.fetched + d.skipped + d.failed + d.partial > 0) {
+      line += ` | details: ${d.fetched}\u2713 ${d.skipped}\u2298 ${d.failed}\u2717`;
+      if (d.partial > 0) line += ` ${d.partial}\u26a0`;
+    }
     if (r.fetched + r.skipped + r.failed > 0) line += ` | reviews: ${r.fetched}\u2713 ${r.skipped}\u2298 ${r.failed}\u2717`;
     if (p.fetched + p.skipped + p.failed > 0) line += ` | photos: ${p.fetched}\u2713 ${p.skipped}\u2298 ${p.failed}\u2717`;
     if (ai.fetched + ai.skipped + ai.failed > 0) line += ` | ai-reviews: ${ai.fetched}\u2713 ${ai.skipped}\u2298 ${ai.failed}\u2717`;

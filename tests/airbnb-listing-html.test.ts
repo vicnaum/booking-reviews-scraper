@@ -1,10 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   extractAirbnbDomainSwitchOrigin,
   extractPdpSectionsFromHtml,
   fetchListingPageData,
+  getAirbnbDetailsDegradationReasons,
+  parseAirbnbPdpPageData,
 } from '../src/airbnb/listing.js';
+
+const fixtureDir = path.resolve('tests/fixtures/airbnb-pdp');
 
 function makePdpHtml(): string {
   return `
@@ -61,6 +67,64 @@ test('extractPdpSectionsFromHtml reads PDP sections from niobeClientData script 
   assert.equal(extracted.sections.length, 2);
   assert.equal(extracted.sections[0].sectionId, 'TITLE_DEFAULT');
   assert.equal(extracted.metadata.pageTitle, 'Test Airbnb Listing page');
+});
+
+test('captured Airbnb PDP restores fields moved onto the listing node', () => {
+  const html = fs.readFileSync(
+    path.join(fixtureDir, '51945222-deferred.html'),
+    'utf8',
+  );
+  const pageData = extractPdpSectionsFromHtml(html);
+  assert.ok(pageData);
+  assert.equal(pageData.node?.__typename, 'DemandStayListing');
+
+  const parsed = parseAirbnbPdpPageData(pageData);
+  assert.equal(
+    parsed.title,
+    'Untitled 3 Freeman - Studio Queen City View',
+  );
+  assert.equal(parsed.propertyType, 'Room in hotel');
+  assert.equal(parsed.capacity, 2);
+  assert.equal(parsed.rating, 4.88);
+  assert.equal(parsed.reviewCount, 1094);
+  assert.deepEqual(parsed.subRatings, {
+    ACCURACY: 4.86,
+    CLEANLINESS: 4.9,
+  });
+  assert.deepEqual(parsed.amenities, [
+    {
+      name: 'Hair dryer',
+      available: true,
+      category: 'Bathroom',
+    },
+    {
+      name: 'Kitchen',
+      available: false,
+      category: 'Privacy and safety',
+    },
+  ]);
+});
+
+test('Airbnb details degradation distinguishes missing extraction from a new listing', () => {
+  assert.deepEqual(
+    getAirbnbDetailsDegradationReasons({
+      title: '',
+      rating: null,
+      reviewCount: null,
+      amenities: [],
+    }),
+    ['missing_title', 'missing_rating', 'missing_amenities'],
+  );
+
+  assert.deepEqual(
+    getAirbnbDetailsDegradationReasons({
+      title: 'New listing',
+      rating: null,
+      reviewCount: 0,
+      amenities: [{ name: 'Wifi', available: true, category: null }],
+    }),
+    [],
+  );
 });
 
 test('extractPdpSectionsFromHtml returns null when niobe PDP data is absent', () => {

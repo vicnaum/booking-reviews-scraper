@@ -133,11 +133,104 @@ function stripHtml(html: string): string {
 export interface AirbnbPdpPageData {
   sections: any[];
   metadata: any;
+  node?: any;
 }
 
 type AirbnbRequest = typeof makeRequest;
 
 const MAX_DOMAIN_SWITCHES = 2;
+export const AIRBNB_DETAILS_PARSER_VERSION = 'airbnb-pdp-v2';
+
+export type AirbnbDetailsDegradationReason =
+  | 'missing_title'
+  | 'missing_rating'
+  | 'missing_amenities';
+
+function asFiniteNumber(value: unknown): number | null {
+  if (
+    value == null
+    || (typeof value === 'string' && value.trim() === '')
+  ) {
+    return null;
+  }
+
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function localizedText(value: any): string | null {
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    return normalized || null;
+  }
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const candidates = [
+    value.localizedStringWithTranslationPreference,
+    value.localizedString,
+    value.source,
+    value.text,
+    value.content,
+  ];
+  for (const candidate of candidates) {
+    const normalized = localizedText(candidate);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return null;
+}
+
+function parseAmenityGroups(groups: any[]): AirbnbAmenity[] {
+  const amenities: AirbnbAmenity[] = [];
+  for (const group of groups) {
+    const category = typeof group?.title === 'string' && group.title.trim()
+      ? group.title.trim()
+      : null;
+    for (const amenity of (group?.amenities || [])) {
+      const name = typeof amenity?.title === 'string'
+        ? amenity.title.trim()
+        : '';
+      if (!name) {
+        continue;
+      }
+      amenities.push({
+        name,
+        available: amenity.available ?? true,
+        category,
+      });
+    }
+  }
+  return amenities;
+}
+
+export function getAirbnbDetailsDegradationReasons(
+  details: Pick<
+    AirbnbListingDetails,
+    'title' | 'rating' | 'reviewCount' | 'amenities'
+  >,
+): AirbnbDetailsDegradationReason[] {
+  const reasons: AirbnbDetailsDegradationReason[] = [];
+  if (!details.title?.trim()) {
+    reasons.push('missing_title');
+  }
+
+  const rating = asFiniteNumber(details.rating);
+  const reviewCount = asFiniteNumber(details.reviewCount);
+  if (rating == null && reviewCount !== 0) {
+    reasons.push('missing_rating');
+  }
+
+  if (
+    !Array.isArray(details.amenities)
+    || !details.amenities.some((amenity) => amenity?.name?.trim())
+  ) {
+    reasons.push('missing_amenities');
+  }
+  return reasons;
+}
 
 export function extractAirbnbDomainSwitchOrigin(html: string): string | null {
   const formAction = html.match(
@@ -191,6 +284,7 @@ export function extractPdpSectionsFromHtml(html: string): AirbnbPdpPageData | nu
       return {
         sections,
         metadata: page?.sections?.metadata || {},
+        node: entry?.[1]?.data?.node || null,
       };
     } catch {
       // Ignore malformed script blocks and continue scanning.
@@ -298,8 +392,16 @@ function buildListingDetails(
 
 // --- Parsing ---
 
-function parseSections(sections: any[], metadata: any): Partial<AirbnbListingDetails> {
+function parseSections(
+  sections: any[],
+  metadata: any,
+  listingNode?: any,
+): Partial<AirbnbListingDetails> {
   const result: Partial<AirbnbListingDetails> = {};
+  const nodePresentation = listingNode?.pdpPresentation || {};
+  const availabilitySection = findSection(sections, 'AVAILABILITY_CALENDAR_DEFAULT')
+    || findSection(sections, 'AVAILABILITY_CALENDAR_INLINE');
+  const photoSection = findSection(sections, 'PHOTO_TOUR_SCROLLABLE_MODAL');
 
   // Title
   const titleSection = findSection(sections, 'TITLE_DEFAULT');
@@ -318,6 +420,19 @@ function parseSections(sections: any[], metadata: any): Partial<AirbnbListingDet
       result.propertyType = titleSection.shareSave?.embedData?.propertyType || null;
     }
   }
+  if (!result.title?.trim()) {
+    result.title = localizedText(nodePresentation.title)
+      || localizedText(listingNode?.description?.name)
+      || localizedText(availabilitySection?.listingTitle)
+      || localizedText(photoSection?.shareSave?.embedData?.name)
+      || '';
+  }
+  if (!result.propertyType) {
+    result.propertyType = nodePresentation.sharingConfig?.propertyType
+      || metadata?.sharingConfig?.propertyType
+      || availabilitySection?.descriptionItems?.[0]?.title
+      || null;
+  }
 
   // Description
   const descSection = findSection(sections, 'DESCRIPTION_DEFAULT');
@@ -327,7 +442,6 @@ function parseSections(sections: any[], metadata: any): Partial<AirbnbListingDet
   }
 
   // Photos from PHOTO_TOUR_SCROLLABLE_MODAL (has all photos)
-  const photoSection = findSection(sections, 'PHOTO_TOUR_SCROLLABLE_MODAL');
   if (photoSection) {
     const mediaItems = photoSection.mediaItems || [];
     result.photos = mediaItems
@@ -358,23 +472,29 @@ function parseSections(sections: any[], metadata: any): Partial<AirbnbListingDet
       result.coordinates = { lat, lng };
     }
   }
+  if (!result.coordinates) {
+    const lat = asFiniteNumber(listingNode?.location?.coordinate?.latitude);
+    const lng = asFiniteNumber(listingNode?.location?.coordinate?.longitude);
+    if (lat != null && lng != null) {
+      result.coordinates = { lat, lng };
+    }
+  }
 
   // Amenities (full list from seeAllAmenitiesGroups)
   const amenitiesSection = findSection(sections, 'AMENITIES_DEFAULT');
-  if (amenitiesSection) {
-    const groups = amenitiesSection.seeAllAmenitiesGroups || amenitiesSection.previewAmenitiesGroups || [];
-    const amenities: AirbnbAmenity[] = [];
-    for (const group of groups) {
-      const category = group.title || null;
-      for (const a of (group.amenities || [])) {
-        amenities.push({
-          name: a.title || '',
-          available: a.available ?? true,
-          category,
-        });
-      }
+  const amenitySources = [
+    amenitiesSection,
+    nodePresentation.amenities,
+  ];
+  for (const source of amenitySources) {
+    const groups = source?.seeAllAmenitiesGroups?.length
+      ? source.seeAllAmenitiesGroups
+      : source?.previewAmenitiesGroups || [];
+    const amenities = parseAmenityGroups(groups);
+    if (amenities.length > 0) {
+      result.amenities = amenities;
+      break;
     }
-    result.amenities = amenities;
   }
 
   // Host
@@ -460,6 +580,32 @@ function parseSections(sections: any[], metadata: any): Partial<AirbnbListingDet
       result.subRatings = subRatings;
     }
   }
+  const quality = nodePresentation.quality;
+  const ratingStats = quality?.listingRatingStats?.overallRatingStats;
+  if (result.rating == null) {
+    result.rating = asFiniteNumber(ratingStats?.ratingAverage)
+      ?? asFiniteNumber(metadata?.sharingConfig?.starRating);
+  }
+  if (result.reviewCount == null) {
+    result.reviewCount = asFiniteNumber(ratingStats?.ratingCount)
+      ?? asFiniteNumber(listingNode?.listingRatingStats?.overallRatingStats?.ratingCount)
+      ?? asFiniteNumber(metadata?.sharingConfig?.reviewCount);
+  }
+  if (!result.subRatings) {
+    const subRatings: Record<string, number> = {};
+    for (const category of (quality?.listingRatingStats?.categoryRatingStats || [])) {
+      const name = category?.categoryTypeA || category?.categoryType;
+      const rating = asFiniteNumber(
+        category?.value?.ratingAverage ?? category?.ratingAverage,
+      );
+      if (name && rating != null) {
+        subRatings[name] = rating;
+      }
+    }
+    if (Object.keys(subRatings).length > 0) {
+      result.subRatings = subRatings;
+    }
+  }
 
   // Pricing (from BOOK_IT_SIDEBAR)
   const bookItSection = findSection(sections, 'BOOK_IT_SIDEBAR');
@@ -487,6 +633,10 @@ function parseSections(sections: any[], metadata: any): Partial<AirbnbListingDet
         priceBreakdown: Object.keys(priceBreakdown).length > 0 ? priceBreakdown : null,
       };
     }
+  }
+  if (result.capacity == null) {
+    result.capacity = asFiniteNumber(nodePresentation.personCapacity)
+      ?? asFiniteNumber(listingNode?.personCapacity);
   }
 
   // Sleeping arrangements
@@ -545,6 +695,16 @@ function parseSections(sections: any[], metadata: any): Partial<AirbnbListingDet
   return result;
 }
 
+export function parseAirbnbPdpPageData(
+  pageData: AirbnbPdpPageData,
+): Partial<AirbnbListingDetails> {
+  return parseSections(
+    pageData.sections,
+    pageData.metadata,
+    pageData.node,
+  );
+}
+
 // --- Main API functions ---
 
 export async function fetchListingDetails(
@@ -555,7 +715,7 @@ export async function fetchListingDetails(
   let htmlFallback: AirbnbListingDetails | null = null;
   try {
     const pageData = await fetchListingPageData(roomId, options);
-    const parsedFromHtml = parseSections(pageData.sections, pageData.metadata);
+    const parsedFromHtml = parseAirbnbPdpPageData(pageData);
     const capturedAt = new Date().toISOString();
     const staySnapshot = parseAirbnbStaySnapshot({
       sections: pageData.sections,
@@ -701,7 +861,8 @@ export async function fetchListingDetails(
 
   let sections = page.sections?.sections || [];
   let snapshotSections = sections;
-  const metadata = page.sections?.metadata || {};
+  let metadata = page.sections?.metadata || {};
+  let listingNode = json?.data?.node || null;
 
   if (sections.length === 0) {
     throw new Error('No sections returned from API');
@@ -724,6 +885,8 @@ export async function fetchListingDetails(
         if (page) {
           sections = page.sections?.sections || sections;
           snapshotSections = sections;
+          metadata = page.sections?.metadata || metadata;
+          listingNode = json?.data?.node || listingNode;
         }
       } catch (err: any) {
         console.error(`Warning: Hash refresh failed: ${err.message}`);
@@ -731,7 +894,7 @@ export async function fetchListingDetails(
     }
   }
 
-  const parsed = parseSections(sections, metadata);
+  const parsed = parseSections(sections, metadata, listingNode);
 
   // If dates are provided but pricing wasn't returned, make a second request
   // specifically for BOOK_IT sections (Airbnb requires explicit sectionIds for pricing)
