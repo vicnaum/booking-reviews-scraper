@@ -10,6 +10,7 @@
     "worker": "dotenv -e ../.env -e .env.local -- tsx src/lib/search-worker.ts",
     "worker:dev": "dotenv -e ../.env -e .env.local -- tsx watch src/lib/search-worker.ts",
     "backfill:ai-costs": "dotenv -e ../.env -e .env.local -- tsx scripts/backfill-ai-costs.ts",
+    "repair:job-details": "dotenv -e ../.env -e .env.local -- tsx scripts/refresh-job-details.ts",
     "cleanup:artifacts": "dotenv -e ../.env -e .env.local -- tsx scripts/cleanup-artifacts.ts",
     "test:pricing": "tsx --test src/lib/pricing.test.ts",
     "test:ui": "tsx --test src/components/*.test.tsx",
