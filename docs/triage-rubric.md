@@ -355,6 +355,21 @@ Stored JSON without `scoreSource`, `rubricVersion`, and `requirementSetId` is
 
 CLI/report output follows the same source/version and grouping rules.
 
+## Cross-platform identity conflicts
+
+Airbnb and Booking offers are never treated as independent peer evidence when an active
+same-property link exposes materially contradictory verdicts. A `likely_same` detector suggestion
+or an owner-confirmed link is active; an unconfirmed `possible_same` suggestion is inert. A pair is
+materially contradictory when both sides have scored tiers at least two levels apart.
+
+The native results page keeps the offers and their evidence separate, shows them together for
+audit, and withholds both from the top-picks hero and comparable peer ranks while the material link
+is active. Their matrix rows remain visible in a labeled conflict group with all paid evidence. It
+does not merge review corpora, recompute either tier, or use the richer platform's
+verdict as a replacement for the thinner one. Dismissing or undoing the link restores the normal
+single-listing comparison rules when no active detector suggestion remains; undoing a confirmation
+otherwise returns the pair to its current detector state.
+
 ## Priorities matrix
 
 The native results page derives one per-job evidence matrix from persisted deterministic triage;

@@ -23,6 +23,8 @@ type SortState = {
   key: string | null;
   direction: PrioritiesMatrixSortDirection;
 };
+const EMPTY_DUPLICATE_CONFLICT_KEYS: ReadonlySet<string> =
+  new Set();
 
 function statusClassName(status: string): string {
   switch (status) {
@@ -279,6 +281,7 @@ function HeaderButton({
 
 export default function PrioritiesMatrix({
   listings,
+  duplicateConflictKeys = EMPTY_DUPLICATE_CONFLICT_KEYS,
   onSelectListing,
   regradeReasons = [],
   regradeLocked = false,
@@ -288,6 +291,7 @@ export default function PrioritiesMatrix({
   onRegrade,
 }: {
   listings: ReviewJobListing[];
+  duplicateConflictKeys?: ReadonlySet<string>;
   onSelectListing?: (listingKey: string) => void;
   regradeReasons?: TriageRegradeReason[];
   regradeLocked?: boolean;
@@ -309,10 +313,34 @@ export default function PrioritiesMatrix({
     () => buildReviewJobPrioritiesMatrix(listings),
     [listings],
   );
-  const rows = useMemo(
+  const sortedRows = useMemo(
     () => sortPrioritiesMatrixRows(matrix.rows, sort.key, sort.direction),
     [matrix.rows, sort],
   );
+  const rows = useMemo(() => {
+    const comparable: PrioritiesMatrixRow[] = [];
+    const conflicts: PrioritiesMatrixRow[] = [];
+    const other: PrioritiesMatrixRow[] = [];
+    for (const row of sortedRows) {
+      const key = `${row.platform}:${row.id}`;
+      if (duplicateConflictKeys.has(key)) {
+        conflicts.push(row);
+      } else if (
+        getPrioritiesMatrixRankingGroup(row.rankingStatus) === 0
+      ) {
+        comparable.push(row);
+      } else {
+        other.push(row);
+      }
+    }
+    return [...comparable, ...conflicts, ...other];
+  }, [duplicateConflictKeys, sortedRows]);
+
+  function rowGroupKey(row: PrioritiesMatrixRow): string {
+    return duplicateConflictKeys.has(`${row.platform}:${row.id}`)
+      ? 'duplicate_conflict'
+      : `ranking:${getPrioritiesMatrixRankingGroup(row.rankingStatus)}`;
+  }
 
   function applySort(key: string) {
     setSort((current) =>
@@ -346,8 +374,8 @@ export default function PrioritiesMatrix({
           Availability and affordability stay separate from quality. Each
           priority cell shows the strongest status-aligned evidence, its
           AI-analyzed frequency and years, plus missing evidence layers.
-          Column sorting never mixes insufficient, legacy, or stale rows into
-          the comparable ranked group.
+          Column sorting never mixes cross-platform conflicts, insufficient,
+          legacy, or stale rows into the comparable ranked group.
         </p>
         {regradeNeeded && (
           <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-amber-300/20 bg-amber-300/[0.08] p-3 sm:flex-row sm:items-center sm:justify-between">
@@ -461,12 +489,12 @@ export default function PrioritiesMatrix({
             </thead>
             <tbody>
               {rows.map((row, index) => {
+                const duplicateConflict = duplicateConflictKeys.has(
+                  `${row.platform}:${row.id}`,
+                );
                 const showGroup =
                   index === 0
-                  || getPrioritiesMatrixRankingGroup(row.rankingStatus)
-                    !== getPrioritiesMatrixRankingGroup(
-                      rows[index - 1].rankingStatus,
-                    );
+                  || rowGroupKey(row) !== rowGroupKey(rows[index - 1]);
                 return (
                   <Fragment key={`${row.platform}:${row.id}`}>
                     {showGroup && (
@@ -475,12 +503,14 @@ export default function PrioritiesMatrix({
                           colSpan={matrix.columns.length + 3}
                           className="border-b border-white/10 bg-white/[0.035] px-4 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-stone-500"
                         >
-                          {briefChanged
-                            && row.rankingStatus !== 'unscored'
-                            ? `Previous brief · ${
-                                rankingGroupLabel(row.rankingStatus)
-                              }`
-                            : rankingGroupLabel(row.rankingStatus)}
+                          {duplicateConflict
+                            ? 'Cross-platform conflict — linked offers visible for audit, outside peer ranking'
+                            : briefChanged
+                              && row.rankingStatus !== 'unscored'
+                              ? `Previous brief · ${
+                                  rankingGroupLabel(row.rankingStatus)
+                                }`
+                              : rankingGroupLabel(row.rankingStatus)}
                         </td>
                       </tr>
                     )}
@@ -506,7 +536,9 @@ export default function PrioritiesMatrix({
                         <div className="mt-2 flex flex-wrap items-center gap-1.5">
                           <span
                             className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.1em] ${
-                              briefChanged
+                              duplicateConflict
+                                ? statusClassName('unmet')
+                                : briefChanged
                                 && row.rankingStatus !== 'unscored'
                                 ? statusClassName('partial')
                                 : row.rankingStatus === 'ranked'
@@ -516,7 +548,9 @@ export default function PrioritiesMatrix({
                                   : statusClassName('unknown')
                             }`}
                           >
-                            {briefChanged
+                            {duplicateConflict
+                              ? 'Cross-platform conflict'
+                              : briefChanged
                               && row.rankingStatus !== 'unscored'
                               ? 'Regrade needed'
                               : rankingLabel(row.rankingStatus)}

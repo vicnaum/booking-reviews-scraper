@@ -91,9 +91,10 @@ near-free and fast. Repeat runs on the same destination are the real usage patte
 - `src/booking/` — Playwright-based (hotel pages are AWS-WAF-protected; review list pages work
   with plain HTTP+proxy). `src/airbnb/` — raw HTTP/GraphQL.
 - `web/prisma/schema.prisma` — `ReviewJob`, `ReviewJobListing`, `ReviewJobListingAnalysis`,
-  `ReviewJobEvent` (+ older `SearchJob`/`SearchResult`). Postgres (`dev.db` was a stray, deleted).
+  `ReviewJobDuplicatePair`, `ReviewJobEvent` (+ older `SearchJob`/`SearchResult`). Postgres
+  (`dev.db` was a stray, deleted).
 - `web/src/lib/` — `search-worker.ts` (BullMQ worker, the heart), `reviewJobs.ts`,
-  `review-job-batch-analysis.ts`, `aiCosts.ts`.
+  `review-job-batch-analysis.ts`, `reviewJobDuplicates.ts`, `aiCosts.ts`.
 - `web/src/app/` — `/` landing+map, `/jobs/[jobId]` workspace, `/jobs/[jobId]/results`,
   API under `/api/` (jobs, search, quick-search, geocode, export, SSE stream).
 - Docs worth reading: `web/README.md` (how to run), `docs/review-job-roadmap.md`,

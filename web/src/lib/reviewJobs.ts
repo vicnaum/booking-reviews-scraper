@@ -4,6 +4,7 @@ import type {
   Prisma,
   ReviewJob as ReviewJobModel,
   ReviewJobEvent as ReviewJobEventModel,
+  ReviewJobDuplicatePair as ReviewJobDuplicatePairModel,
   ReviewJobListing as ReviewJobListingModel,
   ReviewJobListingAnalysis as ReviewJobListingAnalysisModel,
 } from '@prisma/client';
@@ -17,6 +18,7 @@ import type {
   FullSearchRequest,
   MapPoint,
   ReviewJobEvent,
+  ReviewJobDuplicatePair,
   ReviewAnalysisSample,
   ReviewJobListing,
   ReviewJobListingAnalysis,
@@ -273,6 +275,9 @@ export const reviewJobResponseInclude = {
     },
   },
   events: {
+    orderBy: { createdAt: 'asc' as const },
+  },
+  duplicatePairs: {
     orderBy: { createdAt: 'asc' as const },
   },
 } satisfies Prisma.ReviewJobInclude;
@@ -614,9 +619,36 @@ export function toReviewJobEvent(row: ReviewJobEventModel): ReviewJobEvent {
   };
 }
 
+export function toReviewJobDuplicatePair(
+  row: ReviewJobDuplicatePairModel,
+): ReviewJobDuplicatePair {
+  return {
+    id: row.id,
+    airbnbListingId: row.airbnbListingId,
+    bookingListingId: row.bookingListingId,
+    detectorVersion: row.detectorVersion,
+    detectorConfidence: row.detectorConfidence,
+    decision: row.decision,
+    decisionSource: row.decisionSource,
+    distanceMeters: row.distanceMeters,
+    nameScore: row.nameScore,
+    nameSource:
+      row.nameSource === 'card'
+      || row.nameSource === 'host'
+      || row.nameSource === 'address'
+      || row.nameSource === 'none'
+        ? row.nameSource
+        : null,
+    evidence: asJsonObject(row.evidence),
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
 export function toReviewJobResponse(input: {
   job: ReviewJobModel;
   listings: Array<ReviewJobListingModel & { analysis?: ReviewJobListingAnalysisModel | null }>;
+  duplicatePairs?: ReviewJobDuplicatePairModel[];
   events: ReviewJobEventModel[];
   viewerCanEdit?: boolean;
 }): ReviewJobResponse {
@@ -625,6 +657,10 @@ export function toReviewJobResponse(input: {
   const ttlMs = resolveStaySnapshotTtlMs();
   const now = new Date();
   const reviewSamples = getReviewSamplesFromManifest(input.job.artifactRoot);
+  const visibleListingKeys = new Set(
+    input.listings.map((listing) =>
+      `${listing.platform}:${listing.listingId}`),
+  );
 
   return {
     job: toReviewJobState(input.job, {
@@ -649,6 +685,15 @@ export function toReviewJobResponse(input: {
               : undefined
           ),
       })),
+    duplicatePairs: (input.duplicatePairs ?? [])
+      .filter((pair) =>
+        visibleListingKeys.has(`airbnb:${pair.airbnbListingId}`)
+        && visibleListingKeys.has(`booking:${pair.bookingListingId}`)
+        && (
+          input.viewerCanEdit !== false
+          || pair.decision !== 'dismissed'
+        ))
+      .map(toReviewJobDuplicatePair),
     events: input.events.map(toReviewJobEvent),
   };
 }
@@ -657,6 +702,7 @@ export function toReviewJobResponseRecord(job: ReviewJobResponseRecord): ReviewJ
   return toReviewJobResponse({
     job,
     listings: job.listings,
+    duplicatePairs: job.duplicatePairs,
     events: job.events,
   });
 }
@@ -668,6 +714,7 @@ export function toReviewJobResponseRecordForViewer(
   return toReviewJobResponse({
     job,
     listings: job.listings,
+    duplicatePairs: job.duplicatePairs,
     events: job.events,
     viewerCanEdit: canEditReviewJob(job, ownerKey),
   });

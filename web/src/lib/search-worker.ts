@@ -71,6 +71,9 @@ import {
   resolveStaySnapshotTtlMs,
 } from './staySnapshots.js';
 import { regradeRequiredAfterAnalysis } from './reviewJobEdits.js';
+import {
+  syncReviewJobDuplicatePairs,
+} from './reviewJobDuplicatePersistence.js';
 
 for (const envPath of [
   path.resolve(process.cwd(), '.env.local'),
@@ -486,6 +489,7 @@ async function runReviewJobSearch(reviewJobId: string) {
           skipDuplicates: true,
         });
       }
+      await syncReviewJobDuplicatePairs(tx, reviewJobId);
       await tx.reviewJob.update({
         where: { id: reviewJobId },
         data: {
@@ -1877,6 +1881,7 @@ async function runReviewJobAnalysis(
       artifactRoot,
       poi,
     });
+    await syncReviewJobDuplicatePairs(prisma, reviewJobId);
 
     const completedAt = new Date();
     let overallStatus: 'completed' | 'partial' | 'failed' = 'completed';
@@ -1950,6 +1955,7 @@ async function runReviewJobAnalysis(
         artifactRoot,
         poi,
       });
+      await syncReviewJobDuplicatePairs(prisma, reviewJobId);
 
       await prisma.$transaction(async (tx) => {
         await resetReviewJobListingAnalyses(tx, inactiveListingIds);

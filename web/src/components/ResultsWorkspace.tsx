@@ -11,7 +11,12 @@ import {
   type MouseEvent,
   type ReactNode,
 } from 'react';
-import type { PriceDisplayMode, ReviewJobListing, ReviewJobResponse } from '@/types';
+import type {
+  PriceDisplayMode,
+  ReviewJobDuplicatePair,
+  ReviewJobListing,
+  ReviewJobResponse,
+} from '@/types';
 import { formatUsdCost, hasAiCosts } from '@/lib/aiCosts';
 import { getPriceDisplayInfo, resolveComparablePrice } from '@/lib/pricing';
 import { buildListingUrl } from '@/lib/listingLinks';
@@ -49,6 +54,12 @@ import EvidenceGapBadge from './EvidenceGapBadge';
 import StaySnapshotStatus from './StaySnapshotStatus';
 import PriceRefreshControls from './PriceRefreshControls';
 import PrioritiesMatrix from './PrioritiesMatrix';
+import DuplicatePairsPanel from './DuplicatePairsPanel';
+import {
+  duplicateListingKeys,
+  getMaterialDuplicateConflictKeys,
+  isMaterialDuplicateConflict,
+} from '@/lib/reviewJobDuplicatePresentation';
 
 const MIN_MAP_HEIGHT = 280;
 const TIER_ORDER = ['top_pick', 'shortlist', 'consider', 'unlikely', 'no_go'] as const;
@@ -69,6 +80,9 @@ type SortKey =
   | 'price'
   | 'poiDistance';
 type DetailTab = 'triage' | 'reviews' | 'photos' | 'snapshot';
+type ResultsComparisonStatus =
+  | TriageComparisonStatus
+  | 'duplicate_conflict';
 
 function listingKey(listing: Pick<ReviewJobListing, 'id' | 'platform'>) {
   return `${listing.platform}:${listing.id}`;
@@ -102,27 +116,29 @@ function formatPercent(value: number | null): string {
   }).format(value);
 }
 
-function comparisonRank(status: TriageComparisonStatus): number {
+function comparisonRank(status: ResultsComparisonStatus): number {
   switch (status) {
     case 'ranked':
       return 0;
-    case 'regrade_required':
+    case 'duplicate_conflict':
       return 1;
-    case 'insufficient_evidence':
+    case 'regrade_required':
       return 2;
-    case 'stale_classifier_policy':
+    case 'insufficient_evidence':
       return 3;
+    case 'stale_classifier_policy':
+      return 4;
     case 'legacy':
     case 'stale_requirement_set':
-      return 4;
-    case 'unscored':
       return 5;
+    case 'unscored':
+      return 6;
   }
 }
 
 function displayedTier(
   triage: ParsedTriage | null,
-  comparisonStatus?: TriageComparisonStatus,
+  comparisonStatus?: ResultsComparisonStatus,
 ): { label: string; tier: string | null } {
   const status =
     comparisonStatus
@@ -135,6 +151,9 @@ function displayedTier(
           : 'unscored');
   if (status === 'insufficient_evidence') {
     return { label: 'Insufficient evidence', tier: null };
+  }
+  if (status === 'duplicate_conflict') {
+    return { label: 'Cross-platform conflict', tier: null };
   }
   if (
     status === 'regrade_required'
@@ -155,8 +174,15 @@ function VerdictSourceBadge({
   comparisonStatus,
 }: {
   triage: ParsedTriage | null;
-  comparisonStatus?: TriageComparisonStatus;
+  comparisonStatus?: ResultsComparisonStatus;
 }) {
+  if (comparisonStatus === 'duplicate_conflict') {
+    return (
+      <span className="rounded-full border border-rose-300/20 bg-rose-300/10 px-2 py-1 text-[10px] font-semibold text-rose-100">
+        Linked property · verdict conflict
+      </span>
+    );
+  }
   if (!triage) return null;
   const status =
     comparisonStatus
@@ -663,7 +689,7 @@ function ListingDetailPanel({
   listing: ReviewJobListing;
   job: ReviewJobResponse['job'];
   priceDisplay: PriceDisplayMode;
-  comparisonStatus: TriageComparisonStatus;
+  comparisonStatus: ResultsComparisonStatus;
   onLocate: () => void;
 }) {
   const snapshot = useMemo(() => getListingResultsSnapshot(listing), [listing]);
@@ -1310,6 +1336,34 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
 
   const viewerCanEdit = data.job.viewerCanEdit;
 
+  const updateDuplicatePair = useCallback(async (
+    pair: Pick<
+      ReviewJobDuplicatePair,
+      'airbnbListingId' | 'bookingListingId'
+    >,
+    decision: 'suggested' | 'confirmed' | 'dismissed',
+  ) => {
+    if (!viewerCanEdit) {
+      throw new Error('This results view is read-only.');
+    }
+    const response = await fetch(
+      `/api/jobs/${data.job.id}/duplicates`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...pair, decision }),
+      },
+    );
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(
+        payload?.error ?? 'Failed to update cross-platform link',
+      );
+    }
+    const nextData: ReviewJobResponse = await response.json();
+    applyJobUpdate(nextData);
+  }, [applyJobUpdate, data.job.id, viewerCanEdit]);
+
   const setPublicSharing = useCallback(async (nextValue: boolean) => {
     if (!viewerCanEdit) {
       return;
@@ -1435,8 +1489,38 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       data.listings,
     ],
   );
+  const materialDuplicateConflictKeys = useMemo(
+    () => getMaterialDuplicateConflictKeys(
+      data.duplicatePairs,
+      data.listings,
+    ),
+    [data.duplicatePairs, data.listings],
+  );
+  const materialDuplicateSortKeys = useMemo(() => {
+    const listingsByKey = new Map(
+      data.listings.map((listing) => [
+        listingKey(listing),
+        listing,
+      ]),
+    );
+    const sortKeys = new Map<string, string>();
+    for (const pair of data.duplicatePairs) {
+      if (!isMaterialDuplicateConflict(pair, listingsByKey)) continue;
+      const [airbnbKey, bookingKey] = duplicateListingKeys(pair);
+      const pairKey = `${pair.createdAt}:${pair.id}`;
+      if (!sortKeys.has(airbnbKey)) {
+        sortKeys.set(airbnbKey, `${pairKey}:0`);
+      }
+      if (!sortKeys.has(bookingKey)) {
+        sortKeys.set(bookingKey, `${pairKey}:1`);
+      }
+    }
+    return sortKeys;
+  }, [data.duplicatePairs, data.listings]);
   const comparisonGateActive =
-    activeTriageComparison != null || data.job.regradeRequired;
+    activeTriageComparison != null
+    || data.job.regradeRequired
+    || materialDuplicateConflictKeys.size > 0;
   const resolveComparisonStatus = useCallback(
     (triage: ParsedTriage | null) =>
       getTriageComparisonStatus(
@@ -1445,6 +1529,15 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         { regradeRequired: data.job.regradeRequired },
       ),
     [activeTriageComparison, data.job.regradeRequired],
+  );
+  const resolveListingComparisonStatus = useCallback(
+    (listing: ReviewJobListing): ResultsComparisonStatus =>
+      materialDuplicateConflictKeys.has(listingKey(listing))
+        ? 'duplicate_conflict'
+        : resolveComparisonStatus(
+            getListingResultsSnapshot(listing).triage,
+          ),
+    [materialDuplicateConflictKeys, resolveComparisonStatus],
   );
   const regradeListingCount = useMemo(
     () => getTriageRegradeListingCount(data.listings),
@@ -1507,13 +1600,20 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       const triageB = getListingResultsSnapshot(b).triage;
       if (comparisonGateActive) {
         const groupA = comparisonRank(
-          resolveComparisonStatus(triageA),
+          resolveListingComparisonStatus(a),
         );
         const groupB = comparisonRank(
-          resolveComparisonStatus(triageB),
+          resolveListingComparisonStatus(b),
         );
         if (groupA !== groupB) return groupA - groupB;
         if (groupA !== 0) {
+          if (groupA === comparisonRank('duplicate_conflict')) {
+            return (
+              materialDuplicateSortKeys.get(listingKey(a)) ?? ''
+            ).localeCompare(
+              materialDuplicateSortKeys.get(listingKey(b)) ?? '',
+            );
+          }
           return (
             (originalIndex.get(listingKey(a)) ?? 0)
             - (originalIndex.get(listingKey(b)) ?? 0)
@@ -1559,8 +1659,9 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     data.job.checkin,
     data.job.checkout,
     data.listings,
+    materialDuplicateSortKeys,
     priceDisplay,
-    resolveComparisonStatus,
+    resolveListingComparisonStatus,
   ]);
 
   const sortableResults = useMemo(() => {
@@ -1573,13 +1674,9 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       if (!sortAsc) return next;
       if (!comparisonGateActive) return [...next].reverse();
       const ranked = next.filter((listing) =>
-        resolveComparisonStatus(
-          getListingResultsSnapshot(listing).triage,
-        ) === 'ranked');
+        resolveListingComparisonStatus(listing) === 'ranked');
       const unranked = next.filter((listing) =>
-        resolveComparisonStatus(
-          getListingResultsSnapshot(listing).triage,
-        ) !== 'ranked');
+        resolveListingComparisonStatus(listing) !== 'ranked');
       return [...ranked.reverse(), ...unranked];
     }
 
@@ -1591,16 +1688,18 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       }
       if (comparisonGateActive) {
         const groupA = comparisonRank(
-          resolveComparisonStatus(
-            getListingResultsSnapshot(a).triage,
-          ),
+          resolveListingComparisonStatus(a),
         );
         const groupB = comparisonRank(
-          resolveComparisonStatus(
-            getListingResultsSnapshot(b).triage,
-          ),
+          resolveListingComparisonStatus(b),
         );
         if (groupA !== groupB) return groupA - groupB;
+        if (groupA === comparisonRank('duplicate_conflict')) {
+          return (
+            (baseIndex.get(listingKey(a)) ?? 0)
+            - (baseIndex.get(listingKey(b)) ?? 0)
+          );
+        }
         if (
           groupA !== 0
           && sortKey !== 'affordability'
@@ -1670,7 +1769,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     data.job.checkin,
     data.job.checkout,
     priceDisplay,
-    resolveComparisonStatus,
+    resolveListingComparisonStatus,
     sortAsc,
     sortKey,
   ]);
@@ -1687,7 +1786,8 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
     () =>
       displayableResults.filter((listing) => {
         const triage = getListingResultsSnapshot(listing).triage;
-        const comparisonStatus = resolveComparisonStatus(triage);
+        const comparisonStatus =
+          resolveListingComparisonStatus(listing);
         const tier = triage?.tier ?? 'unscored';
         if (
           (!comparisonGateActive || comparisonStatus === 'ranked')
@@ -1738,7 +1838,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       maxPoiDistanceFilter,
       maxPriceFilter,
       priceDisplay,
-      resolveComparisonStatus,
+      resolveListingComparisonStatus,
     ],
   );
 
@@ -1758,9 +1858,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         listing.staySnapshot.bookingEligibility.actionable
         && (
         !comparisonGateActive
-        || resolveComparisonStatus(
-          getListingResultsSnapshot(listing).triage,
-        ) === 'ranked'
+        || resolveListingComparisonStatus(listing) === 'ranked'
         ),
     );
     const topPicks = comparable.filter(
@@ -1773,7 +1871,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   }, [
     comparisonGateActive,
     filteredResults,
-    resolveComparisonStatus,
+    resolveListingComparisonStatus,
   ]);
 
   const tierCounts = useMemo(() => {
@@ -1782,7 +1880,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       const triage = getListingResultsSnapshot(listing).triage;
       if (
         comparisonGateActive
-        && resolveComparisonStatus(triage) !== 'ranked'
+        && resolveListingComparisonStatus(listing) !== 'ranked'
       ) {
         continue;
       }
@@ -1793,7 +1891,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   }, [
     comparisonGateActive,
     displayableResults,
-    resolveComparisonStatus,
+    resolveListingComparisonStatus,
   ]);
   const affordabilityCounts = useMemo(() => {
     const counts = new Map<AffordabilityStatus, number>();
@@ -1972,7 +2070,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         const key = listingKey(listing);
         const snapshot = getListingResultsSnapshot(listing);
         const comparisonStatus =
-          resolveComparisonStatus(snapshot.triage);
+          resolveListingComparisonStatus(listing);
         const verdictTier = displayedTier(
           snapshot.triage,
           comparisonStatus,
@@ -1981,16 +2079,16 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         const previousComparisonGroup =
           index > 0
             ? comparisonRank(
-                resolveComparisonStatus(
-                  getListingResultsSnapshot(rows[index - 1]).triage,
-                ),
+                resolveListingComparisonStatus(rows[index - 1]),
               )
             : null;
         const groupHeader =
           comparisonGateActive
           && comparisonGroup !== 0
           && comparisonGroup !== previousComparisonGroup
-            ? comparisonStatus === 'regrade_required'
+            ? comparisonStatus === 'duplicate_conflict'
+              ? 'Cross-platform conflict — review both offers and evidence sets'
+              : comparisonStatus === 'regrade_required'
               ? 'Regrade needed — these verdicts reflect the previous quality brief'
               : comparisonStatus === 'insufficient_evidence'
               ? 'Insufficient evidence — shown for audit, not ranked with comparable results'
@@ -2238,7 +2336,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       hiddenIds,
       likedIds,
       priceDisplay,
-      resolveComparisonStatus,
+      resolveListingComparisonStatus,
       selectedId,
       showHidden,
       toggleHidden,
@@ -2430,8 +2528,22 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
           )}
         </header>
 
+        <DuplicatePairsPanel
+          pairs={data.duplicatePairs}
+          listings={data.listings}
+          job={data.job}
+          priceDisplay={priceDisplay}
+          viewerCanEdit={viewerCanEdit}
+          onDecision={
+            viewerCanEdit ? updateDuplicatePair : undefined
+          }
+          onSelectListing={(key) =>
+            handleSelect(key, { scroll: true })}
+        />
+
         <PrioritiesMatrix
           listings={displayableResults}
+          duplicateConflictKeys={materialDuplicateConflictKeys}
           regradeReasons={regradeReasons}
           regradeLocked={regradeLocked}
           regradeListingCount={regradeListingCount}

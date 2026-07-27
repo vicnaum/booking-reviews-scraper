@@ -221,6 +221,85 @@ test('job responses expose the durable quality regrade requirement', () => {
   assert.equal(response.job.reportReady, true);
 });
 
+test('job responses expose duplicate decisions only while both offers are present', () => {
+  const duplicatePair = {
+    id: 'pair_1',
+    jobId: 'job_1',
+    airbnbListingId: 'listing_1',
+    bookingListingId: 'listing_2',
+    detectorVersion: 'cross-platform-property-v1',
+    detectorConfidence: 'likely_same',
+    decision: 'confirmed',
+    decisionSource: 'user',
+    distanceMeters: 81.4,
+    nameScore: 1,
+    nameSource: 'host',
+    evidence: {
+      airbnbHostName: 'NoMo SoHo New York City',
+    },
+    createdAt: new Date('2026-07-26T20:00:00.000Z'),
+    updatedAt: new Date('2026-07-26T20:01:00.000Z'),
+  } as any;
+  const response = toReviewJobResponse({
+    job: makeJob(),
+    listings: [
+      makeListing(),
+      makeListing({
+        id: 'row_2',
+        listingId: 'listing_2',
+        platform: 'booking',
+      }),
+    ],
+    duplicatePairs: [
+      duplicatePair,
+      {
+        ...duplicatePair,
+        id: 'pair_missing',
+        bookingListingId: 'not-in-results',
+      },
+    ],
+    events: [],
+  });
+
+  assert.equal(response.duplicatePairs.length, 1);
+  assert.deepEqual(response.duplicatePairs[0], {
+    id: 'pair_1',
+    airbnbListingId: 'listing_1',
+    bookingListingId: 'listing_2',
+    detectorVersion: 'cross-platform-property-v1',
+    detectorConfidence: 'likely_same',
+    decision: 'confirmed',
+    decisionSource: 'user',
+    distanceMeters: 81.4,
+    nameScore: 1,
+    nameSource: 'host',
+    evidence: {
+      airbnbHostName: 'NoMo SoHo New York City',
+    },
+    createdAt: '2026-07-26T20:00:00.000Z',
+    updatedAt: '2026-07-26T20:01:00.000Z',
+  });
+
+  const publicResponse = toReviewJobResponse({
+    job: makeJob(),
+    listings: [
+      makeListing(),
+      makeListing({
+        id: 'row_2',
+        listingId: 'listing_2',
+        platform: 'booking',
+      }),
+    ],
+    duplicatePairs: [{
+      ...duplicatePair,
+      decision: 'dismissed',
+    }],
+    events: [],
+    viewerCanEdit: false,
+  });
+  assert.deepEqual(publicResponse.duplicatePairs, []);
+});
+
 test('job responses preserve exact AI sample provenance from the batch manifest', () => {
   const artifactRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), 'review-job-review-sample-'),
