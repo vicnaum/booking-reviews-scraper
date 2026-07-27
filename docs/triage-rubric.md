@@ -42,7 +42,8 @@ Code builds this key in one shared helper used by the native results page and CL
 or different classifier version makes a verdict non-comparable even when its requirement
 definitions match. `modelId` is persisted for audit but is deliberately outside the key: provider
 model aliases can change on an external release schedule, and that churn must not silently
-invalidate every saved verdict.
+invalidate every saved verdict. Evidence fingerprints are likewise outside the comparability key:
+materially improved evidence suggests a regrade without invalidating the existing verdict.
 
 ## Canonical requirement set
 
@@ -330,6 +331,13 @@ invalidate verdicts. The marker survives queued, running, failed, and partial re
 clears only after every listing completes successfully. Structured budget-only edits never set
 the marker and never invoke the LLM.
 
+Each new verdict also stores a versioned evidence fingerprint for the exact details, AI-review,
+and AI-photo artifacts consumed by triage. The fingerprint records layer presence, SHA-256 hashes,
+and core details coverage for title, rating, review count, sub-ratings, and amenities. Artifact
+byte drift or layer metadata alone does not make a saved verdict stale. Improving core-field
+coverage marks only the affected listing as `regrade_suggested`; the job keeps that durable
+suggestion until those verdicts are successfully recomputed.
+
 ## Legacy and mixed verdicts
 
 Stored JSON without `scoreSource`, `rubricVersion`, and `requirementSetId` is
@@ -347,10 +355,12 @@ Stored JSON without `scoreSource`, `rubricVersion`, and `requirementSetId` is
 - The native results page offers an explicit whole-job regrade with an estimated cost. Regrading
   covers every non-hidden listing, reuses saved review and photo analysis, and runs triage only; at
   the measured ~$0.006/listing, a 54-listing job is estimated at ~$0.32.
-- Brief changes, classifier-policy changes, and requirement-set mismatches share one
-  `Regrade needed` presentation with distinct reasons. A brief change preserves the prior verdicts
-  and paid evidence for audit, labels them as reflecting the previous brief, and excludes them from
-  current peer ranks until a fully completed whole-job regrade.
+- Brief changes, evidence improvements, classifier-policy changes, and requirement-set mismatches
+  share one `Regrade needed` presentation with distinct reasons. A brief change preserves the prior
+  verdicts and paid evidence for audit, labels them as reflecting the previous brief, and excludes
+  them from current peer ranks until a fully completed whole-job regrade. Evidence-improved
+  verdicts remain valid and ranked, but identify the affected listings as having been graded from
+  thinner evidence.
 - Never interleave old model-authored or old-classifier scores with current-policy scores.
 
 CLI/report output follows the same source/version and grouping rules.

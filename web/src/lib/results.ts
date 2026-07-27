@@ -162,6 +162,7 @@ export interface ParsedTriage {
 export type TriageComparisonStatus =
   | 'ranked'
   | 'regrade_required'
+  | 'regrade_suggested'
   | 'insufficient_evidence'
   | 'legacy'
   | 'stale_requirement_set'
@@ -171,6 +172,7 @@ export type TriageComparisonStatus =
 export type ActiveTriageComparison = TriageComparabilityDescriptor;
 export type TriageRegradeReason =
   | 'brief_changed'
+  | 'evidence_improved'
   | 'classifier_policy_changed'
   | 'requirement_set_mismatch';
 export type AffordabilityStatus =
@@ -182,6 +184,8 @@ export const TRIAGE_REGRADE_REASON_COPY: Record<
 > = {
   brief_changed:
     'The quality brief changed, so these verdicts reflect the previous brief.',
+  evidence_improved:
+    'Some listings now have materially richer evidence than their saved verdicts used.',
   classifier_policy_changed:
     'Some verdicts use an older classifier policy.',
   requirement_set_mismatch:
@@ -190,6 +194,7 @@ export const TRIAGE_REGRADE_REASON_COPY: Record<
 
 const TRIAGE_REGRADE_REASON_ORDER: TriageRegradeReason[] = [
   'brief_changed',
+  'evidence_improved',
   'classifier_policy_changed',
   'requirement_set_mismatch',
 ];
@@ -372,9 +377,20 @@ export function getTriageRegradeReasons(
   listings: ReviewJobListing[],
   activeComparison: ActiveTriageComparison | null,
   briefChanged: boolean,
+  evidenceImproved = false,
 ): TriageRegradeReason[] {
   const reasons = new Set<TriageRegradeReason>();
   if (briefChanged) reasons.add('brief_changed');
+  if (
+    evidenceImproved
+    || listings.some(
+      (listing) =>
+        !listing.hidden
+        && listing.analysis?.regradeSuggested === true,
+    )
+  ) {
+    reasons.add('evidence_improved');
+  }
 
   for (const listing of listings) {
     if (listing.hidden) continue;
@@ -396,10 +412,14 @@ export function getTriageRegradeReasons(
 export function getTriageComparisonStatus(
   triage: ParsedTriage | null,
   activeComparison: ActiveTriageComparison | null,
-  options: { regradeRequired?: boolean } = {},
+  options: {
+    regradeRequired?: boolean;
+    regradeSuggested?: boolean;
+  } = {},
 ): TriageComparisonStatus {
   if (!triage) return 'unscored';
   if (options.regradeRequired) return 'regrade_required';
+  if (options.regradeSuggested) return 'regrade_suggested';
   if (triage.scoreSource === 'model_legacy') return 'legacy';
   if (
     activeComparison

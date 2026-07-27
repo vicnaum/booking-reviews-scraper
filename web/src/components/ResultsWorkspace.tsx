@@ -119,6 +119,7 @@ function formatPercent(value: number | null): string {
 function comparisonRank(status: ResultsComparisonStatus): number {
   switch (status) {
     case 'ranked':
+    case 'regrade_suggested':
       return 0;
     case 'duplicate_conflict':
       return 1;
@@ -134,6 +135,12 @@ function comparisonRank(status: ResultsComparisonStatus): number {
     case 'unscored':
       return 6;
   }
+}
+
+function isPeerComparableStatus(
+  status: ResultsComparisonStatus,
+): boolean {
+  return status === 'ranked' || status === 'regrade_suggested';
 }
 
 function displayedTier(
@@ -217,6 +224,13 @@ function VerdictSourceBadge({
     return (
       <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-1 text-[10px] font-semibold text-amber-100">
         Regrade needed · brief changed
+      </span>
+    );
+  }
+  if (status === 'regrade_suggested') {
+    return (
+      <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-1 text-[10px] font-semibold text-amber-100">
+        Regrade needed · evidence improved
       </span>
     );
   }
@@ -1482,10 +1496,12 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       data.listings,
       activeTriageComparison,
       data.job.regradeRequired,
+      data.job.regradeSuggested,
     ),
     [
       activeTriageComparison,
       data.job.regradeRequired,
+      data.job.regradeSuggested,
       data.listings,
     ],
   );
@@ -1520,13 +1536,20 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
   const comparisonGateActive =
     activeTriageComparison != null
     || data.job.regradeRequired
+    || data.job.regradeSuggested
     || materialDuplicateConflictKeys.size > 0;
   const resolveComparisonStatus = useCallback(
-    (triage: ParsedTriage | null) =>
+    (
+      triage: ParsedTriage | null,
+      regradeSuggested = false,
+    ) =>
       getTriageComparisonStatus(
         triage,
         activeTriageComparison,
-        { regradeRequired: data.job.regradeRequired },
+        {
+          regradeRequired: data.job.regradeRequired,
+          regradeSuggested,
+        },
       ),
     [activeTriageComparison, data.job.regradeRequired],
   );
@@ -1536,6 +1559,7 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         ? 'duplicate_conflict'
         : resolveComparisonStatus(
             getListingResultsSnapshot(listing).triage,
+            listing.analysis?.regradeSuggested === true,
           ),
     [materialDuplicateConflictKeys, resolveComparisonStatus],
   );
@@ -1674,9 +1698,13 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       if (!sortAsc) return next;
       if (!comparisonGateActive) return [...next].reverse();
       const ranked = next.filter((listing) =>
-        resolveListingComparisonStatus(listing) === 'ranked');
+        isPeerComparableStatus(
+          resolveListingComparisonStatus(listing),
+        ));
       const unranked = next.filter((listing) =>
-        resolveListingComparisonStatus(listing) !== 'ranked');
+        !isPeerComparableStatus(
+          resolveListingComparisonStatus(listing),
+        ));
       return [...ranked.reverse(), ...unranked];
     }
 
@@ -1790,7 +1818,10 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
           resolveListingComparisonStatus(listing);
         const tier = triage?.tier ?? 'unscored';
         if (
-          (!comparisonGateActive || comparisonStatus === 'ranked')
+          (
+            !comparisonGateActive
+            || isPeerComparableStatus(comparisonStatus)
+          )
           && !activeTiers.has(tier)
         ) {
           return false;
@@ -1858,7 +1889,9 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
         listing.staySnapshot.bookingEligibility.actionable
         && (
         !comparisonGateActive
-        || resolveListingComparisonStatus(listing) === 'ranked'
+        || isPeerComparableStatus(
+          resolveListingComparisonStatus(listing),
+        )
         ),
     );
     const topPicks = comparable.filter(
@@ -1880,7 +1913,9 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
       const triage = getListingResultsSnapshot(listing).triage;
       if (
         comparisonGateActive
-        && resolveListingComparisonStatus(listing) !== 'ranked'
+        && !isPeerComparableStatus(
+          resolveListingComparisonStatus(listing),
+        )
       ) {
         continue;
       }
@@ -2101,7 +2136,8 @@ export default function ResultsWorkspace({ initialData }: ResultsWorkspaceProps)
                 : 'Unscored listings'
             : null;
         const showPeerRank =
-          !comparisonGateActive || comparisonStatus === 'ranked';
+          !comparisonGateActive
+          || isPeerComparableStatus(comparisonStatus);
         const priceInfo = getPriceDisplayInfo(listing, priceDisplay, {
           checkin: data.job.checkin,
           checkout: data.job.checkout,

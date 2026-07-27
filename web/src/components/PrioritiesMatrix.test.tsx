@@ -34,6 +34,7 @@ function listing(
   options: {
     insufficient?: boolean;
     evidenceGaps?: string[];
+    regradeSuggested?: boolean;
   } = {},
 ): ReviewJobListing {
   return {
@@ -72,6 +73,7 @@ function listing(
       overByPercent: null,
     },
     analysis: {
+      regradeSuggested: options.regradeSuggested ?? false,
       triage: {
         scoreSource: 'deterministic_rubric',
         rubricVersion: TRIAGE_RUBRIC_VERSION,
@@ -186,6 +188,26 @@ test('priorities matrix preserves paid evidence after a quality brief edit', () 
   assert.match(html, /42 of 250 AI-analyzed reviews/);
   assert.match(html, /Regrade whole job/);
   assert.match(html, /Estimated triage cost: \$0\.012/);
+});
+
+test('evidence improvement reuses regrade presentation without invalidating ranking', () => {
+  const html = renderToStaticMarkup(
+    <PrioritiesMatrix
+      listings={[
+        listing('sleep-test', { regradeSuggested: true }),
+      ]}
+      regradeReasons={['evidence_improved']}
+      onRegrade={() => undefined}
+    />,
+  );
+
+  assert.match(html, /Regrade needed to use improved evidence/);
+  assert.match(html, /materially richer evidence/);
+  assert.match(
+    html,
+    /Existing verdicts remain comparable and ranked/,
+  );
+  assert.match(html, /Comparable ranked results/);
 });
 
 test('duplicate conflicts keep their evidence in a separate unranked group', () => {

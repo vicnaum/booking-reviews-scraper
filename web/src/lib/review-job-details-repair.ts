@@ -17,26 +17,23 @@ import {
   getReviewJobArtifactRunDir,
   isReviewJobArtifactRootAvailable,
 } from './reviewJobArtifacts.js';
+import {
+  TRIAGE_DETAILS_CORE_FIELDS,
+  didTriageEvidenceMateriallyImprove,
+  fingerprintTriageEvidenceFiles,
+  getTriageDetailsCoreCoverage,
+  parseTriageEvidenceFingerprint,
+  type TriageDetailsCoreCoverage,
+  type TriageDetailsCoreField,
+  type TriageEvidenceFingerprint,
+} from '../../../src/triage-evidence.js';
 
 export const DETAILS_REPAIR_PLAN_VERSION = 1;
 export const DETAILS_REPAIR_PLAN_FILE = 'details-repair-plan.json';
 
 export type DetailsRepairPlatform = 'airbnb';
-export type DetailsRepairCoreField =
-  | 'title'
-  | 'rating'
-  | 'reviewCount'
-  | 'subRatings'
-  | 'amenities';
-
-export interface DetailsRepairCoverage {
-  title: boolean;
-  rating: boolean;
-  reviewCount: boolean;
-  subRatings: boolean;
-  amenities: boolean;
-  total: number;
-}
+export type DetailsRepairCoreField = TriageDetailsCoreField;
+export type DetailsRepairCoverage = TriageDetailsCoreCoverage;
 
 export interface DetailsRepairListingInput {
   rowId: string;
@@ -46,6 +43,9 @@ export interface DetailsRepairListingInput {
   url: string;
   detailsStatus: string;
   details: unknown;
+  triageEvidenceFingerprint: unknown;
+  regradeSuggested: boolean;
+  hasTriageVerdict: boolean;
 }
 
 export interface DetailsRepairJobInput {
@@ -109,6 +109,15 @@ export interface DetailsRepairApplyUpdate {
   listingId: string;
   details: Record<string, unknown>;
   detailsStatus: 'completed' | 'partial';
+  triageEvidenceFingerprint: TriageEvidenceFingerprint | null;
+  regradeSuggested: boolean;
+}
+
+export interface DetailsRepairEvidenceReconciliationUpdate {
+  analysisId: string;
+  listingId: string;
+  triageEvidenceFingerprint: TriageEvidenceFingerprint;
+  regradeSuggested: true;
 }
 
 type RunBatch = (
@@ -131,11 +140,7 @@ interface StageDetailsRepairInput {
 }
 
 const CORE_FIELDS: DetailsRepairCoreField[] = [
-  'title',
-  'rating',
-  'reviewCount',
-  'subRatings',
-  'amenities',
+  ...TRIAGE_DETAILS_CORE_FIELDS,
 ];
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -145,56 +150,10 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
-function nonEmptyString(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
-  const normalized = value.trim();
-  return normalized || null;
-}
-
-function finiteNumber(value: unknown): number | null {
-  if (
-    value == null
-    || (typeof value === 'string' && value.trim() === '')
-  ) {
-    return null;
-  }
-  const parsed = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function hasSubRatings(value: unknown): boolean {
-  const record = asRecord(value);
-  return !!record && Object.values(record).some(
-    (rating) => finiteNumber(rating) != null,
-  );
-}
-
-function hasAmenities(value: unknown): boolean {
-  return Array.isArray(value) && value.some((amenity) => {
-    if (typeof amenity === 'string') {
-      return nonEmptyString(amenity) != null;
-    }
-    return nonEmptyString(asRecord(amenity)?.name) != null;
-  });
-}
-
 export function getDetailsRepairCoverage(
   value: unknown,
 ): DetailsRepairCoverage {
-  const details = asRecord(value);
-  const coverage = {
-    title: nonEmptyString(details?.title) != null,
-    rating: finiteNumber(details?.rating) != null,
-    reviewCount:
-      finiteNumber(details?.reviewCount) != null
-      && (finiteNumber(details?.reviewCount) as number) >= 0,
-    subRatings: hasSubRatings(details?.subRatings),
-    amenities: hasAmenities(details?.amenities),
-  };
-  return {
-    ...coverage,
-    total: CORE_FIELDS.filter((field) => coverage[field]).length,
-  };
+  return getTriageDetailsCoreCoverage(value);
 }
 
 function cloneJson<T>(value: T): T {
@@ -347,6 +306,66 @@ function getManifestEntry(
     ([, entry]) =>
       getListingMatchKey(entry.platform, entry.url) === matchKey,
   ) ?? null;
+}
+
+function getTriageEvidenceFingerprintFromArtifacts(input: {
+  artifactRoot: string;
+  entry: ManifestEntry;
+}): TriageEvidenceFingerprint | null {
+  if (
+    input.entry.triage.status !== 'fetched'
+    || !input.entry.triage.file
+    || !input.entry.details.file
+  ) {
+    return null;
+  }
+  const triagePath = resolveArtifactFile(
+    input.artifactRoot,
+    input.entry.triage.file,
+    'Triage artifact path',
+  );
+  const detailsPath = resolveArtifactFile(
+    input.artifactRoot,
+    input.entry.details.file,
+    'Details artifact path',
+  );
+  assertRegularFile(triagePath, 'Triage artifact');
+  assertRegularFile(detailsPath, 'Details artifact');
+  const triage = asRecord(
+    JSON.parse(fs.readFileSync(triagePath, 'utf8')) as unknown,
+  );
+  const evidenceGaps = new Set([
+    ...(Array.isArray(input.entry.triage.evidenceGaps)
+      ? input.entry.triage.evidenceGaps
+      : []),
+    ...(Array.isArray(triage?.evidenceGaps)
+      ? triage.evidenceGaps
+      : []),
+  ]);
+  const optionalArtifactPath = (
+    relativePath: string | undefined,
+    gap: 'reviews' | 'photos',
+  ): string | null => {
+    if (!relativePath || evidenceGaps.has(gap)) return null;
+    const artifactPath = resolveArtifactFile(
+      input.artifactRoot,
+      relativePath,
+      `${gap} evidence artifact path`,
+    );
+    return fs.existsSync(artifactPath) ? artifactPath : null;
+  };
+
+  return fingerprintTriageEvidenceFiles({
+    detailsFile: detailsPath,
+    reviewsFile: optionalArtifactPath(
+      input.entry.aiReviews.file,
+      'reviews',
+    ),
+    photosFile: optionalArtifactPath(
+      input.entry.aiPhotos.file,
+      'photos',
+    ),
+  });
 }
 
 function manifestInvariantValue(
@@ -901,33 +920,12 @@ export function readReviewJobDetailsRepairPlan(
   return plan;
 }
 
-export function validateReviewJobDetailsRepairForApply(input: {
-  plan: DetailsRepairPlan;
-  job: DetailsRepairJobInput;
-}): DetailsRepairApplyUpdate[] {
-  const { plan, job } = input;
-  assertIdleJob(job);
-  if (job.id !== plan.jobId) {
-    throw new Error(
-      `Repair plan is for ${plan.jobId}, not ${job.id}`,
-    );
-  }
-  if (path.resolve(job.artifactRoot ?? '') !== plan.sourceArtifactRoot) {
-    throw new Error(
-      'Review job artifact root changed after the dry run; refusing apply',
-    );
-  }
-  if (job.reportPath !== plan.sourceReportPath) {
-    throw new Error(
-      'Review job report path changed after the dry run; refusing apply',
-    );
-  }
-  if (job.sourceStateFingerprint !== plan.sourceStateFingerprint) {
-    throw new Error(
-      'Review job state changed after the dry run; refusing apply',
-    );
-  }
-
+function validateDetailsRepairArtifacts(
+  plan: DetailsRepairPlan,
+): {
+  sourceManifest: BatchManifest;
+  stagedManifest: BatchManifest;
+} {
   const sourceManifest = readManifest(plan.sourceArtifactRoot);
   if (
     fingerprintDetailsRepairValue(sourceManifest)
@@ -980,6 +978,38 @@ export function validateReviewJobDetailsRepairForApply(input: {
   ) {
     throw new Error('Staged report changed after the dry run');
   }
+  return { sourceManifest, stagedManifest };
+}
+
+export function validateReviewJobDetailsRepairForApply(input: {
+  plan: DetailsRepairPlan;
+  job: DetailsRepairJobInput;
+}): DetailsRepairApplyUpdate[] {
+  const { plan, job } = input;
+  assertIdleJob(job);
+  if (job.id !== plan.jobId) {
+    throw new Error(
+      `Repair plan is for ${plan.jobId}, not ${job.id}`,
+    );
+  }
+  if (path.resolve(job.artifactRoot ?? '') !== plan.sourceArtifactRoot) {
+    throw new Error(
+      'Review job artifact root changed after the dry run; refusing apply',
+    );
+  }
+  if (job.reportPath !== plan.sourceReportPath) {
+    throw new Error(
+      'Review job report path changed after the dry run; refusing apply',
+    );
+  }
+  if (job.sourceStateFingerprint !== plan.sourceStateFingerprint) {
+    throw new Error(
+      'Review job state changed after the dry run; refusing apply',
+    );
+  }
+
+  const { sourceManifest, stagedManifest } =
+    validateDetailsRepairArtifacts(plan);
 
   const currentListings = new Map(
     job.listings.map((listing) => [listing.rowId, listing]),
@@ -1140,11 +1170,45 @@ export function validateReviewJobDetailsRepairForApply(input: {
           + `${planned.listingId}`,
         );
       }
+      const consumedEvidence =
+        parseTriageEvidenceFingerprint(
+          current.triageEvidenceFingerprint,
+        )
+        ?? getTriageEvidenceFingerprintFromArtifacts({
+          artifactRoot: plan.sourceArtifactRoot,
+          entry: sourceEntry,
+        });
+      const refreshedEvidence =
+        getTriageEvidenceFingerprintFromArtifacts({
+          artifactRoot: plan.stagedArtifactRoot,
+          entry,
+        });
+      if (
+        current.hasTriageVerdict
+        && (!consumedEvidence || !refreshedEvidence)
+      ) {
+        throw new Error(
+          `Cannot fingerprint saved triage evidence for `
+          + `${planned.listingId}`,
+        );
+      }
+      const evidenceImproved =
+        !!consumedEvidence
+        && !!refreshedEvidence
+        && didTriageEvidenceMateriallyImprove(
+          consumedEvidence,
+          refreshedEvidence,
+        );
       updates.push({
         analysisId: planned.analysisId,
         listingId: planned.listingId,
         details: record,
         detailsStatus: toDbDetailsStatus(planned.afterDetailsStatus),
+        triageEvidenceFingerprint:
+          current.hasTriageVerdict ? consumedEvidence : null,
+        regradeSuggested:
+          current.regradeSuggested
+          || (current.hasTriageVerdict && evidenceImproved),
       });
     }
   }
@@ -1152,5 +1216,140 @@ export function validateReviewJobDetailsRepairForApply(input: {
   if (updates.length === 0) {
     throw new Error('Repair plan contains no persisted details updates');
   }
+  return updates;
+}
+
+export function validateAppliedDetailsRepairForEvidenceReconciliation(
+  input: {
+    plan: DetailsRepairPlan;
+    job: DetailsRepairJobInput;
+  },
+): DetailsRepairEvidenceReconciliationUpdate[] {
+  const { plan, job } = input;
+  assertIdleJob(job);
+  if (job.id !== plan.jobId) {
+    throw new Error(
+      `Repair plan is for ${plan.jobId}, not ${job.id}`,
+    );
+  }
+  if (path.resolve(job.artifactRoot ?? '') !== plan.stagedArtifactRoot) {
+    throw new Error(
+      'Review job does not point at the applied repair artifact root',
+    );
+  }
+  if (job.reportPath !== plan.stagedReportPath) {
+    throw new Error(
+      'Review job does not point at the applied repair report',
+    );
+  }
+  const { sourceManifest, stagedManifest } =
+    validateDetailsRepairArtifacts(plan);
+  const currentListings = new Map(
+    job.listings.map((listing) => [listing.rowId, listing]),
+  );
+  const updates: DetailsRepairEvidenceReconciliationUpdate[] = [];
+
+  for (const planned of plan.listings) {
+    if (planned.outcome !== 'repaired') continue;
+    const current = currentListings.get(planned.rowId);
+    if (
+      !current
+      || current.analysisId !== planned.analysisId
+      || current.listingId !== planned.listingId
+      || current.platform !== planned.platform
+      || current.url !== planned.url
+    ) {
+      throw new Error(
+        `Applied repair listing no longer matches: ${planned.listingId}`,
+      );
+    }
+    if (
+      fingerprintDetailsRepairValue(current.details)
+      !== planned.afterDetailsFingerprint
+    ) {
+      throw new Error(
+        `Applied repair details changed: ${planned.listingId}`,
+      );
+    }
+    if (!current.hasTriageVerdict) continue;
+
+    const sourceEntry = getManifestEntry(
+      sourceManifest,
+      planned.platform,
+      planned.url,
+    )?.[1];
+    const stagedEntry = getManifestEntry(
+      stagedManifest,
+      planned.platform,
+      planned.url,
+    )?.[1];
+    if (!sourceEntry || !stagedEntry) {
+      throw new Error(
+        `Applied repair artifacts are missing ${planned.listingId}`,
+      );
+    }
+    const sourceDetailsPath = resolveArtifactFile(
+      plan.sourceArtifactRoot,
+      sourceEntry.details.file ?? '',
+      'Source details path',
+    );
+    const stagedDetailsPath = resolveArtifactFile(
+      plan.stagedArtifactRoot,
+      stagedEntry.details.file ?? '',
+      'Staged details path',
+    );
+    assertRegularFile(sourceDetailsPath, 'Source details artifact');
+    assertRegularFile(stagedDetailsPath, 'Staged details artifact');
+    if (
+      fingerprintFile(sourceDetailsPath)
+      !== planned.sourceDetailsArtifactFingerprint
+      || fingerprintDetailsRepairValue(
+        JSON.parse(fs.readFileSync(stagedDetailsPath, 'utf8')),
+      ) !== planned.afterDetailsFingerprint
+    ) {
+      throw new Error(
+        `Applied repair evidence artifacts changed: ${planned.listingId}`,
+      );
+    }
+
+    const storedEvidence = parseTriageEvidenceFingerprint(
+      current.triageEvidenceFingerprint,
+    );
+    const consumedEvidence =
+      storedEvidence
+      ?? getTriageEvidenceFingerprintFromArtifacts({
+        artifactRoot: plan.sourceArtifactRoot,
+        entry: sourceEntry,
+      });
+    const refreshedEvidence =
+      getTriageEvidenceFingerprintFromArtifacts({
+        artifactRoot: plan.stagedArtifactRoot,
+        entry: stagedEntry,
+      });
+    if (!consumedEvidence || !refreshedEvidence) {
+      throw new Error(
+        `Cannot reconcile triage evidence for ${planned.listingId}`,
+      );
+    }
+    if (current.regradeSuggested && storedEvidence) {
+      continue;
+    }
+    if (
+      !current.regradeSuggested
+      && !didTriageEvidenceMateriallyImprove(
+        consumedEvidence,
+        refreshedEvidence,
+      )
+    ) {
+      continue;
+    }
+    updates.push({
+      analysisId: current.analysisId,
+      listingId: current.listingId,
+      triageEvidenceFingerprint: consumedEvidence,
+      regradeSuggested: true,
+    });
+  }
+
   return updates;
 }

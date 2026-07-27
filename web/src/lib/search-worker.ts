@@ -75,6 +75,9 @@ import type { SearchResult } from '../types.js';
 import { filterResultsForRequest } from './resultFilters.js';
 import { parseStaySnapshot } from '../../../src/stay-snapshot.js';
 import {
+  parseTriageEvidenceFingerprint,
+} from '../../../src/triage-evidence.js';
+import {
   computeReviewJobSnapshotAffordability,
   getReviewJobStaySnapshotReadModel,
   resolveStaySnapshotTtlMs,
@@ -757,6 +760,9 @@ interface ReviewJobListingAnalysisSnapshot {
   aiReviews: Prisma.InputJsonValue | typeof Prisma.DbNull;
   aiPhotos: Prisma.InputJsonValue | typeof Prisma.DbNull;
   triage: Prisma.InputJsonValue | typeof Prisma.DbNull;
+  triageEvidenceFingerprint:
+    Prisma.InputJsonValue | typeof Prisma.DbNull;
+  regradeSuggested: boolean;
   reviewCount: number | null;
   photoCount: number | null;
   aiReviewsCostUsd: number;
@@ -791,6 +797,8 @@ function createReviewJobAnalysisSnapshot(
       aiReviews: Prisma.JsonValue | null;
       aiPhotos: Prisma.JsonValue | null;
       triage: Prisma.JsonValue | null;
+      triageEvidenceFingerprint: Prisma.JsonValue | null;
+      regradeSuggested: boolean;
       reviewCount: number | null;
       photoCount: number | null;
       aiReviewsCostUsd: number;
@@ -822,6 +830,10 @@ function createReviewJobAnalysisSnapshot(
     aiReviews: toStoredAnalysisValue(listing.analysis.aiReviews),
     aiPhotos: toStoredAnalysisValue(listing.analysis.aiPhotos),
     triage: toStoredAnalysisValue(listing.analysis.triage),
+    triageEvidenceFingerprint: toStoredAnalysisValue(
+      listing.analysis.triageEvidenceFingerprint,
+    ),
+    regradeSuggested: listing.analysis.regradeSuggested,
     reviewCount: listing.analysis.reviewCount,
     photoCount: listing.analysis.photoCount,
     aiReviewsCostUsd: listing.analysis.aiReviewsCostUsd,
@@ -856,6 +868,9 @@ async function restoreReviewJobAnalysisSnapshots(
         aiReviews: snapshot.aiReviews,
         aiPhotos: snapshot.aiPhotos,
         triage: snapshot.triage,
+        triageEvidenceFingerprint:
+          snapshot.triageEvidenceFingerprint,
+        regradeSuggested: snapshot.regradeSuggested,
         reviewCount: snapshot.reviewCount,
         photoCount: snapshot.photoCount,
         aiReviewsCostUsd: snapshot.aiReviewsCostUsd,
@@ -880,6 +895,9 @@ async function restoreReviewJobAnalysisSnapshots(
         aiReviews: snapshot.aiReviews,
         aiPhotos: snapshot.aiPhotos,
         triage: snapshot.triage,
+        triageEvidenceFingerprint:
+          snapshot.triageEvidenceFingerprint,
+        regradeSuggested: snapshot.regradeSuggested,
         reviewCount: snapshot.reviewCount,
         photoCount: snapshot.photoCount,
         aiReviewsCostUsd: snapshot.aiReviewsCostUsd,
@@ -1173,6 +1191,19 @@ async function persistReviewJobManifestEntryToDb(input: {
   const aiReviews = readArtifactJson(input.artifactRoot, input.entry.aiReviews.file);
   const aiPhotos = readArtifactJson(input.artifactRoot, input.entry.aiPhotos.file);
   const triage = readArtifactJson(input.artifactRoot, input.entry.triage.file);
+  const triageEvidenceFingerprint =
+    parseTriageEvidenceFingerprint(triage?.evidenceFingerprint);
+  const triageWasRefreshed =
+    !!triageEvidenceFingerprint
+    && input.entry.triage.status === 'fetched'
+    && (input.currentPhase === 'triage' || input.finalize === true);
+  const refreshedEvidenceFields = triageWasRefreshed
+    ? {
+        triageEvidenceFingerprint:
+          triageEvidenceFingerprint as unknown as Prisma.InputJsonValue,
+        regradeSuggested: false,
+      }
+    : {};
   const staySnapshot = parseStaySnapshot(details?.staySnapshot);
   const aiCostFields = getManifestEntryAiCostFields(input.entry);
   const terminalStatus = summarizeManifestEntryStatus(input.entry);
@@ -1217,6 +1248,7 @@ async function persistReviewJobManifestEntryToDb(input: {
         aiReviews: aiReviews == null ? Prisma.DbNull : (aiReviews as Prisma.InputJsonValue),
         aiPhotos: aiPhotos == null ? Prisma.DbNull : (aiPhotos as Prisma.InputJsonValue),
         triage: triage == null ? Prisma.DbNull : (triage as Prisma.InputJsonValue),
+        ...refreshedEvidenceFields,
         reviewCount: input.entry.reviews.count ?? null,
         photoCount: input.entry.photos.count ?? null,
         aiReviewsCostUsd: aiCostFields.aiReviewsCostUsd,
@@ -1240,6 +1272,7 @@ async function persistReviewJobManifestEntryToDb(input: {
         aiReviews: aiReviews == null ? Prisma.DbNull : (aiReviews as Prisma.InputJsonValue),
         aiPhotos: aiPhotos == null ? Prisma.DbNull : (aiPhotos as Prisma.InputJsonValue),
         triage: triage == null ? Prisma.DbNull : (triage as Prisma.InputJsonValue),
+        ...refreshedEvidenceFields,
         reviewCount: input.entry.reviews.count ?? null,
         photoCount: input.entry.photos.count ?? null,
         aiReviewsCostUsd: aiCostFields.aiReviewsCostUsd,
@@ -2150,6 +2183,16 @@ async function runReviewJobAnalysis(
         select: { status: true },
       });
       overallStatus = summarizeAnalysisStatus(finalAnalyses);
+      const regradeSuggestedListingCount =
+        await tx.reviewJobListingAnalysis.count({
+          where: {
+            jobListing: {
+              jobId: reviewJobId,
+              hidden: false,
+            },
+            regradeSuggested: true,
+          },
+        });
       const resultsReady =
         overallStatus === 'completed' || overallStatus === 'partial';
       const aggregatedAiCosts =
@@ -2182,6 +2225,7 @@ async function runReviewJobAnalysis(
                   jobRecord.regradeRequired,
                   overallStatus,
                 ),
+          regradeSuggested: regradeSuggestedListingCount > 0,
           artifactRoot,
           reportPath,
           ...aggregatedAiCosts,
@@ -2254,6 +2298,16 @@ async function runReviewJobAnalysis(
                 tx,
                 reviewJobId,
               );
+        const regradeSuggestedListingCount =
+          await tx.reviewJobListingAnalysis.count({
+            where: {
+              jobListing: {
+                jobId: reviewJobId,
+                hidden: false,
+              },
+              regradeSuggested: true,
+            },
+          });
         await tx.reviewJob.update({
           where: { id: reviewJobId },
           data: {
@@ -2265,6 +2319,7 @@ async function runReviewJobAnalysis(
             analysisErrorMessage: error.message,
             analysisCompletedAt: completedAt,
             analysisDurationMs: completedAt.getTime() - startedAt.getTime(),
+            regradeSuggested: regradeSuggestedListingCount > 0,
             artifactRoot,
             reportPath: null,
             ...aggregatedAiCosts,

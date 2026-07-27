@@ -302,6 +302,20 @@ export default function PrioritiesMatrix({
 }) {
   const regradeNeeded = regradeReasons.length > 0;
   const briefChanged = regradeReasons.includes('brief_changed');
+  const evidenceImproved =
+    regradeReasons.includes('evidence_improved');
+  const verdictsRequireRegrade = regradeReasons.some(
+    (reason) => reason !== 'evidence_improved',
+  );
+  const suggestedListingKeys = useMemo(
+    () => new Set(
+      listings
+        .filter((listing) =>
+          listing.analysis?.regradeSuggested === true)
+        .map((listing) => `${listing.platform}:${listing.id}`),
+    ),
+    [listings],
+  );
   const wholeJobListingCount =
     regradeListingCount
     ?? listings.filter((listing) => !listing.hidden).length;
@@ -381,7 +395,9 @@ export default function PrioritiesMatrix({
           <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-amber-300/20 bg-amber-300/[0.08] p-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-xs font-semibold text-amber-100">
-                Regrade needed before comparing verdicts
+                {verdictsRequireRegrade
+                  ? 'Regrade needed before comparing verdicts'
+                  : 'Regrade needed to use improved evidence'}
               </p>
               <ul className="mt-1 max-w-3xl space-y-1 text-[11px] leading-5 text-amber-100/70">
                 {regradeReasons.map((reason) => (
@@ -391,13 +407,27 @@ export default function PrioritiesMatrix({
                 ))}
               </ul>
               <p className="mt-1 max-w-3xl text-[11px] leading-5 text-amber-100/70">
-                Evidence snippets, frequencies, and years remain valid audit
-                data.
-                {briefChanged
-                  ? ' The priority columns reflect the previous brief.'
-                  : ' Some verdicts use a different policy or priority set.'}
-                {' '}Peer comparison is not current until the whole job is
-                regraded. Regrading reuses saved review and photo analysis and
+                {verdictsRequireRegrade
+                  ? (
+                    <>
+                      Evidence snippets, frequencies, and years remain valid
+                      audit data.
+                      {briefChanged
+                        ? ' The priority columns reflect the previous brief.'
+                        : ' Some verdicts use a different policy or priority set.'}
+                      {' '}Peer comparison is not current until the whole job
+                      is regraded.
+                    </>
+                  )
+                  : evidenceImproved
+                    ? (
+                      <>
+                        Existing verdicts remain comparable and ranked, but
+                        affected listings were graded from thinner evidence.
+                      </>
+                    )
+                    : null}
+                {' '}Regrading reuses saved review and photo analysis and
                 calls only triage.
               </p>
               <p className="mt-1 text-[11px] leading-5 text-amber-100/60">
@@ -489,9 +519,17 @@ export default function PrioritiesMatrix({
             </thead>
             <tbody>
               {rows.map((row, index) => {
-                const duplicateConflict = duplicateConflictKeys.has(
-                  `${row.platform}:${row.id}`,
-                );
+                const listingKey = `${row.platform}:${row.id}`;
+                const duplicateConflict =
+                  duplicateConflictKeys.has(listingKey);
+                const evidenceStale =
+                  suggestedListingKeys.has(listingKey);
+                const rowRegradeNeeded =
+                  (
+                    briefChanged
+                    && row.rankingStatus !== 'unscored'
+                  )
+                  || evidenceStale;
                 const showGroup =
                   index === 0
                   || rowGroupKey(row) !== rowGroupKey(rows[index - 1]);
@@ -538,8 +576,7 @@ export default function PrioritiesMatrix({
                             className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.1em] ${
                               duplicateConflict
                                 ? statusClassName('unmet')
-                                : briefChanged
-                                && row.rankingStatus !== 'unscored'
+                                : rowRegradeNeeded
                                 ? statusClassName('partial')
                                 : row.rankingStatus === 'ranked'
                                 ? statusClassName('met')
@@ -550,8 +587,7 @@ export default function PrioritiesMatrix({
                           >
                             {duplicateConflict
                               ? 'Cross-platform conflict'
-                              : briefChanged
-                              && row.rankingStatus !== 'unscored'
+                              : rowRegradeNeeded
                               ? 'Regrade needed'
                               : rankingLabel(row.rankingStatus)}
                           </span>

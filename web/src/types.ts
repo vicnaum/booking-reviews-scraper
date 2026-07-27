@@ -210,6 +210,8 @@ export interface ReviewJobListingAnalysis {
   aiReviews: Record<string, unknown> | null;
   aiPhotos: Record<string, unknown> | null;
   triage: Record<string, unknown> | null;
+  triageEvidenceFingerprint: Record<string, unknown> | null;
+  regradeSuggested: boolean;
   reviewCount: number | null;
   reviewSample: ReviewAnalysisSample;
   photoCount: number | null;
@@ -261,6 +263,7 @@ export interface ReviewJobState {
   location: string | null;
   prompt: string | null;
   regradeRequired: boolean;
+  regradeSuggested: boolean;
   boundingBox: BoundingBox | null;
   circle: CircleFilter | null;
   poi: MapPoint | null;
