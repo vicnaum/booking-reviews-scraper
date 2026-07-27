@@ -169,6 +169,12 @@ export type TriageComparisonStatus =
   | 'stale_classifier_policy'
   | 'unscored';
 
+export function isPeerComparableTriageStatus(
+  status: TriageComparisonStatus,
+): boolean {
+  return status === 'ranked' || status === 'regrade_suggested';
+}
+
 export type ActiveTriageComparison = TriageComparabilityDescriptor;
 export type TriageRegradeReason =
   | 'brief_changed'
@@ -419,7 +425,6 @@ export function getTriageComparisonStatus(
 ): TriageComparisonStatus {
   if (!triage) return 'unscored';
   if (options.regradeRequired) return 'regrade_required';
-  if (options.regradeSuggested) return 'regrade_suggested';
   if (triage.scoreSource === 'model_legacy') return 'legacy';
   if (
     activeComparison
@@ -436,6 +441,9 @@ export function getTriageComparisonStatus(
   if (triage.rankingStatus === 'insufficient_evidence') {
     return 'insufficient_evidence';
   }
+  // Evidence improvement is advisory and must not override a status that
+  // already excludes the verdict from peer comparison.
+  if (options.regradeSuggested) return 'regrade_suggested';
   return 'ranked';
 }
 

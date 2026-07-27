@@ -10,6 +10,7 @@ import {
   getTriageComparisonStatus,
   getTriageRegradeReasons,
   getTriageRegradeListingCount,
+  isPeerComparableTriageStatus,
   matchesAffordabilityFilter,
 } from '../web/src/lib/results.js';
 import type { ReviewJobListing } from '../web/src/types.js';
@@ -291,6 +292,102 @@ test('older classifier policy is preserved but excluded from comparison', () => 
     ),
     'stale_classifier_policy',
   );
+});
+
+test('evidence improvement never overrides a status that excludes peer comparison', () => {
+  const activeComparison =
+    getCurrentTriageComparability('reqset_active');
+  const cases = [
+    {
+      name: 'legacy model-authored verdict',
+      listing: listing('legacy-suggested', {
+        fitScore: 100,
+        tier: 'top_pick',
+      }, true),
+      expected: 'legacy',
+    },
+    {
+      name: 'mismatched requirement set',
+      listing: listing('requirement-set-suggested', {
+        scoreSource: 'deterministic_rubric',
+        rubricVersion: '1',
+        requirementSetId: 'reqset_old',
+        classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+        fitScore: 100,
+        tier: 'top_pick',
+        rankingStatus: 'ranked',
+      }, true),
+      expected: 'stale_requirement_set',
+    },
+    {
+      name: 'stale classifier policy',
+      listing: listing('classifier-policy-suggested', {
+        scoreSource: 'deterministic_rubric',
+        rubricVersion: '1',
+        requirementSetId: 'reqset_active',
+        fitScore: 100,
+        tier: 'top_pick',
+        rankingStatus: 'ranked',
+      }, true),
+      expected: 'stale_classifier_policy',
+    },
+    {
+      name: 'insufficient evidence',
+      listing: listing('insufficient-suggested', {
+        scoreSource: 'deterministic_rubric',
+        rubricVersion: '1',
+        requirementSetId: 'reqset_active',
+        classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+        fitScore: 100,
+        tier: 'top_pick',
+        rankingStatus: 'insufficient_evidence',
+      }, true),
+      expected: 'insufficient_evidence',
+    },
+  ] as const;
+
+  for (const fixture of cases) {
+    const status = getTriageComparisonStatus(
+      getListingResultsSnapshot(fixture.listing).triage,
+      activeComparison,
+      { regradeSuggested: true },
+    );
+    assert.equal(status, fixture.expected, fixture.name);
+    assert.equal(
+      isPeerComparableTriageStatus(status),
+      false,
+      fixture.name,
+    );
+  }
+  assert.deepEqual(
+    getTriageRegradeReasons(
+      cases.map((fixture) => fixture.listing),
+      activeComparison,
+      false,
+    ),
+    [
+      'evidence_improved',
+      'classifier_policy_changed',
+      'requirement_set_mismatch',
+    ],
+  );
+
+  const current = listing('current-suggested', {
+    scoreSource: 'deterministic_rubric',
+    rubricVersion: '1',
+    requirementSetId: 'reqset_active',
+    classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+    fitScore: 82,
+    tier: 'top_pick',
+    rankingStatus: 'ranked',
+  }, true);
+  const currentStatus = getTriageComparisonStatus(
+    getListingResultsSnapshot(current).triage,
+    activeComparison,
+    { regradeSuggested: true },
+  );
+  assert.equal(currentStatus, 'regrade_suggested');
+  assert.equal(isPeerComparableTriageStatus(currentStatus), true);
 });
 
 test('model identity is audit metadata and does not gate comparison', () => {
