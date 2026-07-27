@@ -21,6 +21,7 @@ import {
 function listing(
   id: string,
   triage: Record<string, unknown> | null,
+  regradeSuggested = false,
 ): ReviewJobListing {
   return {
     id,
@@ -42,6 +43,7 @@ function listing(
           triage,
           aiReviews: null,
           aiPhotos: null,
+          regradeSuggested,
         }
       : null,
   } as unknown as ReviewJobListing;
@@ -374,17 +376,27 @@ test('brief and comparability staleness share ordered regrade reason codes', () 
     tier: 'top_pick',
     rankingStatus: 'ranked',
   });
+  const improved = listing('improved', {
+    scoreSource: 'deterministic_rubric',
+    rubricVersion: '1',
+    requirementSetId: 'reqset_active',
+    classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+    fitScore: 82,
+    tier: 'top_pick',
+    rankingStatus: 'ranked',
+  }, true);
   const activeComparison =
     getCurrentTriageComparability('reqset_active');
 
   assert.deepEqual(
     getTriageRegradeReasons(
-      [current, oldPolicy, mismatched],
+      [current, improved, oldPolicy, mismatched],
       activeComparison,
       true,
     ),
     [
       'brief_changed',
+      'evidence_improved',
       'classifier_policy_changed',
       'requirement_set_mismatch',
     ],
@@ -394,6 +406,25 @@ test('brief and comparability staleness share ordered regrade reason codes', () 
       getListingResultsSnapshot(current).triage,
       activeComparison,
       { regradeRequired: true },
+    ),
+    'regrade_required',
+  );
+  assert.equal(
+    getTriageComparisonStatus(
+      getListingResultsSnapshot(improved).triage,
+      activeComparison,
+      { regradeSuggested: true },
+    ),
+    'regrade_suggested',
+  );
+  assert.equal(
+    getTriageComparisonStatus(
+      getListingResultsSnapshot(improved).triage,
+      activeComparison,
+      {
+        regradeRequired: true,
+        regradeSuggested: true,
+      },
     ),
     'regrade_required',
   );

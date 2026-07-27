@@ -23,6 +23,7 @@ function makeJob(overrides: Record<string, unknown> = {}) {
     location: 'London',
     prompt: 'quiet and close to POI',
     regradeRequired: false,
+    regradeSuggested: false,
     boundingBox: null,
     circle: null,
     poi: null,
@@ -119,6 +120,8 @@ function makeListing(overrides: Record<string, unknown> = {}) {
       aiReviews: { overallSentiment: 'great' },
       aiPhotos: { overallImpression: 'clean' },
       triage: { fitScore: 88, tier: 'shortlist' },
+      triageEvidenceFingerprint: null,
+      regradeSuggested: false,
       reviewCount: 10,
       photoCount: 12,
       aiReviewsCostUsd: 0.0142,
@@ -189,6 +192,7 @@ test('native results readiness is derived from persisted analysis state, not rep
   assert.equal(response.job.legacyReportAvailable, false);
   assert.equal(response.job.artifactArchiveAvailable, false);
   assert.equal(response.job.regradeRequired, false);
+  assert.equal(response.job.regradeSuggested, false);
   assert.deepEqual(response.job.costs, {
     aiReviewsUsd: 0.0142,
     aiPhotosUsd: 0.0061,
@@ -219,6 +223,37 @@ test('job responses expose the durable quality regrade requirement', () => {
 
   assert.equal(response.job.regradeRequired, true);
   assert.equal(response.job.reportReady, true);
+});
+
+test('job responses expose suggested regrades and consumed evidence', () => {
+  const fingerprint = {
+    version: 1,
+    hash: 'a'.repeat(64),
+  };
+  const response = toReviewJobResponse({
+    job: makeJob({ regradeSuggested: true }),
+    listings: [
+      makeListing({
+        analysis: {
+          ...makeListing().analysis,
+          triageEvidenceFingerprint: fingerprint,
+          regradeSuggested: true,
+        },
+      }),
+    ],
+    events: [],
+  });
+
+  assert.equal(response.job.regradeRequired, false);
+  assert.equal(response.job.regradeSuggested, true);
+  assert.equal(
+    response.listings[0].analysis?.regradeSuggested,
+    true,
+  );
+  assert.deepEqual(
+    response.listings[0].analysis?.triageEvidenceFingerprint,
+    fingerprint,
+  );
 });
 
 test('job responses expose duplicate decisions only while both offers are present', () => {

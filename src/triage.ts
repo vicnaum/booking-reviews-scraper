@@ -25,6 +25,9 @@ import {
   TRIAGE_CLASSIFIER_VERSION,
   type TriageClassifierVersion,
 } from './triage-comparability.js';
+import {
+  createTriageEvidenceFingerprint,
+} from './triage-evidence.js';
 
 // --- Types ---
 
@@ -882,7 +885,8 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
   if (!fs.existsSync(listingPath)) {
     throw new Error(`Listing file not found: ${listingPath}`);
   }
-  const listingData = JSON.parse(fs.readFileSync(listingPath, 'utf-8'));
+  const listingContent = fs.readFileSync(listingPath, 'utf-8');
+  const listingData = JSON.parse(listingContent);
   const trimmedListing = trimListingData(listingData);
   const stayContext = normalizeTriageStayContext(
     options.stayContext,
@@ -892,11 +896,16 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
 
   // 3. Read AI reviews (optional)
   let aiReviewsData: any = null;
+  let aiReviewsContent: string | null = null;
   if (aiReviewsFile) {
     const reviewsPath = path.resolve(aiReviewsFile);
     if (fs.existsSync(reviewsPath)) {
       try {
-        aiReviewsData = JSON.parse(fs.readFileSync(reviewsPath, 'utf-8'));
+        const content = fs.readFileSync(reviewsPath, 'utf-8');
+        aiReviewsData = JSON.parse(content);
+        if (aiReviewsData) {
+          aiReviewsContent = content;
+        }
       } catch (err: any) {
         console.warn(`  Warning: could not parse AI reviews file: ${err.message}`);
       }
@@ -908,11 +917,16 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
 
   // 4. Read AI photos (optional)
   let aiPhotosData: any = null;
+  let aiPhotosContent: string | null = null;
   if (aiPhotosFile) {
     const photosPath = path.resolve(aiPhotosFile);
     if (fs.existsSync(photosPath)) {
       try {
-        aiPhotosData = JSON.parse(fs.readFileSync(photosPath, 'utf-8'));
+        const content = fs.readFileSync(photosPath, 'utf-8');
+        aiPhotosData = JSON.parse(content);
+        if (aiPhotosData) {
+          aiPhotosContent = content;
+        }
       } catch (err: any) {
         console.warn(`  Warning: could not parse AI photos file: ${err.message}`);
       }
@@ -1037,6 +1051,20 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
     price,
     availability,
   });
+  const evidenceFingerprint = createTriageEvidenceFingerprint({
+    details: {
+      content: listingContent,
+      data: listingData,
+    },
+    reviews:
+      aiReviewsContent
+        ? { content: aiReviewsContent, data: aiReviewsData }
+        : null,
+    photos:
+      aiPhotosContent
+        ? { content: aiPhotosContent, data: aiPhotosData }
+        : null,
+  });
   const triageData = {
     ...parsed,
     ...score,
@@ -1047,6 +1075,7 @@ export async function runTriage(options: TriageOptions): Promise<TriageResult> {
     stayContext,
     affordability,
     evidenceGaps: normalizedEvidenceGaps,
+    evidenceFingerprint,
   };
 
   // 9. Log and return combined parser + classifier usage.

@@ -391,6 +391,9 @@ function toReviewJobListingAnalysisState(
     aiReviews: asJsonObject(row.aiReviews),
     aiPhotos: asJsonObject(row.aiPhotos),
     triage: asJsonObject(row.triage),
+    triageEvidenceFingerprint:
+      asJsonObject(row.triageEvidenceFingerprint),
+    regradeSuggested: row.regradeSuggested,
     reviewCount: row.reviewCount ?? null,
     reviewSample:
       reviewSample
@@ -552,6 +555,7 @@ export function toReviewJobState(
     location: job.location ?? null,
     prompt: job.prompt ?? null,
     regradeRequired: job.regradeRequired,
+    regradeSuggested: job.regradeSuggested,
     boundingBox: parseStoredBoundingBox(job.boundingBox) ?? null,
     circle: asCircleFilter(job.circle),
     poi: asMapPoint(job.poi),

@@ -120,6 +120,7 @@ model ReviewJob {
   location       String?
   prompt         String?
   regradeRequired Boolean         @default(false)
+  regradeSuggested Boolean        @default(false)
   boundingBox    Json?
   circle         Json?
   poi            Json?
@@ -226,6 +227,8 @@ model ReviewJobListingAnalysis {
   aiReviews       Json?
   aiPhotos        Json?
   triage          Json?
+  triageEvidenceFingerprint Json?
+  regradeSuggested Boolean  @default(false)
   reviewCount     Int?
   photoCount      Int?
   aiReviewsCostUsd Float    @default(0)

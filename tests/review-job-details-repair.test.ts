@@ -13,9 +13,13 @@ import {
   getDetailsRepairCoverage,
   readReviewJobDetailsRepairPlan,
   stageReviewJobDetailsRepair,
+  validateAppliedDetailsRepairForEvidenceReconciliation,
   validateReviewJobDetailsRepairForApply,
   type DetailsRepairJobInput,
 } from '../web/src/lib/review-job-details-repair.js';
+import {
+  fingerprintTriageEvidenceFiles,
+} from '../src/triage-evidence.js';
 
 function writeJson(filePath: string, value: unknown): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -99,9 +103,15 @@ function seedEntryArtifacts(
   writeJson(path.join(rootDir, entry.aiPhotos.file), {
     analysis: `photos:${entry.id}`,
   });
+  const evidenceFingerprint = fingerprintTriageEvidenceFiles({
+    detailsFile: path.join(rootDir, entry.details.file),
+    reviewsFile: path.join(rootDir, entry.aiReviews.file),
+    photosFile: path.join(rootDir, entry.aiPhotos.file),
+  });
   writeJson(path.join(rootDir, entry.triage.file), {
     verdict: 'unchanged',
     listingId: entry.id,
+    evidenceFingerprint,
   });
 }
 
@@ -239,6 +249,9 @@ test('details repair stages only missing core fields and preserves every non-det
         url: airbnbOneUrl,
         detailsStatus: 'completed',
         details: firstBefore,
+        triageEvidenceFingerprint: null,
+        regradeSuggested: false,
+        hasTriageVerdict: true,
       },
       {
         rowId: 'row-222',
@@ -248,6 +261,9 @@ test('details repair stages only missing core fields and preserves every non-det
         url: airbnbTwoUrl,
         detailsStatus: 'completed',
         details: secondBefore,
+        triageEvidenceFingerprint: null,
+        regradeSuggested: false,
+        hasTriageVerdict: true,
       },
       {
         rowId: 'row-booking',
@@ -257,6 +273,9 @@ test('details repair stages only missing core fields and preserves every non-det
         url: bookingUrl,
         detailsStatus: 'completed',
         details: bookingBefore,
+        triageEvidenceFingerprint: null,
+        regradeSuggested: false,
+        hasTriageVerdict: true,
       },
     ],
   };
@@ -405,9 +424,64 @@ test('details repair stages only missing core fields and preserves every non-det
     assert.equal(updates.length, 1);
     assert.equal(updates[0].analysisId, 'analysis-111');
     assert.equal(updates[0].detailsStatus, 'completed');
+    assert.equal(updates[0].regradeSuggested, true);
+    assert.deepEqual(
+      updates[0].triageEvidenceFingerprint?.detailsCoreCoverage,
+      plan.listings[0].beforeCoverage,
+    );
     assert.equal(
       fingerprintDetailsRepairValue(updates[0].details),
       plan.listings[0].afterDetailsFingerprint,
+    );
+
+    const appliedJob: DetailsRepairJobInput = {
+      ...job,
+      artifactRoot: stagedRoot,
+      reportPath: plan.stagedReportPath,
+      sourceStateFingerprint: 'db-state-after',
+      listings: job.listings.map((listing) =>
+        listing.listingId === '111'
+          ? {
+              ...listing,
+              details: repairedDetails,
+            }
+          : listing),
+    };
+    const reconciliation =
+      validateAppliedDetailsRepairForEvidenceReconciliation({
+        plan: loadedPlan,
+        job: appliedJob,
+      });
+    assert.equal(reconciliation.length, 1);
+    assert.equal(reconciliation[0].listingId, '111');
+    assert.equal(reconciliation[0].regradeSuggested, true);
+    assert.deepEqual(
+      reconciliation[0].triageEvidenceFingerprint
+        .detailsCoreCoverage,
+      plan.listings[0].beforeCoverage,
+    );
+
+    const currentEvidence = fingerprintTriageEvidenceFiles({
+      detailsFile: path.join(stagedRoot, airbnbOne.details.file),
+      reviewsFile: path.join(stagedRoot, airbnbOne.aiReviews.file),
+      photosFile: path.join(stagedRoot, airbnbOne.aiPhotos.file),
+    });
+    assert.deepEqual(
+      validateAppliedDetailsRepairForEvidenceReconciliation({
+        plan: loadedPlan,
+        job: {
+          ...appliedJob,
+          listings: appliedJob.listings.map((listing) =>
+            listing.listingId === '111'
+              ? {
+                  ...listing,
+                  triageEvidenceFingerprint: currentEvidence,
+                  regradeSuggested: false,
+                }
+              : listing),
+        },
+      }),
+      [],
     );
 
     assert.throws(
@@ -529,6 +603,9 @@ test('details repair refuses a no-op plan and leaves the source root unchanged',
             url,
             detailsStatus: 'completed',
             details: before,
+            triageEvidenceFingerprint: null,
+            regradeSuggested: false,
+            hasTriageVerdict: true,
           }],
         },
         platform: 'airbnb',

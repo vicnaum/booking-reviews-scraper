@@ -47,6 +47,10 @@ type RepairJobRecord = Prisma.ReviewJobGetPayload<{
 
 type RepairDbClient = PrismaClient | Prisma.TransactionClient;
 
+function toInputJsonValue(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
 function usage(): string {
   return (
     'Usage:\n'
@@ -166,6 +170,10 @@ function toRepairJobInput(job: RepairJobRecord): DetailsRepairJobInput {
         url: listing.url,
         detailsStatus: listing.analysis.detailsStatus,
         details: listing.analysis.details,
+        triageEvidenceFingerprint:
+          listing.analysis.triageEvidenceFingerprint,
+        regradeSuggested: listing.analysis.regradeSuggested,
+        hasTriageVerdict: listing.analysis.triage != null,
       };
     }),
   };
@@ -234,10 +242,13 @@ function postApplyInvariant(
   };
   delete clone.artifactRoot;
   delete clone.reportPath;
+  delete clone.regradeSuggested;
   for (const listing of clone.listings ?? []) {
     if (!repairedRowIds.has(listing.id) || !listing.analysis) continue;
     delete listing.analysis.details;
     delete listing.analysis.detailsStatus;
+    delete listing.analysis.triageEvidenceFingerprint;
+    delete listing.analysis.regradeSuggested;
     delete listing.analysis.updatedAt;
   }
   return fingerprintDetailsRepairValue(clone);
@@ -346,16 +357,55 @@ async function applyPlan(
           details:
             update.details as unknown as Prisma.InputJsonValue,
           detailsStatus: update.detailsStatus,
+          triageEvidenceFingerprint:
+            update.triageEvidenceFingerprint == null
+              ? Prisma.DbNull
+              : toInputJsonValue(
+                  update.triageEvidenceFingerprint,
+                ),
+          regradeSuggested: update.regradeSuggested,
         },
       });
     }
+    const regradeSuggestedListingCount =
+      await tx.reviewJobListingAnalysis.count({
+        where: {
+          jobListing: {
+            jobId: options.jobId,
+            hidden: false,
+          },
+          regradeSuggested: true,
+        },
+      });
     await tx.reviewJob.update({
       where: { id: options.jobId },
       data: {
         artifactRoot: plan.stagedArtifactRoot,
         reportPath: plan.stagedReportPath,
+        regradeSuggested: regradeSuggestedListingCount > 0,
       },
     });
+    const suggestedUpdates = updates.filter(
+      (update) => update.regradeSuggested,
+    );
+    if (suggestedUpdates.length > 0) {
+      await tx.reviewJobEvent.create({
+        data: {
+          jobId: options.jobId,
+          phase: 'triage',
+          level: 'warning',
+          message:
+            'Listing evidence improved; saved verdicts should be regraded.',
+          payload: {
+            reason: 'evidence_improved',
+            listingCount: suggestedUpdates.length,
+            listingIds: suggestedUpdates.map(
+              (update) => update.listingId,
+            ),
+          },
+        },
+      });
+    }
   }, {
     isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
     maxWait: 10_000,

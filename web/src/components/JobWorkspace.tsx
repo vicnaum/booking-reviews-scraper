@@ -274,6 +274,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
     !== normalizeQualityBriefForComparison(savedPrompt);
   const qualityRegradeNeeded =
     data.job.regradeRequired
+    || data.job.regradeSuggested
     || (
       qualityBriefDirty
       && (
@@ -415,7 +416,10 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
 
       const savedData: ReviewJobResponse = await saveRes.json();
       const triageOnly =
-        savedData.job.regradeRequired
+        (
+          savedData.job.regradeRequired
+          || savedData.job.regradeSuggested
+        )
         && savedData.job.artifactArchiveAvailable;
       const analyzeRes = await fetch(`/api/jobs/${data.job.id}/analyze`, {
         method: 'POST',
@@ -585,11 +589,12 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
               <span
                 className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${
                   data.job.regradeRequired
+                  || data.job.regradeSuggested
                     ? 'border-amber-300/20 bg-amber-300/10 text-amber-100'
                     : statusClassName(data.job.status)
                 }`}
               >
-                {data.job.regradeRequired
+                {data.job.regradeRequired || data.job.regradeSuggested
                   ? 'Regrade needed'
                   : statusLabel(
                       data.job.status,
@@ -644,7 +649,7 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                 </span>
                 <span className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5">
                   Analysis:{' '}
-                  {data.job.regradeRequired
+                  {data.job.regradeRequired || data.job.regradeSuggested
                     ? 'Regrade needed'
                     : phaseStatusLabel(data.job.analysisStatus)}
                 </span>
