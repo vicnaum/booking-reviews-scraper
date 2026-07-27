@@ -22,6 +22,7 @@ import {
   normalizeQualityBriefForComparison,
 } from '@/lib/reviewJobEdits';
 import AiBudgetNotice from './AiBudgetNotice';
+import AddListingsByUrl from './AddListingsByUrl';
 import EvidenceGapBadge from './EvidenceGapBadge';
 import ResultCard from './ResultCard';
 import StaySnapshotStatus from './StaySnapshotStatus';
@@ -822,6 +823,10 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
           </div>
 
           <AiBudgetNotice job={data.job} />
+          <AddListingsByUrl
+            job={data.job}
+            onQueued={refreshJob}
+          />
           <PriceRefreshControls
             job={data.job}
             selectedListings={selectedListings}

@@ -651,6 +651,54 @@ program
     }
   });
 
+// --- job command: persistent StayReviewr job operations ---
+const jobCommand = program
+  .command('job')
+  .description('Manage persistent StayReviewr review jobs');
+
+jobCommand
+  .command('add <job-id> <urls...>')
+  .description(
+    'Add Airbnb or Booking.com URLs to an existing job and analyze only the new listings',
+  )
+  .option(
+    '--base-url <url>',
+    'StayReviewr web URL (default: STAYREVIEWR_BASE_URL or http://localhost:3000)',
+  )
+  .option(
+    '--owner-key <key>',
+    'Job owner key (default: STAYREVIEWR_OWNER_KEY)',
+  )
+  .action(async (
+    jobId: string,
+    urls: string[],
+    cmdOpts: {
+      baseUrl?: string;
+      ownerKey?: string;
+    },
+  ) => {
+    const {
+      addListingsToReviewJob,
+      DEFAULT_REVIEW_JOB_BASE_URL,
+      REVIEW_JOB_BASE_URL_ENV,
+      REVIEW_JOB_OWNER_KEY_ENV,
+    } = await import('./review-job-client.js');
+    const result = await addListingsToReviewJob({
+      jobId,
+      urls,
+      ownerKey:
+        cmdOpts.ownerKey
+        ?? process.env[REVIEW_JOB_OWNER_KEY_ENV]
+        ?? '',
+      baseUrl:
+        cmdOpts.baseUrl
+        ?? process.env[REVIEW_JOB_BASE_URL_ENV]
+        ?? DEFAULT_REVIEW_JOB_BASE_URL,
+    });
+
+    console.log(result.message);
+  });
+
 // --- auth command ---
 program
   .command('auth [proxy-url]')

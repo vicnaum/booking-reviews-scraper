@@ -514,6 +514,221 @@ test('default-dir resumed Booking artifacts remain eligible for every AI phase',
   }
 });
 
+test('additive batch analysis never retries incomplete old AI and preserves its artifacts', async () => {
+  const tempDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'reviewr-targeted-add-ai-'),
+  );
+  const outputDir = path.join(tempDir, 'output');
+  const urlsFile = path.join(tempDir, 'new-urls.txt');
+  const oldId = 'existing-hotel';
+  const newId = 'new-hotel';
+  const oldUrl =
+    `https://www.booking.com/hotel/us/${oldId}.en-gb.html`;
+  const newUrl =
+    `https://www.booking.com/hotel/us/${newId}.en-gb.html`;
+  const originalGeminiApiKey = process.env.GEMINI_API_KEY;
+
+  try {
+    const oldFixture = writeBookingFixture(outputDir, oldId, oldUrl);
+    const newFixture = writeBookingFixture(outputDir, newId, newUrl);
+    const oldAiReviews = path.join(outputDir, 'ai-reviews', `${oldId}.json`);
+    const oldAiPhotos = path.join(outputDir, 'ai-photos', `${oldId}.json`);
+    const oldTriage = path.join(outputDir, 'triage', `${oldId}.json`);
+    fs.mkdirSync(path.dirname(oldAiReviews), { recursive: true });
+    fs.mkdirSync(path.dirname(oldAiPhotos), { recursive: true });
+    fs.mkdirSync(path.dirname(oldTriage), { recursive: true });
+    fs.writeFileSync(oldAiReviews, '{"summary":"paid review evidence"}\n');
+    fs.writeFileSync(oldAiPhotos, '{"summary":"paid photo evidence"}\n');
+    fs.writeFileSync(oldTriage, '{"tier":"shortlist","fitScore":93}\n');
+
+    const oldEntry = {
+      platform: 'booking',
+      id: oldId,
+      url: oldUrl,
+      details: {
+        status: 'partial',
+        file: `listings/listing_${oldId}.json`,
+        source: 'network',
+        reason: 'prior partial details',
+      },
+      reviews: {
+        status: 'partial',
+        file: `reviews/${oldId}_reviews.json`,
+        count: 1,
+        source: 'network',
+        reason: 'prior partial reviews',
+      },
+      photos: {
+        status: 'failed',
+        dir: `photos/${oldId}`,
+        count: 1,
+        source: 'network',
+        error: 'prior failed photos',
+      },
+      aiReviews: {
+        status: 'partial',
+        file: `ai-reviews/${oldId}.json`,
+        model: 'paid-model',
+        cost: 0.41,
+        reason: 'prior partial result',
+      },
+      aiPhotos: {
+        status: 'failed',
+        file: `ai-photos/${oldId}.json`,
+        model: 'paid-model',
+        cost: 0.22,
+        error: 'prior failed result',
+      },
+      triage: {
+        status: 'partial',
+        file: `triage/${oldId}.json`,
+        model: 'paid-model',
+        cost: 0.03,
+        reason: 'prior partial verdict',
+        evidenceGaps: [],
+      },
+    };
+    const manifestPath = path.join(outputDir, 'batch_manifest.json');
+    fs.writeFileSync(manifestPath, JSON.stringify({
+      version: 2,
+      createdAt: '2026-07-27T00:00:00.000Z',
+      updatedAt: '2026-07-27T00:00:00.000Z',
+      dates: {},
+      listings: {
+        [`booking/${oldId}`]: oldEntry,
+      },
+    }, null, 2));
+    fs.writeFileSync(urlsFile, `${newUrl}\n`);
+
+    const oldArtifactPaths = [
+      oldFixture.listingFile,
+      oldFixture.reviewsFile,
+      path.join(oldFixture.photosDir, 'one.jpg'),
+      oldAiReviews,
+      oldAiPhotos,
+      oldTriage,
+    ];
+    const oldArtifactBytes = new Map(
+      oldArtifactPaths.map((filePath) => [
+        filePath,
+        fs.readFileSync(filePath),
+      ]),
+    );
+    const analyzerListingIds: string[] = [];
+    const phaseEventListingIds: string[] = [];
+    process.env.GEMINI_API_KEY = 'fixture-key';
+
+    const result = await runBatch(
+      [urlsFile],
+      {
+        fetchDetails: true,
+        fetchReviews: true,
+        fetchPhotos: true,
+        aiReviews: true,
+        aiPhotos: true,
+        triage: true,
+        aiReviewsExplicit: true,
+        aiPhotosExplicit: true,
+        triageExplicit: true,
+        force: false,
+        retryFailed: false,
+        downloadPhotosAll: false,
+        scopeManifestToInput: false,
+        scopePostScrapePhasesToInput: true,
+        outputDir,
+        print: false,
+        artifactCache: null,
+        hooks: {
+          onEvent: (event) => {
+            if (event.listingId) {
+              phaseEventListingIds.push(event.listingId);
+            }
+          },
+        },
+      },
+      {
+        runAnalyze: async (options) => {
+          analyzerListingIds.push(
+            `reviews:${path.basename(options.listingFile!)}`,
+          );
+          return {
+            data: { summary: 'new review evidence' },
+            model: 'fixture-model',
+            provider: 'gemini',
+            multiYear: false,
+            reviewSelection: {
+              eligibleCount: 1,
+              includedCount: 1,
+              limit: 250,
+              capped: false,
+            },
+          };
+        },
+        runAnalyzePhotos: async (options) => {
+          analyzerListingIds.push(
+            `photos:${path.basename(options.listingFile!)}`,
+          );
+          return {
+            data: { highlights: ['new photo evidence'] },
+            model: 'fixture-model',
+            provider: 'gemini',
+            photoCount: 1,
+          };
+        },
+        runTriage: async (options) => {
+          analyzerListingIds.push(
+            `triage:${path.basename(options.listingFile)}`,
+          );
+          return {
+            data: { tier: 'consider', fitScore: 72 },
+            model: 'fixture-model',
+            provider: 'gemini',
+            classifierVersion: TRIAGE_CLASSIFIER_VERSION,
+            modelId: 'gemini:fixture-model:default',
+            requirementSet:
+              options.requirementSet ?? fixtureRequirementSet,
+            evidenceGaps: [],
+          };
+        },
+      },
+    );
+
+    assert.deepEqual(analyzerListingIds, [
+      `reviews:${path.basename(newFixture.listingFile)}`,
+      `photos:${path.basename(newFixture.listingFile)}`,
+      `triage:${path.basename(newFixture.listingFile)}`,
+    ]);
+    assert.equal(phaseEventListingIds.includes(oldId), false);
+    const finalManifest = JSON.parse(
+      fs.readFileSync(manifestPath, 'utf8'),
+    );
+    assert.deepEqual(
+      finalManifest.listings[`booking/${oldId}`],
+      oldEntry,
+    );
+    for (const [filePath, bytes] of oldArtifactBytes) {
+      assert.deepEqual(
+        fs.readFileSync(filePath),
+        bytes,
+        `existing artifact changed: ${filePath}`,
+      );
+    }
+    assert.equal(result.booking.aiReviews.fetched, 1);
+    assert.equal(result.booking.aiReviews.skipped, 0);
+    assert.equal(result.booking.aiPhotos.fetched, 1);
+    assert.equal(result.booking.aiPhotos.skipped, 0);
+    assert.equal(result.booking.triage.fetched, 1);
+    assert.equal(result.booking.triage.skipped, 0);
+  } finally {
+    if (originalGeminiApiKey == null) {
+      delete process.env.GEMINI_API_KEY;
+    } else {
+      process.env.GEMINI_API_KEY = originalGeminiApiKey;
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('triage records missing review evidence in its artifact and manifest', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reviewr-triage-gaps-'));
   const outputDir = path.join(tempDir, 'output');

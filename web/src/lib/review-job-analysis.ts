@@ -136,6 +136,54 @@ export function summarizeAnalysisStatus(
   return 'completed';
 }
 
+export function resolveReviewJobAnalysisScope<
+  T extends Pick<ReviewJobListing, 'id' | 'selected'>,
+>(
+  listings: T[],
+  analysisMode: 'full' | 'triage',
+  listingRowIds?: string[],
+) {
+  const isTargetedAdd = listingRowIds !== undefined;
+  const targetIds = new Set(listingRowIds ?? []);
+  const selectedListings = listings.filter((listing) => listing.selected);
+  const activeListings =
+    isTargetedAdd
+      ? listings.filter((listing) => targetIds.has(listing.id))
+      : analysisMode === 'triage'
+        ? listings
+        : selectedListings.length > 0
+          ? selectedListings
+          : listings;
+  const hasSelectedSubset =
+    !isTargetedAdd
+    && analysisMode === 'full'
+    && selectedListings.length > 0;
+
+  return {
+    activeListings,
+    inactiveListingIds:
+      hasSelectedSubset
+        ? listings
+          .filter((listing) => !listing.selected)
+          .map((listing) => listing.id)
+        : [],
+    hasSelectedSubset,
+    isTargetedAdd,
+  };
+}
+
+export function resolveReviewJobAnalysisCostScope(
+  activeListingIds: string[],
+  isTargetedAdd: boolean,
+) {
+  return {
+    resetJobCostsAtStart: !isTargetedAdd,
+    currentRunListingIds: activeListingIds,
+    jobAggregateListingIds:
+      isTargetedAdd ? undefined : activeListingIds,
+  };
+}
+
 export interface AnalysisManifestPhase {
   status: 'fetched' | 'skipped' | 'failed' | 'partial' | 'not_requested';
   file?: string;
@@ -341,6 +389,7 @@ export function prepareReviewJobRunWorkspace(input: {
   listings: Array<Pick<ReviewJobListing, 'platform' | 'url'>>;
   dates?: { checkIn?: string; checkOut?: string; adults?: number };
   mode?: 'full' | 'triage';
+  preserveOtherListings?: boolean;
 }) {
   const runRoot = getReviewJobRunDir(input.jobId, input.runId);
   removeDirIfExists(runRoot);
@@ -356,11 +405,25 @@ export function prepareReviewJobRunWorkspace(input: {
     });
   }
 
-  pruneAnalysisManifestToListings({
-    rootDir: runRoot,
-    listings: input.listings,
-    dates: input.dates,
-  });
+  if (input.preserveOtherListings) {
+    const manifestPath = getManifestPathFromRoot(runRoot);
+    const manifest = readJsonFile<AnalysisManifest>(manifestPath);
+    if (manifest && input.dates) {
+      manifest.dates = {
+        checkIn: input.dates.checkIn,
+        checkOut: input.dates.checkOut,
+        adults: input.dates.adults,
+      };
+      manifest.updatedAt = new Date().toISOString();
+      writeJsonFile(manifestPath, manifest);
+    }
+  } else {
+    pruneAnalysisManifestToListings({
+      rootDir: runRoot,
+      listings: input.listings,
+      dates: input.dates,
+    });
+  }
   if (input.mode === 'triage') {
     invalidateTriageOutputsForListings({
       rootDir: runRoot,
@@ -643,6 +706,7 @@ export function injectPoiContextIntoListingArtifacts(input: {
   manifest: AnalysisManifest;
   poi: MapPoint | null;
   fallbackListings?: ListingArtifactPoiFallback[];
+  targetKeys?: ReadonlySet<string>;
 }) {
   if (!input.poi) {
     return;
@@ -656,6 +720,10 @@ export function injectPoiContextIntoListingArtifacts(input: {
   );
 
   for (const entry of Object.values(input.manifest.listings)) {
+    const entryKey = getListingMatchKey(entry.platform, entry.url);
+    if (input.targetKeys && !input.targetKeys.has(entryKey)) {
+      continue;
+    }
     if (!entry.details.file) {
       continue;
     }
@@ -666,9 +734,7 @@ export function injectPoiContextIntoListingArtifacts(input: {
       continue;
     }
 
-    const fallback = fallbackByKey.get(
-      getListingMatchKey(entry.platform, entry.url),
-    );
+    const fallback = fallbackByKey.get(entryKey);
     const listingCoordinates = asCoordinates(listingData.coordinates);
     const fallbackCoordinates =
       fallback && fallback.lat != null && fallback.lng != null
