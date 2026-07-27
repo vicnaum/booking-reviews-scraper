@@ -27,6 +27,7 @@ import EvidenceGapBadge from './EvidenceGapBadge';
 import ResultCard from './ResultCard';
 import StaySnapshotStatus from './StaySnapshotStatus';
 import PriceRefreshControls from './PriceRefreshControls';
+import ReviewJobSearchProgress from './ReviewJobSearchProgress';
 
 const JobMap = dynamic(() => import('./JobMap'), {
   ssr: false,
@@ -665,18 +666,11 @@ export default function JobWorkspace({ initialData }: JobWorkspaceProps) {
                 )}
               </div>
               {(data.job.status === 'pending' || data.job.status === 'running') && (
-                <div className="mt-4">
-                  <div className="flex items-center justify-between text-xs font-medium text-stone-400">
-                    <span>{data.job.currentPhase}</span>
-                    <span>{Math.round(data.job.progress * 100)}%</span>
-                  </div>
-                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/[0.08]">
-                    <div
-                      className="h-full rounded-full bg-[linear-gradient(90deg,#3bcf93,#88e2bc)] transition-all"
-                      style={{ width: `${Math.max(4, Math.round(data.job.progress * 100))}%` }}
-                    />
-                  </div>
-                </div>
+                <ReviewJobSearchProgress
+                  currentPhase={data.job.currentPhase}
+                  progress={data.job.progress}
+                  listingCount={data.listings.length}
+                />
               )}
               {(data.job.analysisStatus === 'pending' || data.job.analysisStatus === 'running') && (
                 <div className="mt-4">

@@ -26,7 +26,6 @@ import {
 import {
   buildReviewJobEventData,
   buildReviewJobPlatformParams,
-  toReviewJobListingRecord,
 } from './reviewJobs.js';
 import {
   getListingMatchKey,
@@ -47,9 +46,15 @@ import {
   type AnalysisManifest,
 } from './review-job-analysis.js';
 import {
+  getReviewJobSearchProgress,
   summarizeReviewJobSearchOutcome,
+  type ReviewJobSearchPlatform,
+  type ReviewJobSearchStage,
   type ReviewJobSearchPlatformFailure,
 } from './reviewJobSearch.js';
+import {
+  persistIncrementalReviewJobListings,
+} from './reviewJobSearchPersistence.js';
 import { createSearchLogger } from './searchLog.js';
 import {
   addPersistedAiCostFields,
@@ -65,9 +70,8 @@ import {
   formatArtifactBytes,
   resolveReviewJobArtifactPolicy,
 } from './reviewJobArtifacts.js';
-import type {
-  SearchResult,
-} from '../types.js';
+import type { SearchPage } from '../../../src/search/types.js';
+import type { SearchResult } from '../types.js';
 import { filterResultsForRequest } from './resultFilters.js';
 import { parseStaySnapshot } from '../../../src/stay-snapshot.js';
 import {
@@ -347,15 +351,27 @@ async function runReviewJobSearch(reviewJobId: string) {
     },
   });
 
-  await prisma.reviewJob.update({
-    where: { id: reviewJobId },
-    data: {
-      status: 'running',
-      currentPhase: 'search',
-      startedAt,
-      progress: 0.05,
-      errorMessage: null,
-    },
+  await prisma.$transaction(async (tx) => {
+    await tx.reviewJobDuplicatePair.deleteMany({
+      where: { jobId: reviewJobId },
+    });
+    await tx.reviewJobListing.deleteMany({
+      where: { jobId: reviewJobId },
+    });
+    await tx.reviewJob.update({
+      where: { id: reviewJobId },
+      data: {
+        status: 'running',
+        currentPhase: 'search',
+        startedAt,
+        completedAt: null,
+        durationMs: null,
+        progress: 0.05,
+        totalResults: 0,
+        pagesScanned: 0,
+        errorMessage: null,
+      },
+    });
   });
 
   await appendReviewJobEvent(reviewJobId, {
@@ -378,45 +394,116 @@ async function runReviewJobSearch(reviewJobId: string) {
       minBeds: storedFilters.minBeds,
     };
 
-    const persistProgress = (platform: 'airbnb' | 'booking') => {
-      const nextPagesScanned = pagesScanned + 1;
-      pagesScanned = nextPagesScanned;
-      progressWriter.push(async () => {
-        await prisma.reviewJob.update({
+    const platformPages: Record<ReviewJobSearchPlatform, number> = {
+      airbnb: 0,
+      booking: 0,
+    };
+
+    const persistSearchState = async (input: {
+      platform: ReviewJobSearchPlatform;
+      stage: ReviewJobSearchStage;
+      results: SearchResult[];
+      nextPagesScanned: number;
+      nextPlatformPages: number;
+    }) => {
+      const state = getReviewJobSearchProgress({
+        platform: input.platform,
+        stage: input.stage,
+        platformPages: input.nextPlatformPages,
+      });
+      return prisma.$transaction(async (tx) => {
+        const totalResults = await persistIncrementalReviewJobListings(tx, {
+          jobId: reviewJobId,
+          results: input.results,
+          poi: storedPoi,
+        });
+        await tx.reviewJob.update({
           where: { id: reviewJobId },
           data: {
             status: 'running',
-            currentPhase: `search:${platform}`,
-            pagesScanned: nextPagesScanned,
-            progress: Math.min(0.95, 0.05 + nextPagesScanned * 0.02),
+            currentPhase: state.currentPhase,
+            pagesScanned: input.nextPagesScanned,
+            totalResults,
+            progress: state.progress,
           },
+        });
+        return totalResults;
+      });
+    };
+
+    const persistProgress = (
+      platform: ReviewJobSearchPlatform,
+      page: SearchPage,
+    ) => {
+      const nextPagesScanned = pagesScanned + 1;
+      const nextPlatformPages = platformPages[platform] + 1;
+      pagesScanned = nextPagesScanned;
+      platformPages[platform] = nextPlatformPages;
+      const incrementalResults = filterResultsForRequest(
+        page.results,
+        requestFilters,
+      );
+      progressWriter.push(async () => {
+        await persistSearchState({
+          platform,
+          stage: 'searching',
+          results: incrementalResults,
+          nextPagesScanned,
+          nextPlatformPages,
         });
       });
     };
 
-    const platforms: Array<'airbnb' | 'booking'> = ['airbnb', 'booking'];
-    const allResults: SearchResult[] = [];
+    const platforms: ReviewJobSearchPlatform[] = ['airbnb', 'booking'];
     const warnings: ReviewJobSearchPlatformFailure[] = [];
-    const successfulPlatforms: Array<'airbnb' | 'booking'> = [];
+    const successfulPlatforms: ReviewJobSearchPlatform[] = [];
 
     for (const platform of platforms) {
+      const startingState = getReviewJobSearchProgress({
+        platform,
+        stage: 'starting',
+      });
+      await prisma.reviewJob.update({
+        where: { id: reviewJobId },
+        data: startingState,
+      });
       await appendReviewJobEvent(reviewJobId, {
         phase: 'search',
         level: 'info',
-        message: `Searching ${platform}`,
-        payload: { platform },
+        message:
+          platform === 'booking'
+            ? 'Starting Booking search — browser session setup can take a few minutes'
+            : 'Searching Airbnb',
+        payload: {
+          platform,
+          stage: platform === 'booking' ? 'bootstrap' : 'search',
+        },
       });
 
       let output;
       try {
         if (platform === 'airbnb') {
           const params = buildReviewJobPlatformParams(jobRecord, platform);
-          output = await searchAirbnb(params, () => persistProgress(platform));
+          output = await searchAirbnb(
+            params,
+            (page) => persistProgress(platform, page),
+          );
         } else {
           const params = buildReviewJobPlatformParams(jobRecord, platform);
-          output = await searchBooking(params, () => persistProgress(platform));
+          output = await searchBooking(
+            params,
+            (page) => persistProgress(platform, page),
+          );
         }
       } catch (error) {
+        await progressWriter.flush();
+        await persistSearchState({
+          platform,
+          stage: 'failed',
+          results: [],
+          nextPagesScanned: pagesScanned,
+          nextPlatformPages: platformPages[platform],
+        });
         const message =
           error instanceof Error ? error.message : 'Platform search failed';
         warnings.push({ platform, message });
@@ -437,7 +524,14 @@ async function runReviewJobSearch(reviewJobId: string) {
       }
 
       const filteredResults = filterResultsForRequest(output.results, requestFilters);
-      allResults.push(...filteredResults);
+      await progressWriter.flush();
+      const visibleTotalResults = await persistSearchState({
+        platform,
+        stage: 'completed',
+        results: filteredResults,
+        nextPagesScanned: pagesScanned,
+        nextPlatformPages: platformPages[platform],
+      });
       successfulPlatforms.push(platform);
       searchLogger.log('platform_completed', {
         platform,
@@ -456,6 +550,7 @@ async function runReviewJobSearch(reviewJobId: string) {
           fetched: output.results.length,
           kept: filteredResults.length,
           pagesScanned: output.pagesScanned,
+          visibleTotalResults,
         },
       });
     }
@@ -471,30 +566,14 @@ async function runReviewJobSearch(reviewJobId: string) {
       throw new Error(searchSummary.failureMessage ?? 'Review job search failed');
     }
 
-    const rows = allResults.map((result) =>
-      toReviewJobListingRecord(reviewJobId, result, { poi: storedPoi }),
-    );
     const completedAt = new Date();
     const durationMs = completedAt.getTime() - startedAt.getTime();
+    let totalResults = 0;
 
     await prisma.$transaction(async (tx) => {
-      await tx.reviewJobListing.deleteMany({ where: { jobId: reviewJobId } });
-      if (rows.length > 0) {
-        await tx.reviewJobListing.createMany({
-          data: rows,
-          skipDuplicates: true,
-        });
-        const insertedListings = await tx.reviewJobListing.findMany({
-          where: { jobId: reviewJobId },
-          select: { id: true },
-        });
-        await tx.reviewJobListingAnalysis.createMany({
-          data: insertedListings.map((listing) => ({
-            jobListingId: listing.id,
-          })),
-          skipDuplicates: true,
-        });
-      }
+      totalResults = await tx.reviewJobListing.count({
+        where: { jobId: reviewJobId },
+      });
       await syncReviewJobDuplicatePairs(tx, reviewJobId);
       await tx.reviewJob.update({
         where: { id: reviewJobId },
@@ -505,7 +584,7 @@ async function runReviewJobSearch(reviewJobId: string) {
           analysisCurrentPhase: null,
           analysisProgress: 0,
           analysisErrorMessage: null,
-          totalResults: rows.length,
+          totalResults,
           pagesScanned,
           progress: 1,
           completedAt,
@@ -522,7 +601,7 @@ async function runReviewJobSearch(reviewJobId: string) {
           level: searchSummary.completedEventLevel,
           message: searchSummary.completedEventMessage,
           payload: {
-            totalResults: rows.length,
+            totalResults,
             pagesScanned,
             durationMs,
             successfulPlatforms,
@@ -535,7 +614,7 @@ async function runReviewJobSearch(reviewJobId: string) {
       });
     });
     searchLogger.log('completed', {
-      totalResults: rows.length,
+      totalResults,
       pagesScanned,
       durationMs,
       successfulPlatforms,
@@ -543,7 +622,7 @@ async function runReviewJobSearch(reviewJobId: string) {
     });
 
     console.log(
-      `[review-worker] completed ${reviewJobId} with ${rows.length} results`,
+      `[review-worker] completed ${reviewJobId} with ${totalResults} results`,
     );
   } catch (error) {
     const message =
@@ -552,12 +631,17 @@ async function runReviewJobSearch(reviewJobId: string) {
     await progressWriter.flush();
 
     await prisma.$transaction(async (tx) => {
+      const totalResults = await tx.reviewJobListing.count({
+        where: { jobId: reviewJobId },
+      });
+      await syncReviewJobDuplicatePairs(tx, reviewJobId);
       await tx.reviewJob.update({
         where: { id: reviewJobId },
         data: {
           status: 'failed',
           currentPhase: 'search',
           errorMessage: message,
+          totalResults,
           pagesScanned,
           completedAt,
           durationMs: completedAt.getTime() - startedAt.getTime(),
