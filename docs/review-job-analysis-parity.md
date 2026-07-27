@@ -152,6 +152,23 @@ the same temporary file inputs that `runAnalyze`, `runAnalyzePhotos`, and
 - One review job has one snapshot date range. Run separate jobs for multi-leg trips; issue #70
   tracks multi-leg support.
 
+## Targeted URL additions
+
+- Adding Airbnb or Booking.com URLs to an existing job uses an additive run workspace. The
+  prior manifest and artifacts are cloned without pruning existing entries.
+- Only newly created listing rows are input to the scrape phases. Existing URLs are explicit
+  no-ops, so a repeat cannot create a second row or spend money.
+- AI and triage phases are explicitly scoped to the new input keys, even when a pre-existing
+  entry is partial or failed. The cost profile is therefore scrape plus AI for the new URLs only;
+  untouched listings are persisted reads only.
+- Database synchronization is restricted to the new listing row IDs. Existing analyses,
+  verdicts, per-listing costs, selection/like/hide flags, and duplicate-pair decisions are not
+  rewritten. Job-level costs remain the exact aggregate of the unchanged prior costs plus the
+  new listing costs.
+- Duplicate detection is incremental: it may create a new suggested pair involving an added
+  listing, but never updates or deletes a pre-existing pair during the add run.
+- The combined HTML report is regenerated from the merged manifest after the targeted run.
+
 ## Persistence Goals For The Web Job
 
 The web job should persist:

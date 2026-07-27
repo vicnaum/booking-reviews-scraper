@@ -116,6 +116,12 @@ reviewr report -o data/rome --priorities-matrix
 reviewr ask "Is there free parking? ZTL zone?" --picks liked -o data/rome
 reviewr ask "How noisy at night?" --ids 12345,mamomi-house -o data/rome
 
+# Add URLs to an existing StayReviewr job and analyze only the new listings
+STAYREVIEWR_OWNER_KEY="<stayreviewr_owner cookie>" \
+  reviewr job add <job-id> \
+  "https://www.booking.com/hotel/us/hotel-hugo.html" \
+  "https://www.airbnb.com/rooms/12345"
+
 # Analytics
 reviewr analytics --booking
 reviewr analytics --airbnb --12m
@@ -142,6 +148,7 @@ npx tsx src/cli.ts <command> [options]
 | `reviewr analyze-photos <dir>` | AI photo analysis using Gemini vision |
 | `reviewr triage <file>` | AI triage -- grade listing against guest priorities |
 | `reviewr ask <question>` | Ask a question about shortlisted properties |
+| `reviewr job add <job-id> <urls...>` | Add URLs to a persistent StayReviewr job and analyze only new listings |
 | `reviewr report` | Generate HTML report; add `--priorities-matrix [file]` for the evidence matrix JSON |
 | `reviewr scrape [path]` | Batch scrape reviews from CSV files |
 | `reviewr analytics [path]` | Run analytics on JSON output |
@@ -180,6 +187,12 @@ PROXY_PASSWORD=your_password
 Set `USE_PROXY=false` to disable proxy usage.
 `PROXY_PROTOCOL` defaults to `http` for existing configurations. Set it to `https` for a TLS
 connection to the proxy endpoint; both values can still carry HTTPS destination traffic.
+
+`reviewr job add` calls the running StayReviewr web app. Pass its URL with
+`--base-url` or `STAYREVIEWR_BASE_URL` (default `http://localhost:3000`) and authenticate with
+`--owner-key` or `STAYREVIEWR_OWNER_KEY`. The owner key is the value of the browser's
+`stayreviewr_owner` cookie and should be treated as a credential. URLs already present in the
+job are reported as no-ops and are not queued again.
 
 AI analysis has two configurable cost guardrails:
 

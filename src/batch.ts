@@ -71,6 +71,8 @@ export interface BatchOptions {
   outputDir?: string;
   /** Keep a normal file-backed run's manifest limited to its current input. */
   scopeManifestToInput?: boolean;
+  /** Run AI and triage only for current input while retaining other manifest entries. */
+  scopePostScrapePhasesToInput?: boolean;
   print: boolean;
   programmatic?: boolean;
   hooks?: BatchHooks;
@@ -783,25 +785,32 @@ export async function runBatch(
   const preprocessed = filePaths.length > 0
     ? preprocessFiles(filePaths)
     : { airbnb: { urls: [] as string[], count: 0, duplicatesRemoved: 0 }, booking: { urls: [] as string[], count: 0, duplicatesRemoved: 0 }, dates: { source: 'none' as const, checkIn: undefined, checkOut: undefined, adults: undefined } };
+  const currentInputManifestKeys = new Set<string>();
+  for (const url of preprocessed.airbnb.urls) {
+    currentInputManifestKeys.add(
+      `airbnb/${airbnbListing.parseAirbnbUrl(url).roomId}`,
+    );
+  }
+  for (const url of preprocessed.booking.urls) {
+    const hotelInfo = bookingScraper.extractHotelInfo(url);
+    if (hotelInfo) {
+      currentInputManifestKeys.add(`booking/${hotelInfo.hotel_name}`);
+    }
+  }
+
+  if (
+    (options.scopeManifestToInput || options.scopePostScrapePhasesToInput)
+    && !options.retryFailed
+    && filePaths.length > 0
+    && currentInputManifestKeys.size === 0
+  ) {
+    throw new Error('No valid Airbnb or Booking URLs found in the input files.');
+  }
 
   if (options.scopeManifestToInput && !options.retryFailed && filePaths.length > 0) {
-    const currentManifestKeys = new Set<string>();
-
-    for (const url of preprocessed.airbnb.urls) {
-      currentManifestKeys.add(`airbnb/${airbnbListing.parseAirbnbUrl(url).roomId}`);
-    }
-    for (const url of preprocessed.booking.urls) {
-      const hotelInfo = bookingScraper.extractHotelInfo(url);
-      if (hotelInfo) currentManifestKeys.add(`booking/${hotelInfo.hotel_name}`);
-    }
-
-    if (currentManifestKeys.size === 0) {
-      throw new Error('No valid Airbnb or Booking URLs found in the input files.');
-    }
-
     const scopedListings = Object.fromEntries(
       Object.entries(manifest.listings)
-        .filter(([key]) => currentManifestKeys.has(key)),
+        .filter(([key]) => currentInputManifestKeys.has(key)),
     );
     const removedListingCount =
       Object.keys(manifest.listings).length - Object.keys(scopedListings).length;
@@ -818,6 +827,13 @@ export async function runBatch(
   // 3. If --retry, merge retry URLs from manifest
   if (options.retryFailed) {
     for (const [key, entry] of Object.entries(manifest.listings)) {
+      if (
+        options.scopePostScrapePhasesToInput
+        && currentInputManifestKeys.size > 0
+        && !currentInputManifestKeys.has(key)
+      ) {
+        continue;
+      }
       const needsRetry = entry.details.status === 'failed' || entry.details.status === 'partial'
         || entry.reviews.status === 'failed' || entry.reviews.status === 'partial'
         || entry.photos.status === 'failed' || entry.photos.status === 'partial'
@@ -1858,7 +1874,10 @@ export async function runBatch(
         message: `Starting AI review analysis (${modelConfig.model})`,
       });
       let aiIndex = 0;
-      const aiEntries = Object.entries(manifest.listings);
+      const aiEntries = Object.entries(manifest.listings)
+        .filter(([manifestKey]) =>
+          !options.scopePostScrapePhasesToInput
+          || currentInputManifestKeys.has(manifestKey));
       for (const [manifestKey, entry] of aiEntries) {
         aiIndex++;
         const prefix = `[${aiIndex}/${aiEntries.length}] ${manifestKey}`;
@@ -2041,7 +2060,10 @@ export async function runBatch(
         message: `Starting AI photo analysis (${modelConfig.model})`,
       });
       let aiIndex = 0;
-      const aiEntries = Object.entries(manifest.listings);
+      const aiEntries = Object.entries(manifest.listings)
+        .filter(([manifestKey]) =>
+          !options.scopePostScrapePhasesToInput
+          || currentInputManifestKeys.has(manifestKey));
       for (const [manifestKey, entry] of aiEntries) {
         aiIndex++;
         const prefix = `[${aiIndex}/${aiEntries.length}] ${manifestKey}`;
@@ -2238,7 +2260,10 @@ export async function runBatch(
         );
       }
       let triageIndex = 0;
-      const triageEntries = Object.entries(manifest.listings);
+      const triageEntries = Object.entries(manifest.listings)
+        .filter(([manifestKey]) =>
+          !options.scopePostScrapePhasesToInput
+          || currentInputManifestKeys.has(manifestKey));
       for (const [manifestKey, entry] of triageEntries) {
         triageIndex++;
         const prefix = `[${triageIndex}/${triageEntries.length}] ${manifestKey}`;
@@ -2514,13 +2539,26 @@ export async function runBatch(
 
   // Sum AI costs from manifest
   let totalCost = 0;
-  for (const entry of Object.values(manifest.listings)) {
+  for (const [manifestKey, entry] of Object.entries(manifest.listings)) {
+    if (
+      options.scopePostScrapePhasesToInput
+      && !currentInputManifestKeys.has(manifestKey)
+    ) {
+      continue;
+    }
     if (entry.aiReviews?.cost) totalCost += entry.aiReviews.cost;
     if (entry.aiPhotos?.cost) totalCost += entry.aiPhotos.cost;
     if (entry.triage?.cost) totalCost += entry.triage.cost;
   }
   if (totalCost > 0) {
-    console.log(`  AI cost: $${totalCost.toFixed(2)} (all phases, all listings in manifest)`);
+    console.log(
+      `  AI cost: $${totalCost.toFixed(2)} `
+      + (
+        options.scopePostScrapePhasesToInput
+          ? '(current input only)'
+          : '(all phases, all listings in manifest)'
+      ),
+    );
   }
 
   const allErrors = [...airbnbResult.errors, ...bookingResult.errors];
@@ -2533,7 +2571,13 @@ export async function runBatch(
 
   // Count failures/partials in manifest for retry hint
   let failureCount = 0;
-  for (const entry of Object.values(manifest.listings)) {
+  for (const [manifestKey, entry] of Object.entries(manifest.listings)) {
+    if (
+      options.scopePostScrapePhasesToInput
+      && !currentInputManifestKeys.has(manifestKey)
+    ) {
+      continue;
+    }
     if (entry.details.status === 'failed' || entry.details.status === 'partial'
       || entry.reviews.status === 'failed' || entry.reviews.status === 'partial'
       || entry.photos.status === 'failed' || entry.photos.status === 'partial'
@@ -2555,7 +2599,11 @@ export async function runBatch(
       message: `${failureCount} listing${failureCount > 1 ? 's' : ''} with failures \u2014 auto-retrying`,
       payload: { failureCount },
     });
-    await runBatch([], { ...options, retryFailed: true }, dependencies);
+    await runBatch(
+      options.scopePostScrapePhasesToInput ? filePaths : [],
+      { ...options, retryFailed: true },
+      dependencies,
+    );
   } else if (failureCount > 0) {
     console.log(`  ${failureCount} listing${failureCount > 1 ? 's' : ''} still failing \u2014 retry with: reviewr batch ${manifestPath} --retry`);
   }

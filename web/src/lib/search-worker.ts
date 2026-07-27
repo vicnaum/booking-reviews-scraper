@@ -38,6 +38,8 @@ import {
   prepareReviewJobRunWorkspace,
   readJsonFile,
   reconcilePriceRefreshManifest,
+  resolveReviewJobAnalysisCostScope,
+  resolveReviewJobAnalysisScope,
   summarizeAnalysisStatus,
   summarizeManifestEntryStatus,
   toPhaseStatus,
@@ -49,7 +51,10 @@ import {
   type ReviewJobSearchPlatformFailure,
 } from './reviewJobSearch.js';
 import { createSearchLogger } from './searchLog.js';
-import { buildAiCostBreakdown } from './aiCosts.js';
+import {
+  addPersistedAiCostFields,
+  buildAiCostBreakdown,
+} from './aiCosts.js';
 import {
   AiJobBudgetExceededError,
   hasReachedAiJobBudget,
@@ -72,6 +77,7 @@ import {
 } from './staySnapshots.js';
 import { regradeRequiredAfterAnalysis } from './reviewJobEdits.js';
 import {
+  syncAddedReviewJobDuplicatePairs,
   syncReviewJobDuplicatePairs,
 } from './reviewJobDuplicatePersistence.js';
 
@@ -631,8 +637,21 @@ type PersistableManifestEntry = AnalysisManifest['listings'][string] | BatchPhas
 interface ReviewJobListingPersistenceRow {
   id: string;
   jobId: string;
+  listingId: string;
   platform: 'airbnb' | 'booking';
+  name: string;
   url: string;
+  rating: number | null;
+  reviewCount: number;
+  propertyType: string | null;
+  photoUrl: string | null;
+  bedrooms: number | null;
+  beds: number | null;
+  bathrooms: number | null;
+  maxGuests: number | null;
+  superhost: boolean | null;
+  hostId: string | null;
+  stars: number | null;
   lat: number | null;
   lng: number | null;
   poiDistanceMeters: number | null;
@@ -971,6 +990,88 @@ function getDetailsJsonWithPoiContext(input: {
   };
 }
 
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function listingCardUpdatesFromDetails(
+  listing: ReviewJobListingPersistenceRow,
+  details: Record<string, unknown> | null,
+): Prisma.ReviewJobListingUpdateInput {
+  if (
+    !details
+    || listing.rating != null
+    || listing.reviewCount !== 0
+    || listing.photoUrl != null
+    || listing.lat != null
+    || listing.lng != null
+  ) {
+    return {};
+  }
+
+  const coordinates = asStoredMapPoint(details.coordinates);
+  const photos = Array.isArray(details.photos) ? details.photos : [];
+  const firstPhoto = photos.find((photo) =>
+      photo
+      && typeof photo === 'object'
+      && !Array.isArray(photo)
+      && nonEmptyString((photo as Record<string, unknown>).url),
+  ) as Record<string, unknown> | undefined;
+  const host =
+    details.host
+    && typeof details.host === 'object'
+    && !Array.isArray(details.host)
+      ? details.host as Record<string, unknown>
+      : null;
+  const reviewCount = finiteNumber(details.reviewCount);
+
+  return {
+    ...(nonEmptyString(details.title)
+      ? { name: nonEmptyString(details.title) as string }
+      : {}),
+    ...(finiteNumber(details.rating) != null
+      ? { rating: finiteNumber(details.rating) }
+      : {}),
+    ...(reviewCount != null && Number.isInteger(reviewCount) && reviewCount >= 0
+      ? { reviewCount }
+      : {}),
+    ...(nonEmptyString(details.propertyType)
+      ? { propertyType: nonEmptyString(details.propertyType) as string }
+      : {}),
+    ...(firstPhoto
+      ? { photoUrl: nonEmptyString(firstPhoto.url) }
+      : {}),
+    ...(coordinates
+      ? { lat: coordinates.lat, lng: coordinates.lng }
+      : {}),
+    ...(finiteNumber(details.bedrooms) != null
+      ? { bedrooms: finiteNumber(details.bedrooms) }
+      : {}),
+    ...(finiteNumber(details.beds) != null
+      ? { beds: finiteNumber(details.beds) }
+      : {}),
+    ...(finiteNumber(details.bathrooms) != null
+      ? { bathrooms: finiteNumber(details.bathrooms) }
+      : {}),
+    ...(finiteNumber(details.capacity) != null
+      ? { maxGuests: finiteNumber(details.capacity) }
+      : {}),
+    ...(typeof host?.isSuperhost === 'boolean'
+      ? { superhost: host.isSuperhost }
+      : {}),
+    ...(nonEmptyString(host?.id)
+      ? { hostId: nonEmptyString(host?.id) as string }
+      : {}),
+    ...(finiteNumber(details.stars) != null
+      ? { stars: finiteNumber(details.stars) }
+      : {}),
+  };
+}
+
 async function persistReviewJobManifestEntryToDb(input: {
   artifactRoot: string;
   poi: { lat: number; lng: number } | null;
@@ -1004,6 +1105,7 @@ async function persistReviewJobManifestEntryToDb(input: {
     await tx.reviewJobListing.update({
       where: { id: input.listing.id },
       data: {
+        ...listingCardUpdatesFromDetails(input.listing, details),
         poiDistanceMeters: poiDistanceMeters ?? null,
         ...(staySnapshot
           ? {
@@ -1071,6 +1173,7 @@ async function syncReviewJobArtifactsToDb(input: {
   reviewJobId: string;
   artifactRoot: string;
   poi: { lat: number; lng: number } | null;
+  listingRowIds?: string[];
 }) {
   const manifestPath = getManifestPathFromRoot(input.artifactRoot);
   const manifest = readJsonFile<AnalysisManifest>(manifestPath);
@@ -1079,7 +1182,13 @@ async function syncReviewJobArtifactsToDb(input: {
   }
 
   const listings = await prisma.reviewJobListing.findMany({
-    where: { jobId: input.reviewJobId, hidden: false },
+    where: {
+      jobId: input.reviewJobId,
+      hidden: false,
+      ...(input.listingRowIds
+        ? { id: { in: input.listingRowIds } }
+        : {}),
+    },
     include: { analysis: true },
   });
 
@@ -1555,6 +1664,8 @@ async function runReviewJobPriceRefresh(
 async function runReviewJobAnalysis(
   reviewJobId: string,
   analysisMode: 'full' | 'triage' = 'full',
+  listingRowIds?: string[],
+  previousAnalysisCurrentPhase?: string | null,
 ) {
   await cleanupExpiredReviewJobArtifactRuns('before-analysis');
   await ensureReviewJobAnalysisRows(reviewJobId);
@@ -1578,13 +1689,23 @@ async function runReviewJobAnalysis(
     throw new Error(`Review job ${reviewJobId} has no listings to analyze`);
   }
 
-  const selectedListings = jobRecord.listings.filter((listing) => listing.selected);
-  const activeListings =
-    analysisMode === 'triage'
-      ? jobRecord.listings
-      : selectedListings.length > 0
-        ? selectedListings
-        : jobRecord.listings;
+  const {
+    activeListings,
+    inactiveListingIds,
+    hasSelectedSubset,
+    isTargetedAdd,
+  } = resolveReviewJobAnalysisScope(
+    jobRecord.listings,
+    analysisMode,
+    listingRowIds,
+  );
+  if (activeListings.length === 0) {
+    throw new Error(
+      isTargetedAdd
+        ? `Review job ${reviewJobId} has no matching added listings to analyze`
+        : `Review job ${reviewJobId} has no listings to analyze`,
+    );
+  }
   if (analysisMode === 'triage' && !jobRecord.artifactRoot) {
     throw new Error(
       `Review job ${reviewJobId} has no saved artifacts for a triage-only regrade`,
@@ -1603,6 +1724,7 @@ async function runReviewJobAnalysis(
       adults: jobRecord.adults,
     },
     mode: analysisMode,
+    preserveOtherListings: isTargetedAdd,
   });
   const analysisModel = process.env.LLM_MODEL || 'gemini-3-flash-preview:high';
   const aiBudgetUsd = resolveAiJobBudgetUsd();
@@ -1616,6 +1738,7 @@ async function runReviewJobAnalysis(
       },
     ]),
   );
+  const activeListingKeys = new Set(activeListingByKey.keys());
   const previousAnalysisSnapshots = activeListings
     .map((listing) => createReviewJobAnalysisSnapshot(listing))
     .filter((snapshot): snapshot is ReviewJobListingAnalysisSnapshot => snapshot != null);
@@ -1625,7 +1748,11 @@ async function runReviewJobAnalysis(
     status: jobRecord.status,
     currentPhase: jobRecord.currentPhase,
     analysisStatus: jobRecord.analysisStatus,
-    analysisCurrentPhase: jobRecord.analysisCurrentPhase,
+    analysisCurrentPhase:
+      isTargetedAdd
+      && previousAnalysisCurrentPhase !== undefined
+        ? previousAnalysisCurrentPhase
+        : jobRecord.analysisCurrentPhase,
     analysisProgress: jobRecord.analysisProgress,
     analysisStartedAt: jobRecord.analysisStartedAt,
     analysisCompletedAt: jobRecord.analysisCompletedAt,
@@ -1637,15 +1764,37 @@ async function runReviewJobAnalysis(
     triageCostUsd: jobRecord.triageCostUsd,
     totalAiCostUsd: jobRecord.totalAiCostUsd,
   };
+  const previousJobAiCosts = {
+    aiReviewsCostUsd: previousJobState.aiReviewsCostUsd,
+    aiPhotosCostUsd: previousJobState.aiPhotosCostUsd,
+    triageCostUsd: previousJobState.triageCostUsd,
+    totalAiCostUsd: previousJobState.totalAiCostUsd,
+  };
   const activeListingIds = activeListings.map((listing) => listing.id);
-  const hasSelectedSubset =
-    analysisMode === 'full' && selectedListings.length > 0;
-  const inactiveListingIds = hasSelectedSubset
-    ? jobRecord.listings
-      .filter((listing) => !listing.selected)
-      .map((listing) => listing.id)
-    : [];
-  let persistedAiCosts = {
+  const costScope = resolveReviewJobAnalysisCostScope(
+    activeListingIds,
+    isTargetedAdd,
+  );
+  const syncArtifactsAndDuplicates = async () => {
+    await syncReviewJobArtifactsToDb({
+      reviewJobId,
+      artifactRoot,
+      poi,
+      ...(isTargetedAdd
+        ? { listingRowIds: activeListingIds }
+        : {}),
+    });
+    if (isTargetedAdd) {
+      await syncAddedReviewJobDuplicatePairs(
+        prisma,
+        reviewJobId,
+        activeListingIds,
+      );
+    } else {
+      await syncReviewJobDuplicatePairs(prisma, reviewJobId);
+    }
+  };
+  let currentRunAiCosts = {
     aiReviewsCostUsd: 0,
     aiPhotosCostUsd: 0,
     triageCostUsd: 0,
@@ -1697,16 +1846,18 @@ async function runReviewJobAnalysis(
         analysisStartedAt: startedAt,
         analysisCompletedAt: null,
         analysisDurationMs: null,
-        ...(analysisMode === 'full'
-          ? {
-              aiReviewsCostUsd: 0,
-              aiPhotosCostUsd: 0,
-              triageCostUsd: 0,
-              totalAiCostUsd: 0,
-            }
-          : {
-              triageCostUsd: 0,
-            }),
+        ...(costScope.resetJobCostsAtStart
+          ? analysisMode === 'full'
+            ? {
+                aiReviewsCostUsd: 0,
+                aiPhotosCostUsd: 0,
+                triageCostUsd: 0,
+                totalAiCostUsd: 0,
+              }
+            : {
+                triageCostUsd: 0,
+              }
+          : {}),
       },
     });
   });
@@ -1717,6 +1868,8 @@ async function runReviewJobAnalysis(
     message:
       analysisMode === 'triage'
         ? `Started triage-only regrade for ${activeListings.length} listings`
+        : isTargetedAdd
+          ? `Started targeted analysis for ${activeListings.length} newly added listings`
         : `Started analysis for ${activeListings.length} listings`,
     payload: {
       listingCount: activeListings.length,
@@ -1724,6 +1877,7 @@ async function runReviewJobAnalysis(
       model: analysisModel,
       aiBudgetUsd,
       analysisMode,
+      targetedAdd: isTargetedAdd,
     },
   });
 
@@ -1757,6 +1911,8 @@ async function runReviewJobAnalysis(
       retryFailed: false,
       downloadPhotosAll: false,
       outputDir: artifactRoot,
+      scopeManifestToInput: !isTargetedAdd,
+      scopePostScrapePhasesToInput: isTargetedAdd,
       print: false,
       programmatic: true,
       hooks: {
@@ -1811,22 +1967,36 @@ async function runReviewJobAnalysis(
           }
         },
         onAiCheckpoint: async () => {
-          persistedAiCosts = await prisma.$transaction(async (tx) => {
-            const costs = await getAggregatedReviewJobAiCostFields(
+          currentRunAiCosts = await prisma.$transaction(async (tx) => {
+            const runCosts = await getAggregatedReviewJobAiCostFields(
               tx,
               reviewJobId,
-              activeListingIds,
+              costScope.currentRunListingIds,
             );
+            const jobCosts =
+              isTargetedAdd
+                ? addPersistedAiCostFields(
+                    previousJobAiCosts,
+                    runCosts,
+                  )
+                : costScope.jobAggregateListingIds
+                  === costScope.currentRunListingIds
+                  ? runCosts
+                  : await getAggregatedReviewJobAiCostFields(
+                      tx,
+                      reviewJobId,
+                      costScope.jobAggregateListingIds,
+                    );
             await tx.reviewJob.update({
               where: { id: reviewJobId },
-              data: costs,
+              data: jobCosts,
             });
-            return costs;
+            return runCosts;
           });
           currentRunAiCostUsd =
             analysisMode === 'triage'
-              ? persistedAiCosts.triageCostUsd
-              : persistedAiCosts.totalAiCostUsd;
+              ? currentRunAiCosts.triageCostUsd
+              : currentRunAiCosts.totalAiCostUsd;
         },
         onScrapeComplete: async ({ outputDir, manifest }) => {
           injectPoiContextIntoListingArtifacts({
@@ -1840,6 +2010,9 @@ async function runReviewJobAnalysis(
               lng: listing.lng,
               poiDistanceMeters: listing.poiDistanceMeters,
             })),
+            ...(isTargetedAdd
+              ? { targetKeys: activeListingKeys }
+              : {}),
           });
           await prisma.reviewJob.update({
             where: { id: reviewJobId },
@@ -1876,12 +2049,7 @@ async function runReviewJobAnalysis(
       });
     }
 
-    await syncReviewJobArtifactsToDb({
-      reviewJobId,
-      artifactRoot,
-      poi,
-    });
-    await syncReviewJobDuplicatePairs(prisma, reviewJobId);
+    await syncArtifactsAndDuplicates();
 
     const completedAt = new Date();
     let overallStatus: 'completed' | 'partial' | 'failed' = 'completed';
@@ -1900,7 +2068,17 @@ async function runReviewJobAnalysis(
       overallStatus = summarizeAnalysisStatus(finalAnalyses);
       const resultsReady =
         overallStatus === 'completed' || overallStatus === 'partial';
-      const aggregatedAiCosts = await getAggregatedReviewJobAiCostFields(tx, reviewJobId);
+      const aggregatedAiCosts =
+        isTargetedAdd
+          ? addPersistedAiCostFields(
+              previousJobAiCosts,
+              await getAggregatedReviewJobAiCostFields(
+                tx,
+                reviewJobId,
+                activeListingIds,
+              ),
+            )
+          : await getAggregatedReviewJobAiCostFields(tx, reviewJobId);
 
       await tx.reviewJob.update({
         where: { id: reviewJobId },
@@ -1913,10 +2091,13 @@ async function runReviewJobAnalysis(
           analysisErrorMessage: null,
           analysisCompletedAt: completedAt,
           analysisDurationMs: completedAt.getTime() - startedAt.getTime(),
-          regradeRequired: regradeRequiredAfterAnalysis(
-            jobRecord.regradeRequired,
-            overallStatus,
-          ),
+          regradeRequired:
+            isTargetedAdd
+              ? jobRecord.regradeRequired
+              : regradeRequiredAfterAnalysis(
+                  jobRecord.regradeRequired,
+                  overallStatus,
+                ),
           artifactRoot,
           reportPath,
           ...aggregatedAiCosts,
@@ -1929,6 +2110,8 @@ async function runReviewJobAnalysis(
             message:
               analysisMode === 'triage'
                 ? 'Triage-only regrade completed'
+                : isTargetedAdd
+                  ? 'Targeted analysis completed for newly added listings'
                 : 'Analysis completed',
           payload: {
             status: overallStatus,
@@ -1936,6 +2119,7 @@ async function runReviewJobAnalysis(
             resultsReady,
             legacyReportAvailable: !!reportPath,
             selectedSubset: hasSelectedSubset,
+            targetedAdd: isTargetedAdd,
             analysisMode,
             costs: aggregatedAiCosts,
           },
@@ -1950,12 +2134,7 @@ async function runReviewJobAnalysis(
     if (error instanceof AiJobBudgetExceededError) {
       const completedAt = new Date();
 
-      await syncReviewJobArtifactsToDb({
-        reviewJobId,
-        artifactRoot,
-        poi,
-      });
-      await syncReviewJobDuplicatePairs(prisma, reviewJobId);
+      await syncArtifactsAndDuplicates();
 
       await prisma.$transaction(async (tx) => {
         await resetReviewJobListingAnalyses(tx, inactiveListingIds);
@@ -1977,11 +2156,20 @@ async function runReviewJobAnalysis(
           },
         });
 
-        const aggregatedAiCosts = await getAggregatedReviewJobAiCostFields(
-          tx,
-          reviewJobId,
-          activeListingIds,
-        );
+        const aggregatedAiCosts =
+          isTargetedAdd
+            ? addPersistedAiCostFields(
+                previousJobAiCosts,
+                await getAggregatedReviewJobAiCostFields(
+                  tx,
+                  reviewJobId,
+                  activeListingIds,
+                ),
+              )
+            : await getAggregatedReviewJobAiCostFields(
+                tx,
+                reviewJobId,
+              );
         await tx.reviewJob.update({
           where: { id: reviewJobId },
           data: {
@@ -2105,6 +2293,8 @@ const reviewJobWorker = new Worker<ReviewJobQueueData>(
     await runReviewJobAnalysis(
       job.data.reviewJobId,
       job.data.analysisMode ?? 'full',
+      job.data.listingRowIds,
+      job.data.previousAnalysisCurrentPhase,
     );
   },
   {

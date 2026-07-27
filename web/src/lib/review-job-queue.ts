@@ -8,6 +8,7 @@ export interface ReviewJobQueueData {
   phase: 'search' | 'analyze' | 'refresh-prices';
   analysisMode?: 'full' | 'triage';
   listingRowIds?: string[];
+  previousAnalysisCurrentPhase?: string | null;
 }
 
 export function getReviewJobQueueJobId(
@@ -72,6 +73,10 @@ export async function enqueueReviewJobSearch(reviewJobId: string) {
 export async function enqueueReviewJobAnalysis(
   reviewJobId: string,
   analysisMode: 'full' | 'triage' = 'full',
+  options: {
+    listingRowIds?: string[];
+    previousAnalysisCurrentPhase?: string | null;
+  } = {},
 ) {
   const queue = getReviewJobQueue();
   const jobId = getReviewJobQueueJobId('analyze', reviewJobId);
@@ -88,6 +93,15 @@ export async function enqueueReviewJobAnalysis(
     reviewJobId,
     phase: 'analyze',
     analysisMode,
+    ...(options.listingRowIds
+      ? { listingRowIds: options.listingRowIds }
+      : {}),
+    ...(Object.hasOwn(options, 'previousAnalysisCurrentPhase')
+      ? {
+          previousAnalysisCurrentPhase:
+            options.previousAnalysisCurrentPhase,
+        }
+      : {}),
   }, {
     jobId,
   });

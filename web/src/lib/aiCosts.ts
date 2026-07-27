@@ -28,6 +28,37 @@ export function buildAiCostBreakdown(input: {
   };
 }
 
+export interface PersistedAiCostFields {
+  [key: string]: number;
+  aiReviewsCostUsd: number;
+  aiPhotosCostUsd: number;
+  triageCostUsd: number;
+  totalAiCostUsd: number;
+}
+
+export function addPersistedAiCostFields(
+  previous: PersistedAiCostFields,
+  currentRun: PersistedAiCostFields,
+): PersistedAiCostFields {
+  const combined = buildAiCostBreakdown({
+    aiReviewsCostUsd:
+      previous.aiReviewsCostUsd + currentRun.aiReviewsCostUsd,
+    aiPhotosCostUsd:
+      previous.aiPhotosCostUsd + currentRun.aiPhotosCostUsd,
+    triageCostUsd:
+      previous.triageCostUsd + currentRun.triageCostUsd,
+    totalAiCostUsd:
+      previous.totalAiCostUsd + currentRun.totalAiCostUsd,
+  });
+
+  return {
+    aiReviewsCostUsd: combined.aiReviewsUsd,
+    aiPhotosCostUsd: combined.aiPhotosUsd,
+    triageCostUsd: combined.triageUsd,
+    totalAiCostUsd: combined.totalUsd,
+  };
+}
+
 export function formatUsdCost(amount: number | null | undefined): string {
   const safeAmount = sanitizeCost(amount);
 

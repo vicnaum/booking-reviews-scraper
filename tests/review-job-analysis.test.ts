@@ -15,11 +15,14 @@ import {
   pruneAnalysisManifestToListings,
   readJsonFile,
   reconcilePriceRefreshManifest,
+  resolveReviewJobAnalysisCostScope,
+  resolveReviewJobAnalysisScope,
   summarizeAnalysisStatus,
   summarizeManifestEntryStatus,
   writeJsonFile,
   type AnalysisManifest,
 } from '../web/src/lib/review-job-analysis.js';
+import { addPersistedAiCostFields } from '../web/src/lib/aiCosts.js';
 import { REVIEW_JOB_ARTIFACT_DIR_ENV } from '../web/src/lib/reviewJobArtifacts.js';
 
 test('pruneAnalysisManifestToListings keeps only active listings and refreshes dates', () => {
@@ -166,6 +169,81 @@ test('summarizeAnalysisStatus treats pending listings as partial results', () =>
     summarizeAnalysisStatus([{ status: 'running' }] as any),
     'partial',
   );
+});
+
+test('targeted add scope never resets or selects a pre-existing listing', () => {
+  const existing = {
+    id: 'row_existing',
+    selected: true,
+    liked: true,
+    hidden: false,
+    analysis: {
+      status: 'completed',
+      triage: { fitScore: 94, verdict: 'shortlist' },
+      totalAiCostUsd: 1.25,
+    },
+  };
+  const added = {
+    id: 'row_added',
+    selected: false,
+    liked: false,
+    hidden: false,
+    analysis: {
+      status: 'pending',
+      triage: null,
+      totalAiCostUsd: 0,
+    },
+  };
+  const existingBefore = structuredClone(existing);
+
+  const scope = resolveReviewJobAnalysisScope(
+    [existing, added] as any,
+    'full',
+    ['row_added'],
+  );
+
+  assert.equal(scope.isTargetedAdd, true);
+  assert.deepEqual(
+    scope.activeListings.map((listing) => listing.id),
+    ['row_added'],
+  );
+  assert.deepEqual(scope.inactiveListingIds, []);
+  assert.equal(scope.hasSelectedSubset, false);
+  assert.deepEqual(existing, existingBefore);
+});
+
+test('targeted add cost scope preserves the prior job aggregate and budgets only new rows', () => {
+  const previousJobCosts = {
+    aiReviewsCostUsd: 1.2,
+    aiPhotosCostUsd: 0.7,
+    triageCostUsd: 0.1,
+    totalAiCostUsd: 2,
+  };
+  const previousJobCostsBefore = structuredClone(previousJobCosts);
+  const scope = resolveReviewJobAnalysisCostScope(
+    ['row_added'],
+    true,
+  );
+
+  assert.equal(scope.resetJobCostsAtStart, false);
+  assert.deepEqual(scope.currentRunListingIds, ['row_added']);
+  assert.equal(scope.jobAggregateListingIds, undefined);
+  assert.deepEqual(previousJobCosts, previousJobCostsBefore);
+  assert.deepEqual(
+    addPersistedAiCostFields(previousJobCosts, {
+      aiReviewsCostUsd: 0.11,
+      aiPhotosCostUsd: 0.07,
+      triageCostUsd: 0.02,
+      totalAiCostUsd: 0.2,
+    }),
+    {
+      aiReviewsCostUsd: 1.31,
+      aiPhotosCostUsd: 0.77,
+      triageCostUsd: 0.12,
+      totalAiCostUsd: 2.2,
+    },
+  );
+  assert.deepEqual(previousJobCosts, previousJobCostsBefore);
 });
 
 test('triage evidence gaps make an otherwise completed listing partial', () => {
@@ -325,6 +403,132 @@ test('prepareReviewJobRunWorkspace stages a fresh rerun with AI outputs invalida
       fs.existsSync(path.join(regrade.rootDir, 'triage', '12345.json')),
       false,
     );
+  } finally {
+    if (previousArtifactDir == null) {
+      delete process.env[REVIEW_JOB_ARTIFACT_DIR_ENV];
+    } else {
+      process.env[REVIEW_JOB_ARTIFACT_DIR_ENV] = previousArtifactDir;
+    }
+    fs.rmSync(sourceRoot, { recursive: true, force: true });
+    fs.rmSync(artifactStore, { recursive: true, force: true });
+  }
+});
+
+test('targeted add staging preserves every existing manifest entry and artifact byte-for-byte', () => {
+  const jobId = 'job_targeted_add';
+  const artifactStore = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'review-job-targeted-store-'),
+  );
+  const sourceRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'review-job-targeted-source-'),
+  );
+  const previousArtifactDir = process.env[REVIEW_JOB_ARTIFACT_DIR_ENV];
+  process.env[REVIEW_JOB_ARTIFACT_DIR_ENV] = artifactStore;
+
+  try {
+    const existingEntry: AnalysisManifest['listings'][string] = {
+      platform: 'airbnb',
+      id: '12345',
+      url: 'https://www.airbnb.com/rooms/12345',
+      details: {
+        status: 'fetched',
+        file: 'listings/listing_12345.json',
+        source: 'network',
+      },
+      reviews: {
+        status: 'fetched',
+        file: 'reviews/room_12345_reviews.json',
+        count: 42,
+      },
+      photos: {
+        status: 'fetched',
+        dir: 'photos/12345',
+        count: 12,
+      },
+      aiReviews: {
+        status: 'fetched',
+        file: 'ai-reviews/12345.json',
+        cost: 0.41,
+      },
+      aiPhotos: {
+        status: 'fetched',
+        file: 'ai-photos/12345.json',
+        cost: 0.22,
+      },
+      triage: {
+        status: 'fetched',
+        file: 'triage/12345.json',
+        cost: 0.03,
+      },
+    };
+    const manifest: AnalysisManifest = {
+      version: 2,
+      createdAt: '2026-07-27T00:00:00.000Z',
+      updatedAt: '2026-07-27T00:00:00.000Z',
+      dates: {
+        checkIn: '2026-08-01',
+        checkOut: '2026-08-05',
+        adults: 2,
+      },
+      listings: {
+        'airbnb/12345': existingEntry,
+      },
+    };
+    const artifactContents = new Map([
+      ['listings/listing_12345.json', '{"title":"Existing","verdict":94}\n'],
+      ['reviews/room_12345_reviews.json', '[{"id":"r1"}]\n'],
+      ['ai-reviews/12345.json', '{"cost":0.41,"summary":"quiet"}\n'],
+      ['ai-photos/12345.json', '{"cost":0.22,"summary":"bright"}\n'],
+      ['triage/12345.json', '{"cost":0.03,"tier":"shortlist"}\n'],
+    ]);
+    fs.writeFileSync(
+      getManifestPathFromRoot(sourceRoot),
+      JSON.stringify(manifest, null, 2),
+    );
+    for (const [relativePath, contents] of artifactContents) {
+      const filePath = path.join(sourceRoot, relativePath);
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, contents);
+    }
+
+    const existingEntryBefore = structuredClone(existingEntry);
+    const staged = prepareReviewJobRunWorkspace({
+      jobId,
+      runId: 'add_1',
+      previousArtifactRoot: sourceRoot,
+      listings: [{
+        platform: 'booking',
+        url: 'https://www.booking.com/hotel/us/hotel-hugo.en-gb.html',
+      }],
+      dates: {
+        checkIn: '2026-08-02',
+        checkOut: '2026-08-11',
+        adults: 2,
+      },
+      mode: 'full',
+      preserveOtherListings: true,
+    });
+    const stagedManifest = readJsonFile<AnalysisManifest>(
+      getManifestPathFromRoot(staged.rootDir),
+    );
+
+    assert.ok(stagedManifest);
+    assert.deepEqual(
+      stagedManifest.listings['airbnb/12345'],
+      existingEntryBefore,
+    );
+    for (const [relativePath, contents] of artifactContents) {
+      assert.deepEqual(
+        fs.readFileSync(path.join(staged.rootDir, relativePath)),
+        Buffer.from(contents),
+        `existing artifact changed: ${relativePath}`,
+      );
+    }
+    assert.deepEqual(stagedManifest.dates, {
+      checkIn: '2026-08-02',
+      checkOut: '2026-08-11',
+      adults: 2,
+    });
   } finally {
     if (previousArtifactDir == null) {
       delete process.env[REVIEW_JOB_ARTIFACT_DIR_ENV];
