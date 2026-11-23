@@ -35,8 +35,13 @@ import type {
 
 const FULL_SEARCH_HASH = '8cea877c71f083895aa316412e85ffe818b503bb5331babba34a1602977d8b99';
 const MAP_MARKERS_HASH = 'f6d2e861c5149589bf368582c31f74d58399004da319fac65f2c88313cf15c16';
+// Optional politeness override: BOOKING_SEARCH_DELAY_MS=<ms> adds that base delay (+ up to 100% jitter).
 const PAGE_DELAY_MS = 300;
 const CELL_DELAY_MS = 500;
+function politeDelay(baseMs: number): number {
+  const extra = Number(process.env.BOOKING_SEARCH_DELAY_MS || 0);
+  return extra > 0 ? baseMs + extra * (1 + Math.random()) : baseMs;
+}
 const BOOKING_SUBDIVISION_CONFIG: AdaptiveSubdivisionConfig = {
   forceProbeDepth: 2,
   maxDepth: 3,
@@ -1080,7 +1085,7 @@ export async function searchBooking(
 
         offset += 100;
         pageIndex++;
-        await sleep(PAGE_DELAY_MS);
+        await sleep(politeDelay(PAGE_DELAY_MS));
       } catch (error: any) {
         if (error.message.includes('403') && !retried) {
           console.log(`  🔄 ${label}: session expired, re-bootstrapping...`);
@@ -1167,7 +1172,7 @@ export async function searchBooking(
 
         offset += 25;
         pageIndex++;
-        await sleep(PAGE_DELAY_MS);
+        await sleep(politeDelay(PAGE_DELAY_MS));
       } catch (error: any) {
         if (error.message.includes('403') && !retried) {
           console.log('  🔄 Session expired, re-bootstrapping...');
@@ -1255,7 +1260,7 @@ export async function searchBooking(
 
         offset += 100;
         pageIndex++;
-        await sleep(PAGE_DELAY_MS);
+        await sleep(politeDelay(PAGE_DELAY_MS));
       } catch (error: any) {
         if (error.message.includes('403') && !retried) {
           console.log('  🔄 Session expired, re-bootstrapping...');
@@ -1373,7 +1378,7 @@ export async function searchBooking(
         const childUnionIds = new Set<string>();
 
         for (const child of childCells) {
-          await sleep(CELL_DELAY_MS);
+          await sleep(politeDelay(CELL_DELAY_MS));
           const childLabel = `${label} -> probe`;
           const childResult = await searchMapMarkersCell(
             child,
