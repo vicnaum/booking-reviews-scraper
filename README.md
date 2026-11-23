@@ -180,8 +180,7 @@ Output: `search-results.json` + `search-urls.txt` in `--output-dir` (default `da
 result has the property `id`, `url`, `name`, `coordinates`, `pricing` (total for the dates,
 derived nightly), `rating`, `reviewCount`, `propertyType` (Booking accommodation type id),
 bedrooms/beds/bathrooms, `stars`, `freeCancellation` and `hostType` (`PROFESSIONAL` /
-`PRIVATE` — Booking's search results do not expose the host or operator name; use
-`reviewr details <url>` per property for that).
+`PRIVATE`; Booking's search results do not expose the host or operator name).
 
 How it works:
 
@@ -200,10 +199,12 @@ How it works:
   the same operation. The last captured request is cached in
   `~/.config/reviewr/booking-search-template.json` for sessions where the page does not send
   FullSearch. If a cached query is rejected, it is refreshed from a new session.
+  `BOOKING_SEARCH_TEMPLATE=cache` prefers the cached template (debugging aid).
 - Multi-page searches sort by price, because Booking's default ranking reshuffles between pages
   (~25% duplicates). Override with `BOOKING_SEARCH_SORTER` (e.g. `popularity`, empty for
   Booking's default).
-- Booking search refuses to run without a proxy unless you pass `--no-proxy` / `USE_PROXY=false`.
+- Booking search refuses to run without a proxy unless you pass `--no-proxy` (or set
+  `BOOKING_ALLOW_NO_PROXY=true`, e.g. for the web app).
   `BOOKING_SEARCH_DELAY_MS` adds extra delay between requests. Per-search JSONL logs go to
   `data/booking/search-logs/` (`BOOKING_SEARCH_LOG_DIR`, `BOOKING_SEARCH_LOG=false`).
 
@@ -237,8 +238,10 @@ PROXY_PASSWORD=your_password
 Set `USE_PROXY=false` to disable proxy usage.
 Optional `PROXY_COUNTRY=PL` appends `_country-PL` to the proxy password (Evomi-style exit-country
 targeting) for every HTTP request and Playwright browser. Booking prices and result sets depend
-on the visitor's country. Booking search also pins one exit IP per browser session by appending
-`_session-<id>`. Parameters already present in `PROXY_PASSWORD` are left alone.
+on the visitor's country. With an Evomi proxy host (or `PROXY_STICKY_SESSION=true`), Booking search
+also pins one exit IP per browser session by appending `_session-<id>`
+(`PROXY_STICKY_SESSION=false` turns that off). Parameters already present in `PROXY_PASSWORD` are
+left alone.
 `PROXY_PROTOCOL` defaults to `http` for existing configurations. Set it to `https` for a TLS
 connection to the proxy endpoint; both values can still carry HTTPS destination traffic.
 

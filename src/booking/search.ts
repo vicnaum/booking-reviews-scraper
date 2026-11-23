@@ -306,6 +306,7 @@ export function buildFullSearchBody(
   target: SearchTarget,
   offset: number,
   rowsPerPage: number = ROWS_PER_PAGE,
+  sessionSearchUrl?: string,
 ): any {
   const body = JSON.parse(JSON.stringify(template));
   const input = body.variables.input;
@@ -327,6 +328,10 @@ export function buildFullSearchBody(
   input.filters = { selectedFilters: buildFilterString(params) };
   input.pagination = { rowsPerPage, offset };
   input.clientSideRequestId = randomRequestId();
+  // The server reads session search params from this (useSearchParamsFromSession); keep it on
+  // the searchresults URL this session opened, not the one the template was captured on.
+  const sessionUrl = new URL(sessionSearchUrl || buildSearchUrl(params, target));
+  input.rawQueryForSession = `${sessionUrl.pathname}${sessionUrl.search}`;
   // Booking's default ("popularity") ranking reshuffles between requests, so offset pages
   // overlap (~25% duplicates, missing properties). Sorting by price keeps pages stable;
   // it is used whenever more than one page is wanted. BOOKING_SEARCH_SORTER overrides
@@ -380,19 +385,30 @@ interface LiveSession {
   close(): Promise<void>;
 }
 
+/** Sticky exit IP per browser session: Evomi password syntax, so only for Evomi or when forced. */
+function useStickyProxySession(): boolean {
+  if (process.env.PROXY_STICKY_SESSION === 'false') return false;
+  return process.env.PROXY_STICKY_SESSION === 'true' || /evomi/i.test(process.env.PROXY_HOST || '');
+}
+
 function hasProxyConfigured(): boolean {
   return process.env.USE_PROXY !== 'false' && !!process.env.PROXY_HOST;
 }
 
-function assertProxyPolicy(): void {
-  if (hasProxyConfigured()) return;
-  if (process.env.USE_PROXY === 'false') {
-    console.log('⚠️  Booking search without proxy (USE_PROXY=false): requests leave from this machine\'s IP.');
+/**
+ * Booking search runs through the proxy only. Searching from this machine's IP needs an
+ * explicit opt-out: the CLI's --no-proxy (sets REVIEWR_NO_PROXY) or BOOKING_ALLOW_NO_PROXY=true.
+ * (USE_PROXY=false alone is not enough: the CLI also sets it when no proxy is configured.)
+ */
+export function assertProxyPolicy(env: NodeJS.ProcessEnv = process.env): void {
+  if (env.USE_PROXY !== 'false' && env.PROXY_HOST) return;
+  if (env.REVIEWR_NO_PROXY === 'true' || env.BOOKING_ALLOW_NO_PROXY === 'true') {
+    console.log('⚠️  Booking search without proxy: requests leave from this machine\'s IP.');
     return;
   }
   throw new Error(
-    'Booking search needs a proxy (PROXY_HOST etc. in .env or --proxy). '
-    + 'Pass --no-proxy / USE_PROXY=false to search from this machine\'s IP on purpose.',
+    'Booking search needs a proxy (PROXY_* in .env, ~/.config/reviewr/.env or --proxy). '
+    + 'Pass --no-proxy (or set BOOKING_ALLOW_NO_PROXY=true) to search from this machine\'s IP on purpose.',
   );
 }
 
@@ -575,7 +591,7 @@ async function openSession(
   resolveFallback?: () => Promise<SearchTarget>,
 ): Promise<OpenSessionResult> {
   const { chromium } = await import('playwright');
-  const proxySession = `rv${Math.random().toString(36).slice(2, 10)}`;
+  const proxySession = useStickyProxySession() ? `rv${Math.random().toString(36).slice(2, 10)}` : undefined;
   const launchOptions: Record<string, any> = buildPlaywrightLaunchOptionsFromEnv({ proxySession });
   launchOptions.args = [...(launchOptions.args || []), '--disable-blink-features=AutomationControlled'];
 
@@ -605,6 +621,9 @@ async function openSession(
     ));
     const page = await context.newPage();
 
+    // BOOKING_SEARCH_TEMPLATE=cache: use the cached FullSearch template when there is one and
+    // skip the live capture (debugging aid for the cache / stale-query refresh path).
+    const preferCache = process.env.BOOKING_SEARCH_TEMPLATE === 'cache' && !!getCachedFullSearchTemplate();
     let headers: Record<string, string> = {};
     let homeHeaders: Record<string, string> = {};
     let liveTemplate: any = null;
@@ -619,7 +638,7 @@ async function openSession(
       }
       try {
         const body = JSON.parse(request.postData() || '{}');
-        if (body.operationName === 'FullSearch' && isUsableFullSearchTemplate(body)) {
+        if (body.operationName === 'FullSearch' && isUsableFullSearchTemplate(body) && !preferCache) {
           liveTemplate = body;
           liveGraphqlUrl = request.url();
           headers = requestHeaders;
@@ -660,7 +679,7 @@ async function openSession(
     }
     if (heading) console.log(`  ${heading}`);
 
-    if (cardCount > 0) {
+    if (cardCount > 0 && !preferCache) {
       await triggerFullSearchCapture(page, () => !!liveTemplate);
     }
 
@@ -691,7 +710,7 @@ async function openSession(
         page,
         searchUrl,
         graphqlUrl: liveGraphqlUrl || buildGraphqlUrl(searchUrl),
-        headers: pickGraphqlHeaders(headers),
+        headers: pickGraphqlHeaders(headers['x-booking-csrf-token'] ? headers : { ...homeHeaders, ...headers }),
         template,
         templateSource,
         close,
@@ -909,7 +928,7 @@ export async function searchBooking(
       if (!session!.template) {
         throw new Error('No FullSearch template captured from booking.com (and none cached)');
       }
-      const body = buildFullSearchBody(session!.template, params, pageTarget, offset);
+      const body = buildFullSearchBody(session!.template, params, pageTarget, offset, ROWS_PER_PAGE, session!.searchUrl);
       const response = await pageFetchJson(session!.page, session!.graphqlUrl, session!.headers, body);
       const payload = response.json;
       const hasResults = Array.isArray(payload?.data?.searchQueries?.search?.results);
@@ -1105,4 +1124,5 @@ export const __bookingSearchTestUtils = {
   parseAutocompleteResponse,
   autocompleteQueryVariants,
   ensureMinBbox,
+  assertProxyPolicy,
 };

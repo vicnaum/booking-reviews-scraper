@@ -39,8 +39,9 @@ function resolvePlatform(input: string | undefined, opts: any): Platform | null 
  */
 function setupProxy(opts: any): void {
   if (opts.proxy === false) {
-    // --no-proxy flag
+    // --no-proxy flag (explicit opt-out; Booking search otherwise refuses to run unproxied)
     process.env.USE_PROXY = 'false';
+    process.env.REVIEWR_NO_PROXY = 'true';
     return;
   }
 

@@ -204,3 +204,24 @@ test('ensureMinBbox grows point-like geocodes', () => {
   assert.ok(grown.neLat - grown.swLat > 0.008);
   assert.ok(grown.neLng - grown.swLng > 0.014);
 });
+
+test('FullSearch body points rawQueryForSession at the current session URL', () => {
+  const sessionUrl = 'https://www.booking.com/searchresults.en-gb.html?dest_id=-501400&dest_type=city&checkin=2026-12-08';
+  const body = utils.buildFullSearchBody(
+    { ...TEMPLATE, variables: { input: { ...TEMPLATE.variables.input, rawQueryForSession: '/searchresults.html?dest_id=6744' } } },
+    makeParams(),
+    { kind: 'destination', destination: { destId: '-501400', destType: 'CITY', label: 'Gdańsk' } },
+    0,
+    100,
+    sessionUrl,
+  );
+  assert.equal(body.variables.input.rawQueryForSession, '/searchresults.en-gb.html?dest_id=-501400&dest_type=city&checkin=2026-12-08');
+});
+
+test('Booking search fails closed without a proxy unless explicitly opted out', () => {
+  assert.throws(() => utils.assertProxyPolicy({ USE_PROXY: 'false' }), /needs a proxy/);
+  assert.throws(() => utils.assertProxyPolicy({}), /needs a proxy/);
+  assert.doesNotThrow(() => utils.assertProxyPolicy({ USE_PROXY: 'false', REVIEWR_NO_PROXY: 'true' }));
+  assert.doesNotThrow(() => utils.assertProxyPolicy({ BOOKING_ALLOW_NO_PROXY: 'true' }));
+  assert.doesNotThrow(() => utils.assertProxyPolicy({ PROXY_HOST: 'proxy.example' }));
+});
