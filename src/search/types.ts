@@ -52,6 +52,8 @@ export interface BookingSearchParams extends SearchParams {
   stars?: number[];
   freeCancellation?: boolean;
   destId?: string;
+  /** Booking destination type for destId: city, district, region, landmark, hotel, ... (default: city) */
+  destType?: string;
 }
 
 export type SearchPriceSource = 'upstream' | 'derived' | 'displayed';
@@ -97,6 +99,8 @@ export interface SearchResult {
   // Booking-specific
   stars?: number;
   freeCancellation?: boolean;
+  /** Booking: host trader type from search results (e.g. PROFESSIONAL, PRIVATE); no host name is exposed */
+  hostType?: string;
 }
 
 export interface SearchOutput {

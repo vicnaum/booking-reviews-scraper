@@ -15,7 +15,7 @@ import fetch, { type RequestInit } from 'node-fetch';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import * as fs from 'fs';
 import * as path from 'path';
-import { buildProxyUrl, resolveProxyProtocol } from '../config.js';
+import { buildProxyUrl, getProxyPasswordFromEnv, resolveProxyProtocol } from '../config.js';
 
 const BOOKING_GRAPHQL_URL = 'https://www.booking.com/dml/graphql';
 const INPUT_DIR = 'data/booking/input';
@@ -104,7 +104,7 @@ function getProxyConfig() {
     host: process.env.PROXY_HOST || '',
     port: parseInt(process.env.PROXY_PORT || '0'),
     username: process.env.PROXY_USERNAME || '',
-    password: process.env.PROXY_PASSWORD || '',
+    password: getProxyPasswordFromEnv(),
   };
   const proxyUrl = buildProxyUrl(PROXY_CONFIG);
   return { USE_PROXY, PROXY_CONFIG, proxyUrl };

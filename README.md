@@ -153,9 +153,59 @@ npx tsx src/cli.ts <command> [options]
 | `reviewr scrape [path]` | Batch scrape reviews from CSV files |
 | `reviewr analytics [path]` | Run analytics on JSON output |
 | `reviewr transform [path]` | JSON to CSV (Booking only) |
+| `reviewr search --platform booking\|airbnb ...` | Search listings by location, Booking destination or bounding box (see below) |
 | `reviewr hosts <location>` | Find hosts/agencies (Airbnb only) |
 | `reviewr parse-hosts [path]` | Parse host HTML pages (Airbnb only) |
 | `reviewr auth [proxy-url]` | Configure/check proxy |
+
+## Booking.com search
+
+```bash
+# Booking destination (city / district / region) — resolved via Booking's own autocomplete
+reviewr search --platform booking --location "Gdańsk Old Town" \
+  --checkin 2026-12-08 --checkout 2026-12-10 --adults 2 --currency PLN --max-results 500
+
+# Known destination id (dest type defaults to city)
+reviewr search --platform booking --dest-id 6744 --dest-type district --checkin ... --checkout ...
+
+# Map area: --bbox neLat,neLng,swLat,swLng (quick: up to ~1000 results per query)
+reviewr search --platform booking --bbox 54.3545,18.67,54.3345,18.65 \
+  --checkin 2026-12-08 --checkout 2026-12-10 --adults 2 --currency PLN --max-results 1000
+
+# Full coverage of a large area: quadrant subdivision whenever Booking's ~1000-row cap is hit
+reviewr search --platform booking --bbox ... --exhaustive --max-results 5000
+```
+
+Output: `search-results.json` + `search-urls.txt` in `--output-dir` (default `data/`). Each
+result has the property `id`, `url`, `name`, `coordinates`, `pricing` (total for the dates,
+derived nightly), `rating`, `reviewCount`, `propertyType` (Booking accommodation type id),
+bedrooms/beds/bathrooms, `stars`, `freeCancellation` and `hostType` (`PROFESSIONAL` /
+`PRIVATE` — Booking's search results do not expose the host or operator name; use
+`reviewr details <url>` per property for that).
+
+How it works:
+
+- A proxied Playwright browser warms up on the homepage, then opens the real searchresults page.
+  It runs with `--disable-blink-features=AutomationControlled`; without it booking.com redirects
+  city/district result pages to SEO landing pages (`/city/pl/gdansk.html`).
+- `--location` (without `--bbox`) goes through Booking's AutoComplete. The first non-hotel
+  suggestion whose name/city contains every word of the query is used. If Booking has no such
+  destination (e.g. "Gdańsk Śródmieście" — Booking only knows Gdynia's Śródmieście), the
+  location is geocoded with OpenStreetMap and searched as a bounding box. `--exhaustive`
+  always geocodes `--location` to a bbox.
+- Results come from Booking's `FullSearch` GraphQL operation. booking.com's page now sends it with
+  the full query text (the old persisted-query hashes return `PersistedQueryNotFound`). Each
+  session captures the request the page itself sends and replays it from inside the page, with
+  100 rows per request and offset pagination. Bounding boxes use `destType: BOUNDING_BOX` in
+  the same operation. The last captured request is cached in
+  `~/.config/reviewr/booking-search-template.json` for sessions where the page does not send
+  FullSearch. If a cached query is rejected, it is refreshed from a new session.
+- Multi-page searches sort by price, because Booking's default ranking reshuffles between pages
+  (~25% duplicates). Override with `BOOKING_SEARCH_SORTER` (e.g. `popularity`, empty for
+  Booking's default).
+- Booking search refuses to run without a proxy unless you pass `--no-proxy` / `USE_PROXY=false`.
+  `BOOKING_SEARCH_DELAY_MS` adds extra delay between requests. Per-search JSONL logs go to
+  `data/booking/search-logs/` (`BOOKING_SEARCH_LOG_DIR`, `BOOKING_SEARCH_LOG=false`).
 
 ## Global Flags
 
@@ -185,6 +235,10 @@ PROXY_PASSWORD=your_password
 ```
 
 Set `USE_PROXY=false` to disable proxy usage.
+Optional `PROXY_COUNTRY=PL` appends `_country-PL` to the proxy password (Evomi-style exit-country
+targeting) for every HTTP request and Playwright browser. Booking prices and result sets depend
+on the visitor's country. Booking search also pins one exit IP per browser session by appending
+`_session-<id>`. Parameters already present in `PROXY_PASSWORD` are left alone.
 `PROXY_PROTOCOL` defaults to `http` for existing configurations. Set it to `https` for a TLS
 connection to the proxy endpoint; both values can still carry HTTPS destination traffic.
 
