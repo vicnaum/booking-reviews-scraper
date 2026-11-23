@@ -11,6 +11,7 @@
 //   reviewr details <booking-url> -p         # Print to stdout
 //   npx tsx src/booking/listing.ts <url>     # Direct execution
 
+import { buildPlaywrightLaunchOptionsFromEnv } from '../config.js';
 import 'dotenv/config';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -97,7 +98,7 @@ async function fetchHotelPageHtml(url: string, options?: { hasDates?: boolean })
   const { chromium } = await import('playwright');
 
   console.log('  Launching headless browser...');
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(buildPlaywrightLaunchOptionsFromEnv());
 
   try {
     const context = await browser.newContext({

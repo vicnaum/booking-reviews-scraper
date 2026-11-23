@@ -8,7 +8,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { getConfigDir } from '../config.js';
+import { getConfigDir, buildPlaywrightLaunchOptionsFromEnv } from '../config.js';
 
 // --- Hardcoded defaults (current known-good hashes) ---
 
@@ -148,7 +148,7 @@ export async function refreshHashesViaPlaywright(): Promise<{ listingHash: strin
   const { chromium } = await import('playwright');
 
   console.log('Refreshing Airbnb API hashes via Playwright...');
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(buildPlaywrightLaunchOptionsFromEnv());
 
   try {
     const context = await browser.newContext({

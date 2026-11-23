@@ -730,7 +730,6 @@ function generateRawCSV(allFileStats: FileStats[], outputDir: string, rolling12m
   const jsonFiles = fs.readdirSync(outputDir)
     .filter(file => file.endsWith('.json'))
     .filter(file => !file.toLowerCase().includes('example'))
-    .filter(file => file.toLowerCase().includes('crete'))
     .map(file => path.join(outputDir, file))
     .sort();
 
@@ -926,7 +925,6 @@ export async function runAnalytics(options: RunAnalyticsOptions = {}): Promise<v
   const jsonFiles = fs.readdirSync(outputDir)
     .filter(file => file.endsWith('.json'))
     .filter(file => !file.toLowerCase().includes('example'))
-    .filter(file => file.toLowerCase().includes('crete'))
     .map(file => path.join(outputDir, file))
     .sort();
 
@@ -982,7 +980,6 @@ async function main(): Promise<void> {
   const jsonFiles = fs.readdirSync(OUTPUT_DIR)
     .filter(file => file.endsWith('.json'))
     .filter(file => !file.toLowerCase().includes('example'))
-    .filter(file => file.toLowerCase().includes('crete'))
     .map(file => path.join(OUTPUT_DIR, file))
     .sort();
 

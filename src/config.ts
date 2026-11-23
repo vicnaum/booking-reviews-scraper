@@ -284,3 +284,24 @@ export function bootstrapRuntimeProxyEnv(
   }
   return resolved;
 }
+
+/**
+ * Playwright launch options that route the browser through the configured proxy
+ * (PROXY_* env vars), unless USE_PROXY=false. Used by every Playwright entry point so
+ * browser traffic never silently leaves via the local IP.
+ */
+export function buildPlaywrightLaunchOptionsFromEnv(): Record<string, unknown> {
+  const launchOptions: Record<string, unknown> = { headless: true };
+  if (process.env.USE_PROXY === 'false' || !process.env.PROXY_HOST) {
+    return launchOptions;
+  }
+  const port = parseInt(process.env.PROXY_PORT || '0');
+  const protocol = resolveProxyProtocol(process.env.PROXY_PROTOCOL);
+  const proxy: Record<string, string> = {
+    server: `${protocol}://${process.env.PROXY_HOST}${port > 0 ? `:${port}` : ''}`,
+  };
+  if (process.env.PROXY_USERNAME) proxy.username = process.env.PROXY_USERNAME;
+  if (process.env.PROXY_PASSWORD) proxy.password = process.env.PROXY_PASSWORD;
+  launchOptions.proxy = proxy;
+  return launchOptions;
+}

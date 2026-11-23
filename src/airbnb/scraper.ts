@@ -170,13 +170,20 @@ export async function makeRequest(url: string, options: any = {}, maxRetries: nu
 export async function getApiKey(): Promise<string> {
   console.log('🔑 Fetching AirBnB API key...');
   
-  const response = await makeRequest(AIRBNB_BASE_URL, {
-    headers: BROWSER_HEADERS
-  });
-  
   const regexApiKey = /"api_config":\{"key":"(.+?)"/;
-  const match = regexApiKey.exec(response.data);
-  
+  // Rotating proxy exits sometimes get an HTTP-200 locale "domain handoff" page instead of
+  // the homepage (no api_config). Retry on fresh connections before giving up.
+  let match: RegExpExecArray | null = null;
+  for (let attempt = 1; attempt <= 5 && !match; attempt++) {
+    const response = await makeRequest(AIRBNB_BASE_URL, {
+      headers: BROWSER_HEADERS
+    });
+    match = regexApiKey.exec(response.data);
+    if (!match && attempt < 5) {
+      await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+    }
+  }
+
   if (!match) {
     throw new Error('API key not found in AirBnB homepage');
   }
@@ -356,15 +363,19 @@ async function fetchReviewsFromOffset(
       property_id: property.id,
       property_title: property.title,
       review_id: getNestedValue(reviewData, "id", null),
-      reviewer_name: getNestedValue(reviewData, "author.firstName", null),
-      reviewer_id: getNestedValue(reviewData, "author.id", null),
+      // 2026: Airbnb renamed `author` -> `reviewer`; keep `author` as a fallback.
+      reviewer_name: getNestedValue(reviewData, "reviewer.firstName", null) ?? getNestedValue(reviewData, "author.firstName", null),
+      reviewer_id: getNestedValue(reviewData, "reviewer.id", null) ?? getNestedValue(reviewData, "author.id", null),
       review_date: getNestedValue(reviewData, "createdAt", null),
       review_text: getNestedValue(reviewData, "comments", null),
       rating: getNestedValue(reviewData, "rating", null),
-      reviewer_avatar_url: getNestedValue(reviewData, "author.pictureUrl", null),
+      reviewer_avatar_url: getNestedValue(reviewData, "reviewer.pictureUrl", null) ?? getNestedValue(reviewData, "author.pictureUrl", null),
       reviewer_verification_level: getNestedValue(reviewData, "author.verificationLevel", null),
-      response_text: getNestedValue(reviewData, "response.response", null),
-      response_date: getNestedValue(reviewData, "response.createdAt", null),
+      // `response` is now a plain string (host reply); older payloads nested it as response.response.
+      response_text: typeof reviewData?.response === "string"
+        ? (reviewData.response || null)
+        : getNestedValue(reviewData, "response.response", null),
+      response_date: getNestedValue(reviewData, "response.createdAt", null) ?? getNestedValue(reviewData, "localizedRespondedDate", null),
       language: getNestedValue(reviewData, "language", null),
       can_be_translated: getNestedValue(reviewData, "canBeTranslated", false),
       localized_date: getNestedValue(reviewData, "localizedDate", null),
