@@ -16,11 +16,14 @@ export function parseBookingGraphQLPricing(
     return null;
   }
 
-  const totalAmount = parsePriceAmount(
-    displayPrice?.amountPerStay?.amount
-    ?? displayPrice?.amountPerStay?.amountRounded,
-  );
-  const detectedCurrency = detectCurrencyFromText(
+  const unformatted = Number(displayPrice?.amountPerStay?.amountUnformatted);
+  const totalAmount = Number.isFinite(unformatted) && unformatted > 0
+    ? unformatted
+    : parsePriceAmount(
+      displayPrice?.amountPerStay?.amount
+      ?? displayPrice?.amountPerStay?.amountRounded,
+    );
+  const detectedCurrency = displayPrice?.amountPerStay?.currency || detectCurrencyFromText(
     displayPrice?.amountPerStay?.amount
     ?? displayPrice?.amountPerStay?.amountRounded,
     currency,

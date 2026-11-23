@@ -1,16 +1,36 @@
 // src/booking/search.ts
 //
-// Booking.com listing search via Playwright bootstrap + direct GraphQL fetch
-// Primary: FullSearch (quick, 25/page) or MapMarkersDesktop (exhaustive, 100/page)
-// Fallback: SSR via Playwright DOM extraction
+// Booking.com listing search.
+//
+// How it works (Nov 2026):
+// 1. Launch a proxied Playwright browser (fails closed without a proxy unless USE_PROXY=false
+//    was chosen explicitly) with `--disable-blink-features=AutomationControlled`. Without
+//    that flag `navigator.webdriver` is true and booking.com 30x-redirects every
+//    city/district searchresults URL to its SEO landing page (/city/pl/gdansk.html).
+// 2. Warm the session on the homepage, resolve `--location` to a Booking destination
+//    (dest_id + dest_type) through Booking's own AutoComplete GraphQL, then open the real
+//    searchresults page for that destination (or a lat/long page for bbox searches).
+// 3. Scroll the result list so booking.com's own client fires `FullSearch`, capture that
+//    request (headers, URL and body — the body now carries the full query text; the old
+//    persisted-query hashes return `PersistedQueryNotFound`) and cache it on disk.
+// 4. Replay FullSearch from inside the page (same cookies, WAF token and exit IP) with our
+//    own location / dates / filters and offset pagination (100 rows per page). FullSearch
+//    accepts `destType: BOUNDING_BOX`, so map-area searches use the same operation.
+// Fallback when no FullSearch template is available: harvest the server-rendered result
+// pages (`&offset=N`) of the same searchresults URL.
 
-import fetch from 'node-fetch';
-import { HttpsProxyAgent } from 'https-proxy-agent';
-import {
-  parseBookingCardPricing,
-  parseBookingGraphQLPricing,
-} from './pricing.js';
 import { createBookingSearchLogger, type BookingSearchLogger } from './search-log.js';
+import { parseBookingGraphQLPricing } from './pricing.js';
+import {
+  forgetFullSearchTemplate,
+  getCachedAutoCompleteTemplate,
+  getCachedFullSearchTemplate,
+  saveAutoCompleteTemplate,
+  isStaleQueryError,
+  isUsableFullSearchTemplate,
+  saveFullSearchTemplate,
+  type FullSearchTemplate,
+} from './search-template.js';
 import {
   countNewChildIds,
   hasMeaningfulChildGain,
@@ -18,12 +38,9 @@ import {
   shouldProbeChildren,
   type AdaptiveSubdivisionConfig,
 } from '../search/adaptive.js';
-import { bboxIntersectsCircle, subdivideBbox } from '../search/geo.js';
+import { bboxIntersectsCircle, geocodeLocation, subdivideBbox } from '../search/geo.js';
 import { filterSearchResults } from '../search/filters.js';
-import {
-  buildProxyUrl,
-  resolveProxyProtocol,
-} from '../config.js';
+import { buildPlaywrightLaunchOptionsFromEnv } from '../config.js';
 import { getStayNights } from '../search/pricing.js';
 import type {
   BookingSearchParams,
@@ -33,17 +50,23 @@ import type {
   ProgressCallback,
 } from '../search/types.js';
 
-const FULL_SEARCH_HASH = '8cea877c71f083895aa316412e85ffe818b503bb5331babba34a1602977d8b99';
-const MAP_MARKERS_HASH = 'f6d2e861c5149589bf368582c31f74d58399004da319fac65f2c88313cf15c16';
+const ROWS_PER_PAGE = 100;
+// Booking stops returning rows past ~1000 results for one query.
+const MAX_OFFSET = 1000;
 // Optional politeness override: BOOKING_SEARCH_DELAY_MS=<ms> adds that base delay (+ up to 100% jitter).
-const PAGE_DELAY_MS = 300;
-const CELL_DELAY_MS = 500;
+const PAGE_DELAY_MS = 600;
+const CELL_DELAY_MS = 800;
+const MAX_SESSION_ATTEMPTS = 3;
+const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';
+
 function politeDelay(baseMs: number): number {
   const extra = Number(process.env.BOOKING_SEARCH_DELAY_MS || 0);
-  return extra > 0 ? baseMs + extra * (1 + Math.random()) : baseMs;
+  const base = baseMs * (1 + Math.random() * 0.5);
+  return extra > 0 ? base + extra * (1 + Math.random()) : base;
 }
+
 const BOOKING_SUBDIVISION_CONFIG: AdaptiveSubdivisionConfig = {
-  forceProbeDepth: 2,
+  forceProbeDepth: 1,
   maxDepth: 3,
   minCellSideMeters: 900,
   minResultsToProbe: 10,
@@ -85,307 +108,136 @@ function getMatchingUnitConfigurations(result: any): any[] {
   return configurations;
 }
 
-// --- Session management ---
+// --- Destinations ---
 
-interface BookingSession {
-  cookies: string;
-  headers: Record<string, string>;
-  destId: number | null;
-  graphqlUrl: string;
-  refererUrl: string;
-  mapMarkersTemplate?: any;
+export interface BookingDestination {
+  destId: string;
+  /** Booking dest type, upper case as used by GraphQL (CITY, DISTRICT, REGION, LANDMARK, ...) */
+  destType: string;
+  label: string;
+  latitude?: number;
+  longitude?: number;
 }
 
-// In-memory session cache to avoid re-bootstrapping Playwright on every call.
-// The CSRF JWT typically lasts ~24h, so we cache aggressively.
-let cachedSession: BookingSession | null = null;
-let cachedSessionTime = 0;
-const SESSION_TTL_MS = 5 * 60 * 1000; // 5 minutes
+interface AutoCompleteSuggestion extends BookingDestination {
+  title: string;
+  components: Array<{ name: string; type: string }>;
+}
 
-function getProxyUrlFromEnv(): string | null {
-  if (process.env.USE_PROXY === 'false' || !process.env.PROXY_HOST) {
-    return null;
+function normalizeForMatch(value: string): string {
+  return value
+    .replace(/[łŁ]/g, 'l')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function tokenize(value: string): string[] {
+  return normalizeForMatch(value).split(/[^a-z0-9]+/).filter(token => token.length >= 2);
+}
+
+/**
+ * Pick the AutoComplete suggestion that matches every word of the query.
+ * Words are matched against the suggestion's own name and its city/country (not the
+ * region: "Śródmieście, Gdynia, Pomerania (Gulf of Gdansk)" must not match "Gdańsk Śródmieście").
+ * Hotels are never picked. Returns null when Booking has no such destination.
+ */
+export function pickAutocompleteDestination(
+  query: string,
+  suggestions: AutoCompleteSuggestion[],
+): BookingDestination | null {
+  const queryTokens = tokenize(query);
+  if (queryTokens.length === 0) return null;
+
+  for (const suggestion of suggestions) {
+    if (!suggestion.destId || ['HOTEL', 'NO_DEST_TYPE', ''].includes(suggestion.destType)) continue;
+    const matchText = [
+      suggestion.title,
+      ...suggestion.components.filter(c => c.type !== 'REGION').map(c => c.name),
+    ].join(' ');
+    const words = tokenize(matchText);
+    const allMatch = queryTokens.every(token => words.some(word => word.startsWith(token)));
+    if (allMatch) {
+      return {
+        destId: suggestion.destId,
+        destType: suggestion.destType,
+        label: suggestion.label,
+        latitude: suggestion.latitude,
+        longitude: suggestion.longitude,
+      };
+    }
   }
 
-  return buildProxyUrl({
-    protocol: resolveProxyProtocol(process.env.PROXY_PROTOCOL),
-    host: process.env.PROXY_HOST,
-    port: parseInt(process.env.PROXY_PORT || '0'),
-    username: process.env.PROXY_USERNAME || '',
-    password: process.env.PROXY_PASSWORD || '',
-  });
+  return null;
 }
 
-function buildPlaywrightLaunchOptions(): Record<string, unknown> {
-  const launchOptions: Record<string, unknown> = { headless: true };
-  const proxyUrl = getProxyUrlFromEnv();
-
-  if (proxyUrl) {
-    const parsed = new URL(proxyUrl);
-    const proxy: Record<string, string> = {
-      server: `${parsed.protocol}//${parsed.host}`,
-    };
-    if (parsed.username) proxy.username = decodeURIComponent(parsed.username);
-    if (parsed.password) proxy.password = decodeURIComponent(parsed.password);
-    launchOptions.proxy = proxy;
-  }
-
-  return launchOptions;
+function parseAutocompleteResponse(payload: any): AutoCompleteSuggestion[] {
+  const results = payload?.data?.autoCompleteSuggestions?.results;
+  if (!Array.isArray(results)) return [];
+  return results.map((r: any) => ({
+    destId: String(r?.destination?.destId ?? ''),
+    destType: String(r?.destination?.destType ?? '').toUpperCase(),
+    label: String(r?.displayInfo?.label ?? r?.displayInfo?.title ?? ''),
+    title: String(r?.displayInfo?.title ?? ''),
+    latitude: toFiniteNumber(r?.destination?.latitude) ?? undefined,
+    longitude: toFiniteNumber(r?.destination?.longitude) ?? undefined,
+    components: Array.isArray(r?.displayInfo?.labelComponents)
+      ? r.displayInfo.labelComponents.map((c: any) => ({ name: String(c?.name ?? ''), type: String(c?.type ?? '') }))
+      : [],
+  }));
 }
 
-async function bootstrapSession(
-  params: BookingSearchParams,
-  logger?: BookingSearchLogger,
-): Promise<BookingSession> {
-  const { chromium } = await import('playwright');
+// --- URLs and filters ---
 
-  console.log('🔑 Bootstrapping Booking.com session via Playwright...');
-  logger?.log('bootstrap_started', {
-    location: params.location ?? null,
-    destId: params.destId ?? null,
-    boundingBox: params.boundingBox ?? null,
-    filters: buildFilterString(params),
-  });
-  const browser = await chromium.launch(buildPlaywrightLaunchOptions());
+type SearchTarget =
+  | { kind: 'destination'; destination: BookingDestination }
+  | { kind: 'bbox'; bbox: BoundingBox };
 
-  try {
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
-      locale: 'en-GB',
-    });
-    const page = await context.newPage();
-
-    // Build a search URL that will trigger GraphQL requests.
-    // If this is a bbox-only search, use a fallback city so the page loads
-    // search results and then open map mode to capture MapMarkersDesktop.
-    const needsFallbackCity = !!params.boundingBox && !params.location && !params.destId;
-    const bootstrapParams = needsFallbackCity
-      ? { ...params, destId: '-2601889', location: undefined } as BookingSearchParams // London
-      : params;
-    const searchUrl = buildSearchUrl(bootstrapParams);
-    const shouldOpenMap = !!params.boundingBox;
-    const bootstrapUrl = shouldOpenMap ? `${searchUrl}#map_opened` : searchUrl;
-    console.log(`  Navigating to: ${bootstrapUrl}`);
-
-    // Intercept GraphQL requests to capture auth headers and the session-specific endpoint URL.
-    let capturedHeaders: Record<string, string> = {};
-    let capturedGraphqlUrl = '';
-    let capturedMapMarkersTemplate: any;
-
-    await page.route('**/dml/graphql*', async (route) => {
-      try {
-        const request = route.request();
-        const nextHeaders = await request.allHeaders();
-
-        const postData = request.postData();
-        if (postData) {
-          const body = JSON.parse(postData);
-          const operationName = body.operationName;
-          const isSearchOperation = operationName === 'MapMarkersDesktop' || operationName === 'FullSearch';
-
-          if (!capturedGraphqlUrl || isSearchOperation) {
-            capturedGraphqlUrl = request.url();
-          }
-          if (Object.keys(capturedHeaders).length === 0 || isSearchOperation) {
-            capturedHeaders = { ...capturedHeaders, ...nextHeaders };
-          }
-          if (operationName === 'MapMarkersDesktop' && !capturedMapMarkersTemplate) {
-            capturedMapMarkersTemplate = body;
-          }
-
-          console.log(`  Intercepted GraphQL: ${operationName}`);
-          logger?.log('bootstrap_intercepted_graphql', {
-            operationName,
-            graphqlUrl: request.url(),
-          });
-        } else if (!capturedGraphqlUrl) {
-          capturedGraphqlUrl = request.url();
-          if (Object.keys(capturedHeaders).length === 0) {
-            capturedHeaders = nextHeaders;
-          }
-        }
-      } catch { /* ignore parsing errors */ }
-      await route.continue();
-    });
-
-    await page.goto(bootstrapUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-    // Handle WAF challenge
-    let html = await page.content();
-    if (html.includes('awsWafCookieDomainList') || html.includes('challenge.js')) {
-      console.log('  WAF challenge detected, waiting...');
-      try {
-        await page.waitForURL('**/*', { timeout: 30000, waitUntil: 'domcontentloaded' });
-        await page.waitForTimeout(5000);
-      } catch {
-        await page.waitForTimeout(10000);
-      }
-    }
-
-    // Wait for search results to appear
-    try {
-      await page.waitForSelector('[data-testid="property-card"]', { timeout: 30000 });
-    } catch {
-      await page.waitForTimeout(5000);
-    }
-
-    if (shouldOpenMap) {
-      try {
-        await page.waitForResponse((response) => {
-          if (!response.url().includes('/dml/graphql')) return false;
-          const postData = response.request().postData();
-          if (!postData) return false;
-          try {
-            const body = JSON.parse(postData);
-            return body.operationName === 'MapMarkersDesktop';
-          } catch {
-            return false;
-          }
-        }, { timeout: 15000 });
-      } catch {
-        console.log('  ⚠️  MapMarkersDesktop did not fire during bootstrap');
-      }
-      await page.waitForTimeout(1000);
-    } else {
-      await page.waitForTimeout(3000); // Let GraphQL requests fire
-    }
-
-    // Capture cookies
-    const cookies = await context.cookies('https://www.booking.com');
-    const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-
-    // Try to extract dest_id from page if needed
-    let destId: number | null = params.destId ? parseInt(params.destId) : null;
-    if (!destId) {
-      try {
-        const destIdMatch = await page.evaluate(() => {
-          // Look for dest_id in various places
-          const input = document.querySelector('input[name="dest_id"]') as HTMLInputElement;
-          if (input) return input.value;
-          const url = window.location.href;
-          const match = url.match(/dest_id=(-?\d+)/);
-          return match ? match[1] : null;
-        });
-        if (destIdMatch) destId = parseInt(destIdMatch);
-      } catch { /* ignore */ }
-    }
-
-    const csrfToken = capturedHeaders['x-booking-csrf-token'] || '';
-    const hasHeaders = Object.keys(capturedHeaders).length > 0 && csrfToken;
-
-    if (!hasHeaders) {
-      console.log('  ⚠️  No CSRF token captured. GraphQL may not work, will try SSR fallback.');
-      logger?.log('bootstrap_completed', {
-        success: false,
-        hasCsrfToken: false,
-        cookieCount: cookies.length,
-        destId,
-        capturedGraphqlUrl: capturedGraphqlUrl || null,
-      });
-    } else {
-      console.log(`  ✅ Session captured: CSRF=${csrfToken.substring(0, 20)}..., ${cookies.length} cookies`);
-      logger?.log('bootstrap_completed', {
-        success: true,
-        hasCsrfToken: true,
-        cookieCount: cookies.length,
-        destId,
-        capturedGraphqlUrl: capturedGraphqlUrl || null,
-        capturedTemplateOperation: capturedMapMarkersTemplate?.operationName ?? null,
-      });
-    }
-
-    await page.close();
-    await context.close();
-
-    const effectiveParams = destId
-      ? { ...bootstrapParams, destId: String(destId), location: undefined }
-      : bootstrapParams;
-
-    return {
-      cookies: cookieString,
-      headers: capturedHeaders,
-      destId,
-      graphqlUrl: capturedGraphqlUrl || buildGraphQLUrl(effectiveParams, destId),
-      refererUrl: buildSearchUrl(effectiveParams),
-      mapMarkersTemplate: capturedMapMarkersTemplate,
-    };
-  } finally {
-    await browser.close();
-  }
+/** Grow a (point-like) bbox to at least `minMeters` per side around its centre. */
+export function ensureMinBbox(bbox: BoundingBox, minMeters: number): BoundingBox {
+  const center = bboxCenter(bbox);
+  const halfLat = minMeters / 111320 / 2;
+  const halfLng = minMeters / (111320 * Math.cos((center.lat * Math.PI) / 180)) / 2;
+  return {
+    neLat: Math.max(bbox.neLat, center.lat + halfLat),
+    neLng: Math.max(bbox.neLng, center.lng + halfLng),
+    swLat: Math.min(bbox.swLat, center.lat - halfLat),
+    swLng: Math.min(bbox.swLng, center.lng - halfLng),
+  };
 }
 
-function buildSearchUrl(params: BookingSearchParams): string {
+function bboxCenter(bbox: BoundingBox): { lat: number; lng: number } {
+  return { lat: (bbox.neLat + bbox.swLat) / 2, lng: (bbox.neLng + bbox.swLng) / 2 };
+}
+
+export function buildSearchUrl(params: BookingSearchParams, target: SearchTarget): string {
   const url = new URL('https://www.booking.com/searchresults.en-gb.html');
 
-  if (params.destId) {
-    url.searchParams.set('dest_id', params.destId);
-    url.searchParams.set('dest_type', 'city');
-  } else if (params.location) {
-    url.searchParams.set('ss', params.location);
+  if (target.kind === 'destination') {
+    url.searchParams.set('ss', target.destination.label || target.destination.destId);
+    url.searchParams.set('dest_id', target.destination.destId);
+    url.searchParams.set('dest_type', target.destination.destType.toLowerCase());
+  } else {
+    const center = bboxCenter(target.bbox);
+    const lat = center.lat.toFixed(5);
+    const lng = center.lng.toFixed(5);
+    url.searchParams.set('ss', `${lat},${lng}`);
+    url.searchParams.set('dest_type', 'latlong');
+    url.searchParams.set('latitude', lat);
+    url.searchParams.set('longitude', lng);
   }
 
   if (params.checkin) url.searchParams.set('checkin', params.checkin);
   if (params.checkout) url.searchParams.set('checkout', params.checkout);
   url.searchParams.set('group_adults', String(params.adults));
   url.searchParams.set('no_rooms', '1');
+  url.searchParams.set('group_children', '0');
   url.searchParams.set('selected_currency', params.currency);
 
-  // Build nflt filter string
   const filters = buildFilterString(params);
   if (filters) url.searchParams.set('nflt', filters);
 
   return url.toString();
-}
-
-function buildRawQueryForSession(
-  params: BookingSearchParams,
-  destId: number | null,
-): string {
-  const effectiveParams = destId
-    ? { ...params, destId: String(destId), location: undefined }
-    : params;
-  const searchUrl = new URL(buildSearchUrl(effectiveParams));
-  return `${searchUrl.pathname}${searchUrl.search}`;
-}
-
-function buildGraphQLUrl(
-  params: BookingSearchParams,
-  destId: number | null,
-): string {
-  const effectiveParams = destId
-    ? { ...params, destId: String(destId), location: undefined }
-    : params;
-  const searchUrl = new URL(buildSearchUrl(effectiveParams));
-  const graphqlUrl = new URL('https://www.booking.com/dml/graphql');
-
-  for (const [key, value] of searchUrl.searchParams.entries()) {
-    graphqlUrl.searchParams.set(key, value);
-  }
-  graphqlUrl.searchParams.set('lang', 'en-gb');
-
-  return graphqlUrl.toString();
-}
-
-function buildMapSession(session: BookingSession): BookingSession {
-  const baseTopic =
-    session.headers['x-booking-topic']?.split(',')[0]?.trim()
-    || 'capla_browser_b-search-web-searchresults';
-
-  return {
-    ...session,
-    headers: {
-      ...session.headers,
-      'x-booking-context-action': 'markers_on_map-search_results',
-      'x-booking-original-sli-identifier-suffix': 'SearchResults',
-      'x-booking-timeout-budget-ms': '200000',
-      'x-booking-timeout-ms': '200000',
-      'x-booking-topic': `${baseTopic}, markers_on_map-search_results`,
-    },
-  };
-}
-
-function cloneBodyTemplate<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 export function buildFilterString(params: BookingSearchParams): string {
@@ -436,280 +288,439 @@ export function buildFilterString(params: BookingSearchParams): string {
   return parts.join(';');
 }
 
-// --- GraphQL request builders ---
+// --- GraphQL request builder ---
 
-function buildFullSearchBody(params: BookingSearchParams, session: BookingSession, offset: number): any {
-  const filters = buildFilterString(params);
-  const destId = session.destId || -1;
+function randomRequestId(): string {
+  let id = '';
+  while (id.length < 32) id += Math.random().toString(16).slice(2);
+  return id.slice(0, 32);
+}
+
+/**
+ * Build a FullSearch body from a template captured from booking.com's own page
+ * (keeps its query text / extensions), overriding location, dates, guests, filters, paging.
+ */
+export function buildFullSearchBody(
+  template: FullSearchTemplate,
+  params: BookingSearchParams,
+  target: SearchTarget,
+  offset: number,
+  rowsPerPage: number = ROWS_PER_PAGE,
+  sessionSearchUrl?: string,
+): any {
+  const body = JSON.parse(JSON.stringify(template));
+  const input = body.variables.input;
   const checkin = params.checkin || '';
   const checkout = params.checkout || '';
 
-  return {
-    operationName: 'FullSearch',
-    variables: {
-      includeBundle: false,
-      input: {
-        acidCarouselContext: null,
-        dates: { checkin, checkout },
-        doAvailabilityCheck: false,
-        encodedAutocompleteMeta: null,
-        enableCampaigns: true,
-        filters: { selectedFilters: filters },
-        flexibleDatesConfig: {
-          broadDatesCalendar: { checkinMonths: [], los: [], startWeekdays: [] },
-          dateFlexUseCase: 'DATE_RANGE',
-          dateRangeCalendar: { checkin: [checkin], checkout: [checkout] },
-        },
-        forcedBlocks: null,
-        location: { destType: 'CITY', destId },
-        metaContext: {
-          metaCampaignId: 0, externalTotalPrice: null, feedPrice: null,
-          hotelCenterAccountId: null, rateRuleId: null, dragongateTraceId: null,
-          pricingProductsTag: null,
-        },
-        nbRooms: 1,
-        nbAdults: params.adults,
-        showAparthotelAsHotel: true,
-        needsRoomsMatch: false,
-        optionalFeatures: { forceArpExperiments: true, testProperties: false },
-        pagination: { rowsPerPage: 25, offset },
-        rawQueryForSession: buildRawQueryForSession(params, destId),
-        referrerBlock: null,
-        sbCalendarOpen: false,
-        sorters: { selectedSorter: null, referenceGeoId: null, tripTypeIntentId: null },
-        travelPurpose: 2,
-        seoThemeIds: [],
-        useSearchParamsFromSession: true,
-        merchInput: { testCampaignIds: [] },
-        webSearchContext: { reason: 'CLIENT_SIDE_UPDATE', source: 'SEARCH_RESULTS', outcome: 'SEARCH_RESULTS' },
-        clientSideRequestId: Math.random().toString(16).substring(2, 18),
-      },
-      carouselLowCodeExp: false,
-    },
-    extensions: {
-      persistedQuery: { version: 1, sha256Hash: FULL_SEARCH_HASH },
-    },
-  };
-}
+  input.dates = { checkin, checkout };
+  if (input.flexibleDatesConfig?.dateRangeCalendar) {
+    input.flexibleDatesConfig.dateRangeCalendar = {
+      ...input.flexibleDatesConfig.dateRangeCalendar,
+      checkin: checkin ? [checkin] : [],
+      checkout: checkout ? [checkout] : [],
+    };
+  }
+  input.nbRooms = 1;
+  input.nbAdults = params.adults;
+  input.nbChildren = 0;
+  input.childrenAges = [];
+  input.filters = { selectedFilters: buildFilterString(params) };
+  input.pagination = { rowsPerPage, offset };
+  input.clientSideRequestId = randomRequestId();
+  // The server reads session search params from this (useSearchParamsFromSession); keep it on
+  // the searchresults URL this session opened, not the one the template was captured on.
+  const sessionUrl = new URL(sessionSearchUrl || buildSearchUrl(params, target));
+  input.rawQueryForSession = `${sessionUrl.pathname}${sessionUrl.search}`;
+  // Booking's default ("popularity") ranking reshuffles between requests, so offset pages
+  // overlap (~25% duplicates, missing properties). Sorting by price keeps pages stable;
+  // it is used whenever more than one page is wanted. BOOKING_SEARCH_SORTER overrides
+  // (e.g. `popularity`, `distance`, `review_score_and_price`; empty = Booking default).
+  const sorter = process.env.BOOKING_SEARCH_SORTER !== undefined
+    ? process.env.BOOKING_SEARCH_SORTER
+    : (!params.maxResults || params.maxResults > rowsPerPage ? 'price' : '');
+  if (sorter) {
+    input.sorters = { ...(input.sorters || {}), selectedSorter: sorter };
+  }
 
-function buildMapMarkersBody(
-  params: BookingSearchParams,
-  session: BookingSession,
-  bbox: BoundingBox,
-  offset: number = 0,
-): any {
-  if (session.mapMarkersTemplate?.variables?.input) {
-    const template = cloneBodyTemplate(session.mapMarkersTemplate);
-    const filters = buildFilterString(params);
-    const destId = session.destId || -1;
-    const checkin = params.checkin || '';
-    const checkout = params.checkout || '';
-    const input = template.variables.input;
-
-    input.dates = { checkin, checkout };
-    input.filters = { ...(input.filters || {}), selectedFilters: filters };
-    if (input.flexibleDatesConfig?.dateRangeCalendar) {
-      input.flexibleDatesConfig.dateRangeCalendar = {
-        checkin: [checkin],
-        checkout: [checkout],
-      };
-    }
+  const templateLocation = input.location || {};
+  if (target.kind === 'destination') {
     input.location = {
-      ...(input.location || {}),
+      searchString: target.destination.label,
+      destType: target.destination.destType.toUpperCase(),
+      destId: Number(target.destination.destId),
+    };
+  } else {
+    const location: Record<string, unknown> = {
       destType: 'BOUNDING_BOX',
       boundingBox: {
-        neLat: bbox.neLat,
-        neLon: bbox.neLng,
-        swLat: bbox.swLat,
-        swLon: bbox.swLng,
-        precision: 1,
-      },
-      hotelIds: Array.isArray(input.location?.hotelIds) ? input.location.hotelIds : [],
-      initialDestination: { destType: 'CITY', destId },
-    };
-    input.location.hotelIds = [];
-    input.nbRooms = 1;
-    input.nbAdults = params.adults;
-    input.pagination = {
-      ...(input.pagination || {}),
-      rowsPerPage: 100,
-      offset,
-    };
-    input.rawQueryForSession = buildRawQueryForSession(params, destId);
-    input.webSearchContext = {
-      reason: 'CLIENT_SIDE_UPDATE',
-      source: 'SEARCH_RESULTS_MAP',
-      outcome: 'SEARCH_RESULTS_MAP',
-    };
-    input.clientSideRequestId = Math.random().toString(16).substring(2, 18);
-    input.hasUserAppliedFilters = true;
-
-    template.variables.includeBundle = false;
-    template.variables.markersInput = {
-      ...(template.variables.markersInput || {}),
-      actionType: 'SEARCH_RESULTS',
-      boundingBox: {
-        northEast: { latitude: bbox.neLat, longitude: bbox.neLng },
-        southWest: { latitude: bbox.swLat, longitude: bbox.swLng },
+        neLat: target.bbox.neLat,
+        neLon: target.bbox.neLng,
+        swLat: target.bbox.swLat,
+        swLon: target.bbox.swLng,
         precision: 1,
       },
     };
-    template.variables.airportsInput = template.variables.airportsInput || { count: 20, searchStrategy: {} };
-    template.variables.citiesInput = template.variables.citiesInput || { count: 20, searchStrategy: {} };
-    template.variables.landmarksInput = template.variables.landmarksInput || { count: 1, searchStrategy: {} };
-    template.variables.beachesInput = template.variables.beachesInput || { count: 100, searchStrategy: {} };
-    template.variables.skiResortsInput = {
-      ...(template.variables.skiResortsInput || {}),
-      count: 10,
-      searchStrategy: { nearbyUfi: destId },
-    };
-    template.variables.includeBeachMarkers = false;
-    template.variables.includeSkiMarkers = false;
-    template.variables.includeCityMarkers = true;
-    template.variables.includeAirportMarkers = true;
-    template.variables.includeLandmarkMarkers = false;
-
-    return template;
+    if (templateLocation.destId != null && templateLocation.destType && !['BOUNDING_BOX', 'LATLONG'].includes(templateLocation.destType)) {
+      location.initialDestination = { destType: templateLocation.destType, destId: templateLocation.destId };
+    }
+    input.location = location;
   }
 
-  const filters = buildFilterString(params);
-  const destId = session.destId || -1;
-  const checkin = params.checkin || '';
-  const checkout = params.checkout || '';
-
-  return {
-    operationName: 'MapMarkersDesktop',
-    variables: {
-      input: {
-        acidCarouselContext: null,
-        dates: { checkin, checkout },
-        doAvailabilityCheck: false,
-        encodedAutocompleteMeta: null,
-        enableCampaigns: true,
-        filters: { selectedFilters: filters },
-        flexibleDatesConfig: {
-          broadDatesCalendar: { checkinMonths: [], los: [], startWeekdays: [] },
-          dateFlexUseCase: 'DATE_RANGE',
-          dateRangeCalendar: { checkin: [checkin], checkout: [checkout] },
-        },
-        forcedBlocks: null,
-        location: {
-          destType: 'BOUNDING_BOX',
-          boundingBox: {
-            neLat: bbox.neLat, neLon: bbox.neLng,
-            swLat: bbox.swLat, swLon: bbox.swLng,
-            precision: 1,
-          },
-          hotelIds: [],
-          initialDestination: { destType: 'CITY', destId },
-        },
-        metaContext: {
-          metaCampaignId: 0, externalTotalPrice: null, feedPrice: null,
-          hotelCenterAccountId: null, rateRuleId: null, dragongateTraceId: null,
-          pricingProductsTag: null,
-        },
-        nbRooms: 1,
-        nbAdults: params.adults,
-        showAparthotelAsHotel: true,
-        needsRoomsMatch: false,
-        optionalFeatures: { forceArpExperiments: true, testProperties: false },
-        pagination: { rowsPerPage: 100, offset },
-        rawQueryForSession: buildRawQueryForSession(params, destId),
-        referrerBlock: null,
-        sbCalendarOpen: false,
-        sorters: { selectedSorter: null, referenceGeoId: null, tripTypeIntentId: null },
-        travelPurpose: 2,
-        seoThemeIds: [],
-        useSearchParamsFromSession: true,
-        merchInput: { testCampaignIds: [] },
-        webSearchContext: { reason: 'CLIENT_SIDE_UPDATE', source: 'SEARCH_RESULTS_MAP', outcome: 'SEARCH_RESULTS_MAP' },
-        clientSideRequestId: Math.random().toString(16).substring(2, 18),
-        hasUserAppliedFilters: true,
-      },
-      includeBundle: false,
-      markersInput: {
-        actionType: 'SEARCH_RESULTS',
-        boundingBox: {
-          northEast: { latitude: bbox.neLat, longitude: bbox.neLng },
-          southWest: { latitude: bbox.swLat, longitude: bbox.swLng },
-          precision: 1,
-        },
-      },
-      airportsInput: { count: 20, searchStrategy: {} },
-      citiesInput: { count: 20, searchStrategy: {} },
-      landmarksInput: { count: 1, searchStrategy: {} },
-      beachesInput: { count: 100, searchStrategy: {} },
-      skiResortsInput: { count: 10, searchStrategy: { nearbyUfi: destId } },
-      includeBeachMarkers: false,
-      includeSkiMarkers: false,
-      includeCityMarkers: true,
-      includeAirportMarkers: true,
-      includeLandmarkMarkers: false,
-    },
-    extensions: {
-      persistedQuery: { version: 1, sha256Hash: MAP_MARKERS_HASH },
-    },
-  };
+  return body;
 }
 
-// --- GraphQL fetch ---
+// --- Live browser session ---
 
-async function fetchGraphQL(session: BookingSession, body: any): Promise<any> {
-  const reqHeaders: Record<string, string> = {
-    'content-type': 'application/json',
-    'origin': 'https://www.booking.com',
-    'referer': session.refererUrl,
-    'user-agent': session.headers['user-agent'] || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
-    'accept': '*/*',
-    'accept-language': 'en-US,en;q=0.9',
-    'cookie': session.cookies,
-    'apollographql-client-name': session.headers['apollographql-client-name'] || 'b-search-web-searchresults',
-    'x-booking-context-action-name': session.headers['x-booking-context-action-name'] || 'searchresults_irene',
-    'x-booking-context-aid': session.headers['x-booking-context-aid'] || '304142',
-    'x-booking-site-type-id': session.headers['x-booking-site-type-id'] || '1',
-  };
+class BookingSessionError extends Error {}
 
-  // Copy x-booking-* and apollographql-* headers
-  for (const [k, v] of Object.entries(session.headers)) {
-    if ((k.startsWith('x-booking-') || k.startsWith('apollographql-')) && v) {
-      reqHeaders[k] = v;
+interface LiveSession {
+  browser: any;
+  page: any;
+  searchUrl: string;
+  graphqlUrl: string;
+  headers: Record<string, string>;
+  template: FullSearchTemplate | null;
+  templateSource: 'live' | 'cache' | null;
+  close(): Promise<void>;
+}
+
+/** Sticky exit IP per browser session: Evomi password syntax, so only for Evomi or when forced. */
+function useStickyProxySession(): boolean {
+  if (process.env.PROXY_STICKY_SESSION === 'false') return false;
+  return process.env.PROXY_STICKY_SESSION === 'true' || /evomi/i.test(process.env.PROXY_HOST || '');
+}
+
+function hasProxyConfigured(): boolean {
+  return process.env.USE_PROXY !== 'false' && !!process.env.PROXY_HOST;
+}
+
+/**
+ * Booking search runs through the proxy only. Searching from this machine's IP needs an
+ * explicit opt-out: the CLI's --no-proxy (sets REVIEWR_NO_PROXY) or BOOKING_ALLOW_NO_PROXY=true.
+ * (USE_PROXY=false alone is not enough: the CLI also sets it when no proxy is configured.)
+ */
+export function assertProxyPolicy(env: NodeJS.ProcessEnv = process.env): void {
+  if (env.USE_PROXY !== 'false' && env.PROXY_HOST) return;
+  if (env.REVIEWR_NO_PROXY === 'true' || env.BOOKING_ALLOW_NO_PROXY === 'true') {
+    console.log('⚠️  Booking search without proxy: requests leave from this machine\'s IP.');
+    return;
+  }
+  throw new Error(
+    'Booking search needs a proxy (PROXY_* in .env, ~/.config/reviewr/.env or --proxy). '
+    + 'Pass --no-proxy (or set BOOKING_ALLOW_NO_PROXY=true) to search from this machine\'s IP on purpose.',
+  );
+}
+
+function pickGraphqlHeaders(headers: Record<string, string>): Record<string, string> {
+  const picked: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (!value) continue;
+    if (key === 'content-type' || key.startsWith('x-booking-') || key.startsWith('apollographql-')) {
+      picked[key] = value;
     }
   }
-
-  const proxyUrl = getProxyUrlFromEnv();
-  const response = await fetch(session.graphqlUrl, {
-    method: 'POST',
-    headers: reqHeaders,
-    body: JSON.stringify(body),
-    agent: proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined,
-  });
-
-  if (response.status === 403) {
-    throw new Error('GraphQL 403 — session expired, need re-bootstrap');
-  }
-
-  const data = await response.json() as any;
-
-  if (data?.errors?.length && !data?.data?.searchQueries?.search?.results?.length) {
-    const msg = data.errors.map((e: any) => e.message).join('; ');
-    throw new Error(`GraphQL error: ${msg}`);
-  }
-
-  return data;
+  picked['content-type'] = 'application/json';
+  return picked;
 }
 
-type MapMarkersCellSearchResult = {
-  cellResults: SearchResult[];
-  totalResults: number;
-  rawResultsCount: number;
-};
+function buildGraphqlUrl(searchUrl: string): string {
+  const source = new URL(searchUrl);
+  const url = new URL('https://www.booking.com/dml/graphql');
+  for (const [key, value] of source.searchParams.entries()) url.searchParams.set(key, value);
+  url.searchParams.set('lang', 'en-gb');
+  return url.toString();
+}
 
-function getSubdivisionSignal(
-  filteredResultsCount: number,
-  rawResultsCount: number,
-  totalResults: number,
-): number {
-  return Math.max(filteredResultsCount, rawResultsCount, totalResults);
+async function pageFetchJson(page: any, url: string, headers: Record<string, string>, body: any): Promise<{ status: number; json: any; text: string }> {
+  const result = await page.evaluate(async ({ url, headers, body }: any) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60000);
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        credentials: 'include',
+        signal: controller.signal,
+      });
+      return { status: response.status, text: await response.text() };
+    } catch (error: any) {
+      return { status: 0, text: String(error?.message || error) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }, { url, headers, body });
+
+  let json: any = null;
+  try { json = JSON.parse(result.text); } catch { /* not JSON */ }
+  return { status: result.status, json, text: result.text };
+}
+
+async function waitOutWafChallenge(page: any): Promise<void> {
+  const html = await page.content().catch(() => '');
+  if (html.includes('awsWafCookieDomainList') || html.includes('challenge.js')) {
+    console.log('  WAF challenge detected, waiting...');
+    await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(6000);
+  }
+}
+
+async function resolveDestinationViaAutocomplete(
+  page: any,
+  query: string,
+  pageHeaders: () => Record<string, string>,
+  logger?: BookingSearchLogger,
+): Promise<BookingDestination | null> {
+  let captured: { body: any; headers: Record<string, string>; url: string } | null = null;
+  const onRequest = (request: any) => {
+    if (!request.url().includes('/dml/graphql')) return;
+    try {
+      const body = JSON.parse(request.postData() || '{}');
+      if (body.operationName === 'AutoComplete' && !captured) {
+        captured = { body, headers: request.headers(), url: request.url() };
+      }
+    } catch { /* ignore */ }
+  };
+  page.on('request', onRequest);
+
+  try {
+    // Type the first letters into the homepage search box so booking.com's own client sends
+    // AutoComplete (we then replay it with the full query).
+    for (let attempt = 0; attempt < 3 && !captured; attempt++) {
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.evaluate(() => {
+        document.querySelectorAll('[data-bui-trap-root], #onetrust-consent-sdk').forEach((el) => el.remove());
+      }).catch(() => {});
+      const input = page.locator('input[name="ss"]').first();
+      await input.waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+      await input.click({ force: true, timeout: 5000 }).catch(() => {});
+      await input.fill('').catch(() => {});
+      await page.keyboard.type(query.slice(0, 5), { delay: 110 + Math.random() * 60 }).catch(() => {});
+      await page.waitForRequest((request: any) => (
+        request.url().includes('/dml/graphql') && (request.postData() || '').includes('"AutoComplete"')
+      ), { timeout: 6000 + attempt * 3000 }).catch(() => {});
+      await page.waitForTimeout(500);
+    }
+  } finally {
+    page.off('request', onRequest);
+  }
+
+  let source = 'live';
+  if (captured) {
+    saveAutoCompleteTemplate((captured as any).body);
+  } else {
+    const cached = getCachedAutoCompleteTemplate();
+    const headers = pageHeaders();
+    if (cached && headers['x-booking-csrf-token']) {
+      captured = { body: cached, headers, url: 'https://www.booking.com/dml/graphql?lang=en-gb' };
+      source = 'cache';
+    }
+  }
+  if (!captured) {
+    logger?.log('autocomplete_unavailable', { query });
+    console.log('  ⚠️  Booking AutoComplete did not fire');
+    return null;
+  }
+
+  const template = captured as { body: any; headers: Record<string, string>; url: string };
+  // AutoComplete ranking is not deterministic (sometimes only hotels come back for
+  // "Gdańsk Old Town"), so also try the "Old Town, Gdańsk" word orders.
+  for (const variant of autocompleteQueryVariants(query)) {
+    const body = JSON.parse(JSON.stringify(template.body));
+    body.variables.input.prefixQuery = variant;
+    body.variables.input.nbSuggestions = 10;
+    const response = await pageFetchJson(page, template.url, pickGraphqlHeaders(template.headers), body);
+    const suggestions = parseAutocompleteResponse(response.json);
+    const destination = pickAutocompleteDestination(query, suggestions);
+    logger?.log('autocomplete_resolved', {
+      query,
+      variant,
+      source,
+      status: response.status,
+      suggestions: suggestions.map(s => `${s.destType}:${s.destId}:${s.label}`),
+      destination: destination ?? null,
+    });
+    if (destination) return destination;
+    await page.waitForTimeout(400 + Math.random() * 400);
+  }
+  return null;
+}
+
+export function autocompleteQueryVariants(query: string): string[] {
+  const trimmed = query.trim().replace(/\s+/g, ' ');
+  const variants = [trimmed];
+  if (!trimmed.includes(',')) {
+    const words = trimmed.split(' ');
+    if (words.length >= 2) {
+      variants.push(`${words.slice(1).join(' ')}, ${words[0]}`);
+      variants.push(`${words[words.length - 1]}, ${words.slice(0, -1).join(' ')}`);
+    }
+  }
+  return [...new Set(variants)];
+}
+
+async function triggerFullSearchCapture(page: any, isCaptured: () => boolean): Promise<void> {
+  for (let i = 0; i < 12 && !isCaptured(); i++) {
+    await page.locator('[data-testid="property-card"]').last().scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
+    await page.mouse.wheel(0, 1500).catch(() => {});
+    await page.waitForTimeout(1500);
+    const loadMore = page.locator('button:has-text("Load more results")').first();
+    if (!isCaptured() && await loadMore.isVisible().catch(() => false)) {
+      await loadMore.click().catch(() => {});
+      await page.waitForTimeout(1500);
+    }
+  }
+}
+
+interface OpenSessionResult {
+  session: LiveSession;
+  destination: BookingDestination | null;
+}
+
+/**
+ * Open a warmed-up booking.com session on a real searchresults page.
+ * `resolveLocation` → resolve params.location through AutoComplete first (returns
+ * destination=null when Booking has no matching destination).
+ */
+async function openSession(
+  params: BookingSearchParams,
+  initialTarget: SearchTarget | null,
+  resolveLocation: string | null,
+  logger: BookingSearchLogger,
+  resolveFallback?: () => Promise<SearchTarget>,
+): Promise<OpenSessionResult> {
+  const { chromium } = await import('playwright');
+  const proxySession = useStickyProxySession() ? `rv${Math.random().toString(36).slice(2, 10)}` : undefined;
+  const launchOptions: Record<string, any> = buildPlaywrightLaunchOptionsFromEnv({ proxySession });
+  launchOptions.args = [...(launchOptions.args || []), '--disable-blink-features=AutomationControlled'];
+
+  console.log('🔑 Opening Booking.com browser session...');
+  logger.log('bootstrap_started', {
+    location: params.location ?? null,
+    destId: params.destId ?? null,
+    boundingBox: params.boundingBox ?? null,
+    filters: buildFilterString(params),
+    proxy: hasProxyConfigured(),
+    proxyCountry: process.env.PROXY_COUNTRY || null,
+  });
+
+  const browser = await chromium.launch(launchOptions);
+  const close = async () => { await browser.close().catch(() => {}); };
+
+  try {
+    const context = await browser.newContext({
+      userAgent: USER_AGENT,
+      locale: 'en-GB',
+      viewport: { width: 1400, height: 1000 },
+    });
+    await context.route('**/*', (route: any) => (
+      ['image', 'media', 'font'].includes(route.request().resourceType())
+        ? route.abort()
+        : route.continue()
+    ));
+    const page = await context.newPage();
+
+    // BOOKING_SEARCH_TEMPLATE=cache: use the cached FullSearch template when there is one and
+    // skip the live capture (debugging aid for the cache / stale-query refresh path).
+    const preferCache = process.env.BOOKING_SEARCH_TEMPLATE === 'cache' && !!getCachedFullSearchTemplate();
+    let headers: Record<string, string> = {};
+    let homeHeaders: Record<string, string> = {};
+    let liveTemplate: any = null;
+    let liveGraphqlUrl = '';
+    page.on('request', (request: any) => {
+      if (!request.url().includes('/dml/graphql')) return;
+      const requestHeaders = request.headers();
+      if (requestHeaders['x-booking-csrf-token']) homeHeaders = requestHeaders;
+      const onSearchPage = page.url().includes('/searchresults');
+      if (onSearchPage && requestHeaders['x-booking-csrf-token']) {
+        headers = requestHeaders;
+      }
+      try {
+        const body = JSON.parse(request.postData() || '{}');
+        if (body.operationName === 'FullSearch' && isUsableFullSearchTemplate(body) && !preferCache) {
+          liveTemplate = body;
+          liveGraphqlUrl = request.url();
+          headers = requestHeaders;
+        }
+      } catch { /* ignore */ }
+    });
+
+    await page.goto('https://www.booking.com/index.en-gb.html', { waitUntil: 'domcontentloaded', timeout: 90000 });
+    await waitOutWafChallenge(page);
+    await page.waitForTimeout(3000 + Math.random() * 2000);
+    await page.click('#onetrust-accept-btn-handler', { timeout: 3000 }).catch(() => {});
+
+    let destination: BookingDestination | null = null;
+    let target = initialTarget;
+    if (resolveLocation) {
+      destination = await resolveDestinationViaAutocomplete(page, resolveLocation, () => homeHeaders, logger);
+      if (destination) {
+        console.log(`📍 Booking destination: ${destination.label} (${destination.destType.toLowerCase()} ${destination.destId})`);
+        target = { kind: 'destination', destination };
+      } else if (!target && resolveFallback) {
+        target = await resolveFallback();
+      }
+    }
+    if (!target) throw new Error('No Booking search target');
+
+    const searchUrl = buildSearchUrl(params, target);
+    console.log(`  Navigating to: ${searchUrl}`);
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
+    await waitOutWafChallenge(page);
+    await page.waitForSelector('[data-testid="property-card"]', { timeout: 30000 }).catch(() => {});
+
+    const finalUrl = page.url();
+    const cardCount = await page.locator('[data-testid="property-card"]').count().catch(() => 0);
+    const heading = await page.locator('h1').first().innerText({ timeout: 3000 }).catch(() => '');
+    logger.log('bootstrap_serp_loaded', { finalUrl, cardCount, heading });
+    if (!finalUrl.includes('/searchresults')) {
+      throw new BookingSessionError(`searchresults bounced to ${finalUrl}`);
+    }
+    if (heading) console.log(`  ${heading}`);
+
+    if (cardCount > 0 && !preferCache) {
+      await triggerFullSearchCapture(page, () => !!liveTemplate);
+    }
+
+    let template: FullSearchTemplate | null = null;
+    let templateSource: LiveSession['templateSource'] = null;
+    if (liveTemplate) {
+      template = liveTemplate;
+      templateSource = 'live';
+      saveFullSearchTemplate(liveTemplate);
+    } else {
+      template = getCachedFullSearchTemplate();
+      templateSource = template ? 'cache' : null;
+    }
+
+    const hasCsrf = !!headers['x-booking-csrf-token'];
+    logger.log('bootstrap_completed', {
+      success: hasCsrf,
+      hasCsrfToken: hasCsrf,
+      templateSource,
+      templateHasQueryText: typeof template?.query === 'string',
+      destination,
+    });
+    console.log(`  ✅ Session ready (FullSearch template: ${templateSource ?? 'none'}${hasCsrf ? '' : ', no CSRF header'})`);
+
+    return {
+      session: {
+        browser,
+        page,
+        searchUrl,
+        graphqlUrl: liveGraphqlUrl || buildGraphqlUrl(searchUrl),
+        headers: pickGraphqlHeaders(headers['x-booking-csrf-token'] ? headers : { ...homeHeaders, ...headers }),
+        template,
+        templateSource,
+        close,
+      },
+      destination,
+    };
+  } catch (error) {
+    await close();
+    throw error;
+  }
 }
 
 // --- Response parsing ---
@@ -729,6 +740,7 @@ function parseSearchResult(r: any, params: BookingSearchParams): SearchResult | 
   );
 
   const reviewScore = r?.basicPropertyData?.reviewScore;
+  const legacyReviews = r?.basicPropertyData?.reviews;
   const location = r?.basicPropertyData?.location;
   const unitConfigurations = getMatchingUnitConfigurations(r);
   const bedroomCounts = unitConfigurations
@@ -741,13 +753,16 @@ function parseSearchResult(r: any, params: BookingSearchParams): SearchResult | 
     .map((config: any) => toFiniteNumber(config?.nbBathrooms ?? config?.bathrooms))
     .filter((value: number | null): value is number => value != null);
 
+  const rating = toFiniteNumber(reviewScore?.score) ?? toFiniteNumber(legacyReviews?.totalScore);
+  const reviewCount = toFiniteNumber(reviewScore?.reviewCount) ?? toFiniteNumber(legacyReviews?.reviewsCount) ?? 0;
+
   return {
     id: String(hotelId),
     platform: 'booking',
-    name: r?.displayName?.text || '',
+    name: r?.displayName?.text || r?.basicPropertyData?.name || '',
     url: `https://www.booking.com/hotel/${countryCode}/${pageName}.html`,
-    rating: reviewScore?.score ?? null,
-    reviewCount: reviewScore?.reviewCount ?? 0,
+    rating: rating && rating > 0 ? rating : null,
+    reviewCount,
     pricing,
     coordinates: location?.latitude != null && location?.longitude != null
       ? { lat: location.latitude, lng: location.longitude }
@@ -763,193 +778,53 @@ function parseSearchResult(r: any, params: BookingSearchParams): SearchResult | 
     bathrooms: bathroomCounts.length > 0 ? Math.max(...bathroomCounts) : undefined,
     stars: r?.basicPropertyData?.starRating?.value ?? undefined,
     freeCancellation: r?.policies?.showFreeCancellation ?? undefined,
+    hostType: typeof r?.hostTraderLabel === 'string' && r.hostTraderLabel ? r.hostTraderLabel : undefined,
   };
 }
 
-function parseFullSearchResponse(data: any, params: BookingSearchParams, pageIndex: number): SearchPage {
-  const results = data?.data?.searchQueries?.search?.results || [];
-  const total = data?.data?.searchQueries?.search?.pagination?.nbResultsTotal ?? 0;
-
-  const parsed: SearchResult[] = [];
-  for (const r of results) {
-    const result = parseSearchResult(r, params);
-    if (result) parsed.push(result);
-  }
-  const filtered = filterSearchResults(parsed, params);
-
-  return {
-    results: filtered,
-    hasNextPage: parsed.length > 0 && (pageIndex + 1) * 25 < total,
-    pageIndex,
-  };
+function isInsideBbox(result: SearchResult, bbox: BoundingBox): boolean {
+  if (!result.coordinates) return false;
+  const { lat, lng } = result.coordinates;
+  return lat <= bbox.neLat && lat >= bbox.swLat && lng <= bbox.neLng && lng >= bbox.swLng;
 }
 
-type ParsedMapMarkersPage = SearchPage & {
+interface ParsedPage {
+  results: SearchResult[];
   rawResultsCount: number;
   totalResults: number;
-};
+}
 
-function parseMapMarkersResponse(
-  data: any,
-  params: BookingSearchParams,
-  pageIndex: number,
-): ParsedMapMarkersPage {
-  const results = data?.data?.searchQueries?.search?.results || [];
-  const total = data?.data?.searchQueries?.search?.pagination?.nbResultsTotal ?? 0;
+function parseFullSearchPayload(data: any, params: BookingSearchParams, bbox?: BoundingBox): ParsedPage {
+  const search = data?.data?.searchQueries?.search;
+  const rawResults = Array.isArray(search?.results) ? search.results : [];
+  const total = toFiniteNumber(search?.pagination?.nbResultsTotal) ?? 0;
 
   const parsed: SearchResult[] = [];
-  for (const r of results) {
-    const result = parseSearchResult(r, params);
+  for (const raw of rawResults) {
+    const result = parseSearchResult(raw, params);
     if (result) parsed.push(result);
   }
-  const filtered = filterSearchResults(parsed, params);
-
+  // Booking pads bbox searches with a few nearby properties; keep the box strict.
+  const inArea = bbox ? parsed.filter(result => isInsideBbox(result, bbox)) : parsed;
   return {
-    results: filtered,
-    hasNextPage: parsed.length > 0 && (pageIndex + 1) * 100 < total,
-    pageIndex,
+    results: filterSearchResults(inArea, params),
     rawResultsCount: parsed.length,
     totalResults: total,
   };
 }
 
-// --- SSR fallback ---
-
-async function searchBookingSSR(
-  params: BookingSearchParams,
-  session: BookingSession,
-  seenIds: Set<string>,
-  maxResults?: number,
-  onProgress?: ProgressCallback,
-): Promise<SearchResult[]> {
-  const { chromium } = await import('playwright');
-
-  console.log('  📄 Falling back to SSR extraction via Playwright...');
-  const browser = await chromium.launch(buildPlaywrightLaunchOptions());
-  const results: SearchResult[] = [];
-
-  try {
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-      locale: 'en-GB',
-    });
-    const page = await context.newPage();
-    let offset = 0;
-    let pageIndex = 0;
-
-    while (true) {
-      const url = new URL(buildSearchUrl(params));
-      url.searchParams.set('offset', String(offset));
-
-      await page.goto(url.toString(), { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-      // Handle WAF
-      let html = await page.content();
-      if (html.includes('awsWafCookieDomainList') || html.includes('challenge.js')) {
-        try {
-          await page.waitForURL('**/*', { timeout: 30000, waitUntil: 'domcontentloaded' });
-          await page.waitForTimeout(5000);
-        } catch {
-          await page.waitForTimeout(10000);
-        }
-      }
-
-      try {
-        await page.waitForSelector('[data-testid="property-card"]', { timeout: 15000 });
-      } catch {
-        break; // No more results
-      }
-
-      // Extract from Apollo SSR cache
-      const apolloData = await page.evaluate(() => {
-        const script = document.querySelector('script[data-capla-store-data="apollo"]');
-        if (!script) return null;
-        try { return JSON.parse(script.textContent || ''); } catch { return null; }
-      });
-
-      // Extract property cards from DOM
-      const cards = await page.$$eval('[data-testid="property-card"]', (els) =>
-        els.map(el => ({
-          name: el.querySelector('[data-testid="title"]')?.textContent?.trim() || '',
-          link: el.querySelector('a[data-testid="title-link"]')?.getAttribute('href') || '',
-          price: el.querySelector('[data-testid="price-and-discounted-price"]')?.textContent?.trim() || '',
-          rating: el.querySelector('[data-testid="review-score"]')?.textContent?.trim() || '',
-        })),
-      );
-
-      const pageResults: SearchResult[] = [];
-      for (const card of cards) {
-        // Extract pageName from link
-        const pageNameMatch = card.link.match(/\/hotel\/[a-z]{2}\/([^.]+)\./);
-        const pageName = pageNameMatch ? pageNameMatch[1] : '';
-
-        // Try to get ID from Apollo cache
-        let hotelId: string | null = null;
-        if (apolloData && pageName) {
-          for (const [key, value] of Object.entries(apolloData)) {
-            if (key.includes('BasicPropertyData') && (value as any)?.pageName === pageName) {
-              hotelId = String((value as any).id || '');
-              break;
-            }
-          }
-        }
-
-        if (!hotelId) {
-          hotelId = pageName; // Use pageName as fallback ID
-        }
-
-        if (seenIds.has(hotelId)) continue;
-        seenIds.add(hotelId);
-
-        // Parse rating "8.5" or "Excellent 8.5"
-        let rating: number | null = null;
-        let reviewCount = 0;
-        const ratingMatch = card.rating.match(/([\d.]+)/);
-        if (ratingMatch) rating = parseFloat(ratingMatch[1]);
-        const countMatch = card.rating.match(/([\d,]+)\s*reviews?/i);
-        if (countMatch) reviewCount = parseInt(countMatch[1].replace(',', ''));
-
-        // Parse price
-        const pricing = parseBookingCardPricing(card.price, params.currency);
-
-        pageResults.push({
-          id: hotelId,
-          platform: 'booking',
-          name: card.name,
-          url: card.link.startsWith('http') ? card.link : `https://www.booking.com${card.link}`,
-          rating,
-          reviewCount,
-          pricing,
-          coordinates: null,
-          propertyType: null,
-          photoUrl: null,
-        });
-      }
-
-      const filteredPageResults = filterSearchResults(pageResults, params);
-      results.push(...filteredPageResults);
-
-      if (onProgress) {
-        onProgress({
-          results: filteredPageResults,
-          hasNextPage: pageResults.length > 0,
-          pageIndex,
-        });
-      }
-
-      if (pageResults.length === 0 || (maxResults && results.length >= maxResults)) break;
-
-      offset += 25;
-      pageIndex++;
-      await sleep(1000);
-    }
-
-    await context.close();
-  } finally {
-    await browser.close();
+/** Collect FullSearch-style result objects (anything with basicPropertyData) from a JSON tree. */
+function harvestResultObjects(node: any, out: Map<string, any>, depth = 0): void {
+  if (!node || typeof node !== 'object' || depth > 40) return;
+  if (Array.isArray(node)) {
+    for (const item of node) harvestResultObjects(item, out, depth + 1);
+    return;
   }
-
-  return results;
+  const id = node.basicPropertyData?.id;
+  if (id != null && node.basicPropertyData?.pageName && !out.has(String(id))) {
+    out.set(String(id), node);
+  }
+  for (const value of Object.values(node)) harvestResultObjects(value, out, depth + 1);
 }
 
 // --- Main entry point ---
@@ -958,507 +833,296 @@ export async function searchBooking(
   params: BookingSearchParams,
   onProgress?: ProgressCallback,
 ): Promise<{ results: SearchResult[]; pagesScanned: number }> {
-  const bbox = params.boundingBox;
-  if (!bbox && !params.location && !params.destId) {
+  if (!params.boundingBox && !params.location && !params.destId) {
     throw new Error('Booking search requires --location, --bbox, or --dest-id');
   }
+  assertProxyPolicy();
 
-  const useBboxSearch = !!bbox;
   const logger = createBookingSearchLogger({
     params,
     mode: params.exhaustive ? 'exhaustive' : 'quick',
-    useBboxSearch,
+    useBboxSearch: !!params.boundingBox,
   });
   if (logger.filePath) {
     console.log(`🧾 Booking search log: ${logger.filePath}`);
   }
 
-  let session: BookingSession;
-  const now = Date.now();
-  if (cachedSession && cachedSession.headers['x-booking-csrf-token'] && (now - cachedSessionTime) < SESSION_TTL_MS) {
-    console.log('♻️  Reusing cached Booking session');
-    logger.log('session_reused', {
-      ageMs: now - cachedSessionTime,
-    });
-    session = cachedSession;
-  } else {
+  // Decide the initial target. --dest-id is used as given; --location (without bbox) is
+  // resolved through Booking AutoComplete inside the session; districts Booking does not
+  // know (e.g. "Gdańsk Śródmieście") fall back to the geocoded bounding box.
+  let bbox = params.boundingBox;
+  let initialTarget: SearchTarget | null = null;
+  let resolveLocation: string | null = null;
+  if (params.destId) {
+    initialTarget = {
+      kind: 'destination',
+      destination: {
+        destId: String(params.destId),
+        destType: (params.destType || 'city').toUpperCase(),
+        label: params.location || String(params.destId),
+      },
+    };
+  } else if (bbox) {
+    initialTarget = { kind: 'bbox', bbox };
+  } else if (params.location) {
+    resolveLocation = params.location;
+  }
+
+  let session: LiveSession | null = null;
+  let target: SearchTarget | null = initialTarget;
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= MAX_SESSION_ATTEMPTS && !session; attempt++) {
     try {
-      session = await bootstrapSession(params, logger);
-      if (session.headers['x-booking-csrf-token']) {
-        cachedSession = session;
-        cachedSessionTime = Date.now();
-      }
-    } catch (error: any) {
-      logger.log('bootstrap_failed', {
-        error: error instanceof Error ? error.message : String(error),
+      const locationQuery = resolveLocation;
+      const opened = await openSession(params, target, resolveLocation, logger, async () => {
+        console.log(`🌍 Booking has no destination matching "${locationQuery}" — searching its geocoded area instead`);
+        logger.log('destination_fallback_geocode', { location: locationQuery });
+        bbox = ensureMinBbox(await geocodeLocation(locationQuery!), 1000);
+        target = { kind: 'bbox', bbox };
+        return target;
       });
-      console.log(`❌ Bootstrap failed: ${error.message}`);
-      throw error;
+      if (opened.destination) {
+        target = { kind: 'destination', destination: opened.destination };
+      }
+      resolveLocation = null;
+      session = opened.session;
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      logger.log('bootstrap_failed', { attempt, error: message });
+      console.log(`  ⚠️  Session attempt ${attempt} failed: ${message}`);
+      if (attempt < MAX_SESSION_ATTEMPTS) await sleep(politeDelay(5000));
     }
+  }
+
+  if (!session || !target) {
+    logger.log('search_completed', { totalResults: 0, pagesScanned: 0, error: String(lastError) });
+    await logger.flush().catch(() => {});
+    throw lastError instanceof Error ? lastError : new Error('Could not open a Booking.com search session');
   }
 
   const seenIds = new Set<string>();
   const allResults: SearchResult[] = [];
   let pagesScanned = 0;
-
-  // Check if we have a working GraphQL session
-  const hasGraphQL = !!session.headers['x-booking-csrf-token'];
-
-  if (!hasGraphQL) {
-    console.log('⚠️  No GraphQL session, using SSR fallback');
-    const ssrResults = await searchBookingSSR(params, session, seenIds, params.maxResults, onProgress);
-    return { results: ssrResults, pagesScanned: 0 };
-  }
-
-  const progressTracker: ProgressCallback = (page) => {
-    pagesScanned++;
-    if (onProgress) onProgress(page);
-  };
+  const maxReached = () => !!params.maxResults && allResults.length >= params.maxResults;
 
   const addUniqueResults = (results: SearchResult[]): SearchResult[] => {
-    const newResults: SearchResult[] = [];
+    const fresh: SearchResult[] = [];
     for (const result of results) {
       if (!seenIds.has(result.id)) {
         seenIds.add(result.id);
-        newResults.push(result);
+        fresh.push(result);
       }
     }
-    allResults.push(...newResults);
-    return newResults;
+    allResults.push(...fresh);
+    return fresh;
   };
 
-  const searchMapMarkersCell = async (
-    cell: BoundingBox,
-    label: string,
-  ): Promise<MapMarkersCellSearchResult> => {
-    let offset = 0;
-    let pageIndex = 0;
-    let retried = false;
+  let templateRefreshed = false;
+  let sessionReopened = false;
+
+  /** One FullSearch page, with one template refresh and one session re-open on failure. */
+  const fetchPage = async (pageTarget: SearchTarget, offset: number): Promise<any> => {
+    for (;;) {
+      if (!session!.template) {
+        throw new Error('No FullSearch template captured from booking.com (and none cached)');
+      }
+      const body = buildFullSearchBody(session!.template, params, pageTarget, offset, ROWS_PER_PAGE, session!.searchUrl);
+      const response = await pageFetchJson(session!.page, session!.graphqlUrl, session!.headers, body);
+      const payload = response.json;
+      const hasResults = Array.isArray(payload?.data?.searchQueries?.search?.results);
+
+      if (response.status === 200 && hasResults) return payload;
+
+      if (payload && isStaleQueryError(payload) && !templateRefreshed) {
+        templateRefreshed = true;
+        console.log('  🔄 FullSearch query outdated — refreshing it from booking.com...');
+        logger.log('template_refresh', { source: session!.templateSource, errors: payload.errors?.map((e: any) => e.message) });
+        forgetFullSearchTemplate();
+        await session!.close();
+        session = (await openSession(params, target, null, logger)).session;
+        continue;
+      }
+
+      if (!sessionReopened && (response.status === 0 || response.status === 403 || response.status >= 500 || !payload)) {
+        sessionReopened = true;
+        console.log(`  🔄 GraphQL HTTP ${response.status} — reopening session...`);
+        logger.log('session_reopen', { status: response.status, snippet: response.text.slice(0, 200) });
+        await session!.close();
+        await sleep(politeDelay(3000));
+        session = (await openSession(params, target, null, logger)).session;
+        continue;
+      }
+
+      const message = payload?.errors?.map((e: any) => e.message).join('; ') || `HTTP ${response.status}`;
+      throw new Error(`Booking FullSearch failed: ${message}`);
+    }
+  };
+
+  /** Paginate one target (destination or bbox cell). */
+  const searchTarget = async (pageTarget: SearchTarget, label: string): Promise<ParsedPage> => {
+    const cellBbox = pageTarget.kind === 'bbox' ? pageTarget.bbox : undefined;
+    const cellResults: SearchResult[] = [];
+    const cellIds = new Set<string>();
     let totalResults = 0;
     let rawResultsCount = 0;
-    const cellSeenIds = new Set<string>();
-    const cellResults: SearchResult[] = [];
+    let staleRows = 0;
 
-    while (true) {
-      try {
-        const body = buildMapMarkersBody(params, session, cell, offset);
-        logger.log('map_markers_request', {
-          label,
-          pageIndex,
-          offset,
-          boundingBox: cell,
-          filters: buildFilterString(params),
-        });
-        const data = await fetchGraphQL(buildMapSession(session), body);
-        const page = parseMapMarkersResponse(data, params, pageIndex);
+    for (let offset = 0, pageIndex = 0; offset < MAX_OFFSET; offset += ROWS_PER_PAGE, pageIndex++) {
+      logger.log('full_search_request', { label, pageIndex, offset, target: pageTarget });
+      const payload = await fetchPage(pageTarget, offset);
+      const page = parseFullSearchPayload(payload, params, cellBbox);
+      if (pageIndex === 0) totalResults = page.totalResults;
+      rawResultsCount += page.rawResultsCount;
 
-        if (pageIndex === 0) {
-          totalResults = page.totalResults;
-          rawResultsCount = page.rawResultsCount;
-        }
+      const freshInCell = page.results.filter(result => !cellIds.has(result.id));
+      freshInCell.forEach(result => cellIds.add(result.id));
+      cellResults.push(...freshInCell);
+      const fresh = addUniqueResults(freshInCell);
+      pagesScanned++;
+      const hasNextPage = page.rawResultsCount > 0 && offset + ROWS_PER_PAGE < Math.min(page.totalResults, MAX_OFFSET);
+      onProgress?.({ results: fresh, hasNextPage, pageIndex });
+      logger.log('full_search_page', {
+        label,
+        pageIndex,
+        offset,
+        rawResultsCount: page.rawResultsCount,
+        filteredResultsCount: page.results.length,
+        newUniqueResultsCount: fresh.length,
+        totalResults: page.totalResults,
+        hasNextPage,
+      });
 
-        const freshCellResults: SearchResult[] = [];
-        for (const result of page.results) {
-          if (!cellSeenIds.has(result.id)) {
-            cellSeenIds.add(result.id);
-            cellResults.push(result);
-            freshCellResults.push(result);
-          }
-        }
-
-        const newResults = addUniqueResults(freshCellResults);
-        progressTracker({ ...page, results: newResults });
-        logger.log('map_markers_page', {
-          label,
-          pageIndex,
-          offset,
-          boundingBox: cell,
-          rawResultsCount: page.rawResultsCount,
-          filteredResultsCount: page.results.length,
-          newUniqueResultsCount: newResults.length,
-          totalResults: page.totalResults,
-          hasNextPage: page.hasNextPage,
-        });
-
-        if (!page.hasNextPage) break;
-        if (params.maxResults && allResults.length >= params.maxResults) break;
-
-        offset += 100;
-        pageIndex++;
-        await sleep(politeDelay(PAGE_DELAY_MS));
-      } catch (error: any) {
-        if (error.message.includes('403') && !retried) {
-          console.log(`  🔄 ${label}: session expired, re-bootstrapping...`);
-          logger.log('map_markers_rebootstrap', {
-            label,
-            boundingBox: cell,
-            reason: '403',
-          });
-          try {
-            cachedSession = null;
-            session = await bootstrapSession(params, logger);
-            if (session.headers['x-booking-csrf-token']) {
-              cachedSession = session;
-              cachedSessionTime = Date.now();
-            }
-            retried = true;
-            continue;
-          } catch {
-            console.log(`  ❌ ${label}: re-bootstrap failed`);
-          }
-        }
-
-        logger.log('map_markers_error', {
-          label,
-          boundingBox: cell,
-          pageIndex,
-          offset,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        throw error;
-      }
+      staleRows = freshInCell.length === 0 ? staleRows + 1 : 0;
+      if (!hasNextPage || staleRows >= 2 || maxReached()) break;
+      await sleep(politeDelay(PAGE_DELAY_MS));
     }
 
-    logger.log('map_markers_cell_completed', {
-      label,
-      boundingBox: cell,
-      filteredResultsCount: cellResults.length,
-      rawResultsCount,
-      totalResults,
-    });
-
-    return { cellResults, totalResults, rawResultsCount };
+    return { results: cellResults, totalResults, rawResultsCount };
   };
 
-  if (!params.exhaustive && !useBboxSearch) {
-    // Quick mode: FullSearch with offset pagination (city-based)
-    console.log(`🔍 Quick search via FullSearch (25/page, max ${params.maxResults || 'unlimited'} results)...`);
-    let offset = 0;
-    let pageIndex = 0;
-    let retried = false;
-
-    while (true) {
-      try {
-        const body = buildFullSearchBody(params, session, offset);
-        logger.log('full_search_request', {
-          pageIndex,
-          offset,
-          filters: buildFilterString(params),
-        });
-        const data = await fetchGraphQL(session, body);
-        const page = parseFullSearchResponse(data, params, pageIndex);
-
-        // Deduplicate
-        const newResults: SearchResult[] = [];
-        for (const r of page.results) {
-          if (!seenIds.has(r.id)) {
-            seenIds.add(r.id);
-            newResults.push(r);
-          }
-        }
-
-        allResults.push(...newResults);
-        progressTracker({ ...page, results: newResults });
-        logger.log('full_search_page', {
-          pageIndex,
-          offset,
-          filteredResultsCount: page.results.length,
-          newUniqueResultsCount: newResults.length,
-          hasNextPage: page.hasNextPage,
-        });
-
-        if (!page.hasNextPage) break;
-        if (params.maxResults && allResults.length >= params.maxResults) break;
-
-        offset += 25;
-        pageIndex++;
-        await sleep(politeDelay(PAGE_DELAY_MS));
-      } catch (error: any) {
-        if (error.message.includes('403') && !retried) {
-          console.log('  🔄 Session expired, re-bootstrapping...');
-          logger.log('full_search_rebootstrap', {
-            pageIndex,
-            offset,
-            reason: '403',
-          });
-          try {
-            cachedSession = null;
-            session = await bootstrapSession(params, logger);
-            if (session.headers['x-booking-csrf-token']) {
-              cachedSession = session;
-              cachedSessionTime = Date.now();
-            }
-            retried = true;
-            continue;
-          } catch {
-            console.log('  ❌ Re-bootstrap failed, falling back to SSR');
-          }
-        }
-
-        if (error.message.includes('GraphQL error')) {
-          console.log(`  ⚠️  ${error.message}`);
-          console.log('  Falling back to SSR...');
-        }
-        logger.log('full_search_error', {
-          pageIndex,
-          offset,
-          error: error instanceof Error ? error.message : String(error),
-          fallback: 'ssr',
-        });
-
-        const ssrResults = await searchBookingSSR(params, session, seenIds, params.maxResults ? params.maxResults - allResults.length : undefined, progressTracker);
-        allResults.push(...ssrResults);
-        break;
+  /** Server-rendered fallback: walk `&offset=N` pages of the searchresults URL. */
+  const searchViaSsr = async (): Promise<void> => {
+    console.log('  📄 No FullSearch template — harvesting server-rendered result pages');
+    const page = session!.page;
+    const areaBbox = target!.kind === 'bbox' ? target!.bbox : undefined;
+    for (let offset = 0, pageIndex = 0; offset < MAX_OFFSET; offset += 25, pageIndex++) {
+      const url = new URL(session!.searchUrl);
+      if (offset > 0) url.searchParams.set('offset', String(offset));
+      await page.goto(url.toString(), { waitUntil: 'domcontentloaded', timeout: 90000 });
+      await page.waitForSelector('[data-testid="property-card"]', { timeout: 20000 }).catch(() => {});
+      const blobs: string[] = await page.$$eval('script[type="application/json"]', (els: any[]) => els.map(el => el.textContent || ''));
+      const found = new Map<string, any>();
+      for (const blob of blobs) {
+        try { harvestResultObjects(JSON.parse(blob), found); } catch { /* ignore */ }
       }
+      const parsed = [...found.values()]
+        .map(raw => parseSearchResult(raw, params))
+        .filter((r): r is SearchResult => !!r)
+        .filter(r => !areaBbox || isInsideBbox(r, areaBbox));
+      const fresh = addUniqueResults(filterSearchResults(parsed, params));
+      pagesScanned++;
+      onProgress?.({ results: fresh, hasNextPage: found.size > 0, pageIndex });
+      logger.log('ssr_page', { pageIndex, offset, harvested: found.size, newUniqueResultsCount: fresh.length });
+      if (found.size === 0 || maxReached()) break;
+      await sleep(politeDelay(2000));
     }
-  } else if (useBboxSearch && !params.exhaustive) {
-    // Quick bbox mode: MapMarkersDesktop on the single viewport bbox (no grid)
-    if (!bbox) throw new Error('Bbox search requires a bounding box');
+  };
 
-    console.log(`🔍 Quick bbox search via MapMarkersDesktop (100/page, max ${params.maxResults || 'unlimited'} results)...`);
-    let offset = 0;
-    let pageIndex = 0;
-    let retried = false;
-
-    while (true) {
-      try {
-        const body = buildMapMarkersBody(params, session, bbox, offset);
-        logger.log('map_markers_request', {
-          label: 'Quick bbox',
-          pageIndex,
-          offset,
-          boundingBox: bbox,
-          filters: buildFilterString(params),
-        });
-        const data = await fetchGraphQL(buildMapSession(session), body);
-        const page = parseMapMarkersResponse(data, params, pageIndex);
-
-        const newResults: SearchResult[] = [];
-        for (const r of page.results) {
-          if (!seenIds.has(r.id)) {
-            seenIds.add(r.id);
-            newResults.push(r);
-          }
-        }
-
-        allResults.push(...newResults);
-        progressTracker({ ...page, results: newResults });
-        logger.log('map_markers_page', {
-          label: 'Quick bbox',
-          pageIndex,
-          offset,
-          boundingBox: bbox,
-          rawResultsCount: page.rawResultsCount,
-          filteredResultsCount: page.results.length,
-          newUniqueResultsCount: newResults.length,
-          totalResults: page.totalResults,
-          hasNextPage: page.hasNextPage,
-        });
-
-        if (!page.hasNextPage) break;
-        if (params.maxResults && allResults.length >= params.maxResults) break;
-
-        offset += 100;
-        pageIndex++;
-        await sleep(politeDelay(PAGE_DELAY_MS));
-      } catch (error: any) {
-        if (error.message.includes('403') && !retried) {
-          console.log('  🔄 Session expired, re-bootstrapping...');
-          logger.log('map_markers_rebootstrap', {
-            label: 'Quick bbox',
-            boundingBox: bbox,
-            pageIndex,
-            offset,
-            reason: '403',
+  try {
+    if (!session.template) {
+      await searchViaSsr();
+    } else if (!params.exhaustive || target.kind === 'destination') {
+      const label = target.kind === 'destination'
+        ? `${target.destination.destType.toLowerCase()} ${target.destination.destId}`
+        : 'bbox';
+      console.log(`🔍 Booking FullSearch (${label}, ${ROWS_PER_PAGE}/page, max ${params.maxResults || 'unlimited'} results)...`);
+      const out = await searchTarget(target, label);
+      console.log(`  ↳ Booking reports ${out.totalResults} properties`);
+    } else {
+      // Exhaustive: bbox quadrant subdivision (Booking caps one query at ~1000 rows).
+      console.log('🔍 Exhaustive Booking search via FullSearch + bbox subdivision...');
+      let visitedCells = 0;
+      const visitCell = async (cell: BoundingBox, depth: number, seeded?: ParsedPage): Promise<void> => {
+        visitedCells++;
+        const label = `Cell ${visitedCells} (depth ${depth})`;
+        console.log(`  📍 ${label}`);
+        try {
+          const cellOut = seeded ?? await searchTarget({ kind: 'bbox', bbox: cell }, label);
+          const signal = Math.max(cellOut.results.length, cellOut.rawResultsCount, cellOut.totalResults);
+          console.log(`    ↳ ${cellOut.results.length} filtered / ${cellOut.rawResultsCount} raw / ${cellOut.totalResults} reported`);
+          logger.log('subdivision_cell_evaluated', {
+            label, depth, boundingBox: cell,
+            filteredResultsCount: cellOut.results.length,
+            rawResultsCount: cellOut.rawResultsCount,
+            totalResults: cellOut.totalResults,
           });
-          try {
-            cachedSession = null;
-            session = await bootstrapSession(params, logger);
-            if (session.headers['x-booking-csrf-token']) {
-              cachedSession = session;
-              cachedSessionTime = Date.now();
-            }
-            retried = true;
-            continue;
-          } catch {
-            console.log('  ❌ Re-bootstrap failed, falling back to SSR');
+          // Only subdivide when the cell hit Booking's per-query cap.
+          const capped = cellOut.totalResults > cellOut.rawResultsCount + 5;
+          if (!capped || maxReached() || !shouldProbeChildren({
+            bbox: cell, depth, resultCount: signal, config: BOOKING_SUBDIVISION_CONFIG,
+          })) {
+            return;
           }
+          const children = subdivideBbox(cell).filter(child => !params.circle || bboxIntersectsCircle(child, params.circle));
+          const parentIds = new Set(cellOut.results.map(r => r.id));
+          const childOuts: Array<{ cell: BoundingBox; out: ParsedPage }> = [];
+          const childIds = new Set<string>();
+          for (const child of children) {
+            await sleep(politeDelay(CELL_DELAY_MS));
+            const out = await searchTarget({ kind: 'bbox', bbox: child }, `${label} -> probe`);
+            childOuts.push({ cell: child, out });
+            out.results.forEach(r => childIds.add(r.id));
+            if (maxReached()) break;
+          }
+          const newIdCount = countNewChildIds(parentIds, childIds);
+          const gain = hasMeaningfulChildGain({ parentCount: parentIds.size, newIdCount, config: BOOKING_SUBDIVISION_CONFIG });
+          const recurse = shouldRecurseIntoChildren({ depth, parentCount: parentIds.size, newIdCount, config: BOOKING_SUBDIVISION_CONFIG });
+          logger.log('subdivision_children_probed', { label, depth, newChildIdCount: newIdCount, gain, shouldRecurse: recurse });
+          if (!recurse || maxReached()) return;
+          for (const child of childOuts) {
+            await visitCell(child.cell, depth + 1, child.out);
+            if (maxReached()) break;
+          }
+        } catch (error: any) {
+          logger.log('subdivision_error', { label, depth, boundingBox: cell, error: error?.message ?? String(error) });
+          console.log(`  ⚠️  ${label} error: ${error?.message ?? error}`);
         }
-        logger.log('map_markers_error', {
-          label: 'Quick bbox',
-          boundingBox: bbox,
-          pageIndex,
-          offset,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        console.log(`  ⚠️  MapMarkers error: ${error.message}`);
-        break;
-      }
+      };
+      await visitCell(target.bbox, 0);
     }
-  } else {
-    // Exhaustive mode: MapMarkersDesktop with bbox subdivision
-    if (!bbox) {
-      throw new Error('Exhaustive Booking search requires a bounding box (--bbox or --location)');
+  } catch (error: any) {
+    logger.log('search_error', { error: error?.message ?? String(error), resultsSoFar: allResults.length });
+    if (allResults.length === 0) {
+      await session.close();
+      await logger.flush().catch(() => {});
+      throw error;
     }
-
-    console.log('🔍 Exhaustive search via MapMarkersDesktop + quadrant subdivision...');
-
-    let visitedCells = 0;
-    const visitCell = async (
-      cell: BoundingBox,
-      depth: number,
-      seededResults?: MapMarkersCellSearchResult,
-    ): Promise<void> => {
-      visitedCells++;
-      const label = `Cell ${visitedCells} (depth ${depth})`;
-      console.log(`  📍 ${label}`);
-
-      try {
-        const { cellResults, totalResults, rawResultsCount } = seededResults
-          ? seededResults
-          : await searchMapMarkersCell(cell, label);
-        const subdivisionSignal = getSubdivisionSignal(
-          cellResults.length,
-          rawResultsCount,
-          totalResults,
-        );
-        console.log(
-          `    ↳ ${cellResults.length} filtered / ${rawResultsCount} raw / ${totalResults} reported results`,
-        );
-        logger.log('subdivision_cell_evaluated', {
-          label,
-          depth,
-          boundingBox: cell,
-          filteredResultsCount: cellResults.length,
-          rawResultsCount,
-          totalResults,
-          subdivisionSignal,
-        });
-
-        if (
-          !shouldProbeChildren({
-            bbox: cell,
-            depth,
-            resultCount: subdivisionSignal,
-            config: BOOKING_SUBDIVISION_CONFIG,
-          }) ||
-          (params.maxResults && allResults.length >= params.maxResults)
-        ) {
-          logger.log('subdivision_stopped', {
-            label,
-            depth,
-            boundingBox: cell,
-            reason:
-              params.maxResults && allResults.length >= params.maxResults
-                ? 'max_results'
-                : 'insufficient_density',
-            filteredResultsCount: cellResults.length,
-            rawResultsCount,
-            totalResults,
-          });
-          return;
-        }
-
-        const childCells = subdivideBbox(cell).filter(
-          (child) => !params.circle || bboxIntersectsCircle(child, params.circle),
-        );
-        if (childCells.length === 0) {
-          logger.log('subdivision_stopped', {
-            label,
-            depth,
-            boundingBox: cell,
-            reason: 'no_child_cells',
-          });
-          return;
-        }
-
-        console.log(`    ↳ probing ${childCells.length} exact quadrants`);
-        const parentIds = new Set(cellResults.map((result) => result.id));
-        const childSearches: Array<{ cell: BoundingBox; result: MapMarkersCellSearchResult }> = [];
-        const childUnionIds = new Set<string>();
-
-        for (const child of childCells) {
-          await sleep(politeDelay(CELL_DELAY_MS));
-          const childLabel = `${label} -> probe`;
-          const childResult = await searchMapMarkersCell(
-            child,
-            childLabel,
-          );
-          childSearches.push({ cell: child, result: childResult });
-          for (const result of childResult.cellResults) {
-            childUnionIds.add(result.id);
-          }
-          if (params.maxResults && allResults.length >= params.maxResults) {
-            break;
-          }
-        }
-
-        const newIdCount = countNewChildIds(parentIds, childUnionIds);
-        const gain = hasMeaningfulChildGain({
-          parentCount: parentIds.size,
-          newIdCount,
-          config: BOOKING_SUBDIVISION_CONFIG,
-        });
-        const shouldRecurse = shouldRecurseIntoChildren({
-          depth,
-          parentCount: parentIds.size,
-          newIdCount,
-          config: BOOKING_SUBDIVISION_CONFIG,
-        });
-        const forcedRecursion = depth < BOOKING_SUBDIVISION_CONFIG.forceProbeDepth;
-        console.log(
-          `    ↳ child cells added ${newIdCount} new IDs beyond parent${
-            forcedRecursion && !gain ? ' (continuing to forced depth)' : ''
-          }`,
-        );
-        logger.log('subdivision_children_probed', {
-          label,
-          depth,
-          boundingBox: cell,
-          parentFilteredCount: parentIds.size,
-          newChildIdCount: newIdCount,
-          childCellCount: childCells.length,
-          forcedRecursion,
-          gain,
-          shouldRecurse,
-        });
-
-        if (!shouldRecurse || (params.maxResults && allResults.length >= params.maxResults)) {
-          return;
-        }
-
-        for (const child of childSearches) {
-          await visitCell(child.cell, depth + 1, child.result);
-          if (params.maxResults && allResults.length >= params.maxResults) {
-            break;
-          }
-        }
-      } catch (error: any) {
-        logger.log('subdivision_error', {
-          label,
-          depth,
-          boundingBox: cell,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        console.log(`  ⚠️  ${label} error: ${error.message}`);
-      }
-    };
-
-    await visitCell(bbox, 0);
+    console.log(`  ⚠️  ${error?.message ?? error} — returning ${allResults.length} results collected so far`);
+  } finally {
+    await session?.close();
   }
 
   logger.log('search_completed', {
     totalResults: allResults.length,
     pagesScanned,
     mode: params.exhaustive ? 'exhaustive' : 'quick',
-    useBboxSearch,
+    target,
   });
+  await logger.flush().catch(() => {});
   console.log(`✅ Booking search complete: ${allResults.length} unique results, ${pagesScanned} pages scanned`);
   return { results: allResults, pagesScanned };
 }
 
 export const __bookingSearchTestUtils = {
   buildFilterString,
-  buildMapMarkersBody,
-  getSubdivisionSignal,
+  buildFullSearchBody,
+  buildSearchUrl,
+  parseFullSearchPayload,
+  pickAutocompleteDestination,
+  parseAutocompleteResponse,
+  autocompleteQueryVariants,
+  ensureMinBbox,
+  assertProxyPolicy,
 };

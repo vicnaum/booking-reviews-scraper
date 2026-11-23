@@ -26,7 +26,7 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as turf from '@turf/turf';
-import { buildProxyUrl, resolveProxyProtocol } from '../config.js';
+import { buildProxyUrl, getProxyPasswordFromEnv, resolveProxyProtocol } from '../config.js';
 
 // --- Configuration ---
 const AIRBNB_BASE_URL = 'https://www.airbnb.com';
@@ -43,7 +43,7 @@ function getProxyConfig() {
     host: process.env.PROXY_HOST || '',
     port: parseInt(process.env.PROXY_PORT || '0'),
     username: process.env.PROXY_USERNAME || '',
-    password: process.env.PROXY_PASSWORD || ''
+    password: getProxyPasswordFromEnv()
   };
   const proxyUrl = buildProxyUrl(PROXY_CONFIG);
   return { USE_PROXY, PROXY_CONFIG, proxyUrl };

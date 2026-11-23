@@ -39,8 +39,9 @@ function resolvePlatform(input: string | undefined, opts: any): Platform | null 
  */
 function setupProxy(opts: any): void {
   if (opts.proxy === false) {
-    // --no-proxy flag
+    // --no-proxy flag (explicit opt-out; Booking search otherwise refuses to run unproxied)
     process.env.USE_PROXY = 'false';
+    process.env.REVIEWR_NO_PROXY = 'true';
     return;
   }
 
@@ -294,6 +295,7 @@ program
   .option('--stars <n>', 'Booking: Star ratings (comma-separated)')
   .option('--free-cancellation', 'Booking: Free cancellation only')
   .option('--dest-id <id>', 'Booking: Direct destination ID')
+  .option('--dest-type <type>', 'Booking: destination type for --dest-id (city, district, region, ...)', 'city')
   .action(async (cmdOpts: any, command: Command) => {
     const opts = command.optsWithGlobals();
     setupProxy(opts);
@@ -324,6 +326,7 @@ program
       stars: cmdOpts.stars ? cmdOpts.stars.split(',').map(Number) : undefined,
       freeCancellation: cmdOpts.freeCancellation || undefined,
       destId: cmdOpts.destId || undefined,
+      destType: cmdOpts.destId ? cmdOpts.destType : undefined,
     } as any);
   });
 

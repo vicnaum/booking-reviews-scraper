@@ -15,16 +15,27 @@ const NOMINATIM_BASE_URL = 'https://nominatim.openstreetmap.org';
 export async function geocodeLocation(query: string): Promise<BoundingBox> {
   console.log(`🌍 Geocoding "${query}" using OpenStreetMap...`);
 
-  const url = new URL(`${NOMINATIM_BASE_URL}/search`);
-  url.searchParams.set('q', query);
-  url.searchParams.set('format', 'json');
-  url.searchParams.set('limit', '1');
+  const search = async (featureType?: string): Promise<any[]> => {
+    const url = new URL(`${NOMINATIM_BASE_URL}/search`);
+    url.searchParams.set('q', query);
+    url.searchParams.set('format', 'json');
+    url.searchParams.set('limit', '1');
+    if (featureType) url.searchParams.set('featureType', featureType);
+    const response = await makeRequest(url.toString(), {
+      headers: { 'User-Agent': 'ReviewrSearch/1.0' },
+    });
+    return JSON.parse(response.data);
+  };
 
-  const response = await makeRequest(url.toString(), {
-    headers: { 'User-Agent': 'ReviewrSearch/1.0' },
-  });
-
-  const results = JSON.parse(response.data);
+  // Prefer areas (country/state/city/suburb boundaries): a plain query for e.g.
+  // "Gdańsk Śródmieście" returns the railway halt of that name, not the district.
+  let results = await search('settlement');
+  if (results.length && !['boundary', 'place'].includes(results[0].class)) {
+    results = [];
+  }
+  if (!results.length) {
+    results = await search();
+  }
   if (!results.length) {
     throw new Error(`Could not geocode "${query}". No results from Nominatim.`);
   }

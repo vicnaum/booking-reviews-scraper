@@ -22,14 +22,20 @@ export async function runSearch(params: SearchParams): Promise<SearchOutput> {
   const startTime = Date.now();
 
   // 1. Validate
-  if (!params.location && !params.boundingBox) {
-    throw new Error('Either --location or --bbox is required');
+  const bookingDestId = params.platform === 'booking' ? (params as any).destId : undefined;
+  if (!params.location && !params.boundingBox && !bookingDestId) {
+    throw new Error('Either --location or --bbox is required (Booking also accepts --dest-id)');
   }
 
-  // 2. Resolve bounding box
+  // 2. Resolve bounding box.
+  // Booking quick searches by --location / --dest-id use Booking's own destination
+  // (autocomplete → dest_id/dest_type, paginated result list) instead of a geocoded bbox,
+  // so districts like "Gdańsk Śródmieście" match what booking.com itself returns.
   let bbox: BoundingBox | undefined = params.boundingBox;
+  const bookingDestinationSearch =
+    params.platform === 'booking' && !bbox && !params.exhaustive && !!(params.location || bookingDestId);
 
-  if (!bbox && params.location) {
+  if (!bbox && params.location && !bookingDestinationSearch) {
     bbox = await geocodeLocation(params.location);
   }
 
@@ -86,6 +92,7 @@ export async function runSearch(params: SearchParams): Promise<SearchOutput> {
         stars: (params as any).stars,
         freeCancellation: (params as any).freeCancellation,
         destId: (params as any).destId,
+        destType: (params as any).destType,
       };
       const out = await searchBooking(bookingParams, onProgress);
       results = out.results;

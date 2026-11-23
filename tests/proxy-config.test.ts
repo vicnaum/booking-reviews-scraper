@@ -128,3 +128,29 @@ test('applying a resolved proxy propagates the protocol to runtime scrapers', ()
     assert.equal(process.env.PROXY_PORT, '1001');
   });
 });
+
+test('PROXY_COUNTRY and proxy sessions are appended to the proxy password', async () => {
+  const { getProxyPasswordFromEnv, buildPlaywrightLaunchOptionsFromEnv } = await import('../src/config.js');
+  const previous = { ...process.env };
+  try {
+    process.env.PROXY_HOST = 'proxy.example';
+    process.env.PROXY_PORT = '1000';
+    process.env.PROXY_USERNAME = 'user';
+    process.env.PROXY_PASSWORD = 'secret';
+    process.env.USE_PROXY = 'true';
+    delete process.env.PROXY_COUNTRY;
+    assert.equal(getProxyPasswordFromEnv(), 'secret');
+    process.env.PROXY_COUNTRY = 'pl';
+    assert.equal(getProxyPasswordFromEnv(), 'secret_country-PL');
+    assert.equal(getProxyPasswordFromEnv('ab12'), 'secret_country-PL_session-ab12');
+    const launch = buildPlaywrightLaunchOptionsFromEnv({ proxySession: 'xy' }) as any;
+    assert.equal(launch.proxy.password, 'secret_country-PL_session-xy');
+    process.env.PROXY_PASSWORD = 'secret_country-DE';
+    assert.equal(getProxyPasswordFromEnv(), 'secret_country-DE');
+  } finally {
+    for (const key of ['PROXY_HOST', 'PROXY_PORT', 'PROXY_USERNAME', 'PROXY_PASSWORD', 'USE_PROXY', 'PROXY_COUNTRY']) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});

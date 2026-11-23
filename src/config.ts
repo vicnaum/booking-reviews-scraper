@@ -286,11 +286,33 @@ export function bootstrapRuntimeProxyEnv(
 }
 
 /**
+ * Proxy password with optional exit targeting appended (Evomi-style password parameters):
+ * - PROXY_COUNTRY=PL  → `<password>_country-PL` (exit IPs from that country; Booking prices
+ *   and result sets vary by visitor country)
+ * - proxySession      → `<password>_session-<id>` (sticky exit IP for one browser session)
+ * Parameters already present in PROXY_PASSWORD are left alone.
+ */
+export function getProxyPasswordFromEnv(proxySession?: string): string {
+  let password = process.env.PROXY_PASSWORD || '';
+  if (!password) return password;
+  const country = (process.env.PROXY_COUNTRY || '').trim();
+  if (country && !/_country-/i.test(password)) {
+    password += `_country-${country.toUpperCase()}`;
+  }
+  if (proxySession && !/_session-/i.test(password)) {
+    password += `_session-${proxySession.replace(/[^A-Za-z0-9]/g, '')}`;
+  }
+  return password;
+}
+
+/**
  * Playwright launch options that route the browser through the configured proxy
  * (PROXY_* env vars), unless USE_PROXY=false. Used by every Playwright entry point so
  * browser traffic never silently leaves via the local IP.
  */
-export function buildPlaywrightLaunchOptionsFromEnv(): Record<string, unknown> {
+export function buildPlaywrightLaunchOptionsFromEnv(
+  options: { proxySession?: string } = {},
+): Record<string, unknown> {
   const launchOptions: Record<string, unknown> = { headless: true };
   if (process.env.USE_PROXY === 'false' || !process.env.PROXY_HOST) {
     return launchOptions;
@@ -301,7 +323,8 @@ export function buildPlaywrightLaunchOptionsFromEnv(): Record<string, unknown> {
     server: `${protocol}://${process.env.PROXY_HOST}${port > 0 ? `:${port}` : ''}`,
   };
   if (process.env.PROXY_USERNAME) proxy.username = process.env.PROXY_USERNAME;
-  if (process.env.PROXY_PASSWORD) proxy.password = process.env.PROXY_PASSWORD;
+  const password = getProxyPasswordFromEnv(options.proxySession);
+  if (password) proxy.password = password;
   launchOptions.proxy = proxy;
   return launchOptions;
 }
